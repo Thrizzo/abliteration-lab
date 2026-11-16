@@ -6,140 +6,141 @@
 <title>Abliteration Lab</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="wiz">
 <div class="tip" id="tip"></div>
 <div class="toast" id="toast"></div>
-<div class="shell">
-  <aside class="rail">
-    <div class="brand"><div class="logo"></div><div><b>Abliteration</b><small>GLM family · research console</small></div></div>
-    <nav class="nav" id="nav">
-      <button data-view="abl"><span class="ic">≋</span>Abliterate</button>
-      <button data-view="lab"><span class="ic">⌁</span>Lab</button>
-      <button data-view="chat"><span class="ic">⇄</span>A/B chat</button>
-      <button data-view="dash"><span class="ic">◈</span>System</button>
-    </nav>
-    <div class="spacer"></div>
-    <div class="sysbox">
-      <div class="row"><span><span class="dot" id="dotPipe"></span> pipeline</span><span id="sysPipe" class="mono">idle</span></div>
-      <div class="row"><span><span class="dot" id="dotLab"></span> lab model</span><span id="sysLab" class="mono">—</span></div>
-      <div class="row"><span><span class="dot" id="dotOll"></span> ollama</span><span id="sysOll" class="mono">—</span></div>
-      <div><div class="row"><span id="gpuName">GPU</span><span id="gpuVal" class="mono">—</span></div><div class="meter"><i id="gpuBar"></i></div></div>
-      <div class="row"><span>disk free</span><span id="diskVal" class="mono">—</span></div>
+
+<header class="wizhead">
+  <div class="brand"><div class="logo"></div><div><b>Abliteration</b><small>GLM family</small></div></div>
+  <ol class="stages">
+    <li data-stage="model"><span class="n">1</span><div><b>Model</b><small id="stModel">choose a GLM model</small></div></li>
+    <li data-stage="abl"><span class="n">2</span><div><b>Abliterate</b><small id="stAbl">not run</small></div></li>
+    <li data-stage="compare"><span class="n">3</span><div><b>Compare</b><small id="stCmp">before vs after</small></div></li>
+  </ol>
+  <div class="sysmini">
+    <span title="GPU"><span class="dot" id="dotGpu"></span><span id="gpuVal" class="mono">—</span></span>
+    <span title="pipeline"><span class="dot" id="dotPipe"></span><span id="sysPipe" class="mono">idle</span></span>
+    <span title="Ollama"><span class="dot" id="dotOll"></span>ollama</span>
+    <button class="btn sm" id="dataToggle">datasets</button>
+    <button class="btn sm" id="sbomToggle">SBOM</button>
+    <button class="btn sm" id="logToggle">log</button>
+  </div>
+</header>
+
+<main class="wizmain">
+
+  <!-- ============================================================ 1 model -->
+  <section class="stage" id="s-model">
+    <h2>Which GLM model?</h2>
+    <p class="lead">Every GLM family is supported: the small Edge models run on this PC; GLM-4 needs CPU offload; the MoE giants (GLM-4.5/4.6, GLM-5.x) need a multi-GPU node and are listed so you can see what the method does there. Models are downloaded once from Hugging Face (safetensors only, no remote code).</p>
+    <div class="cards" id="modelCards"></div>
+    <div class="row" style="margin-top:12px"><input type="text" id="repoInput" placeholder="…or any other GLM repo id, e.g. zai-org/GLM-4.5-Air" style="max-width:460px"><button class="btn" id="useRepo">Use this repo</button></div>
+    <div class="card" id="modelDetail" style="display:none"></div>
+    <div class="row"><button class="btn primary big" id="toAbl" disabled>Continue to Abliterate →</button></div>
+  </section>
+
+  <!-- ============================================================ 2 abliterate -->
+  <section class="stage" id="s-abl">
+    <h2>Abliterate <span class="mono accent" id="ablModel"></span></h2>
+    <p class="lead">One click runs the whole method: find the refusal direction, test it layer by layer, remove it from the weights, validate, and put both models into Ollama. Each step below explains itself while it runs. Earlier runs of this model can be opened at the bottom.</p>
+    <div class="card runbox">
+      <div class="row">
+        <button class="btn primary big" id="runBtn">▶ Run abliteration</button>
+        <button class="btn danger" id="stopBtn" disabled>■ Stop</button>
+        <label class="small"><input type="checkbox" id="optPause"> pause at the layer choice</label>
+        <label class="small"><input type="checkbox" id="optOllama" checked> finish in Ollama (needed for Compare)</label>
+        <span class="small" id="runInfo"></span>
+      </div>
+      <details><summary>Advanced</summary><div class="row">
+        <label class="small">device <select id="optDevice"><option value="cuda">cuda (one GPU)</option><option value="auto">auto (multi-GPU / CPU offload)</option></select></label>
+        <label class="small"><input type="checkbox" id="optVerify" checked> reload and validate after the edit</label>
+        <label class="small">prompts per group <input type="number" id="optTrain" value="256" min="16" max="2048" style="width:80px"></label>
+        <label class="small">test prompts <input type="number" id="optTest" value="16" min="4" max="64" style="width:70px"></label>
+        <label class="small">layer range <input type="text" id="optRange" value="0.2-0.8" style="width:80px"></label>
+        <label class="small">max new tokens <input type="number" id="optTokens" value="64" min="16" max="256" style="width:70px"></label>
+        <label class="small">batch <input type="number" id="optBatch" value="16" min="1" max="64" style="width:60px"></label>
+        <label class="small">gen batch <input type="number" id="optGenBatch" value="4" min="1" max="32" style="width:60px"></label>
+        <label class="small"><input type="checkbox" id="optRemote"> trust remote code (legacy ChatGLM)</label>
+      </div></details>
+      <div class="progress"><i id="runBar"></i></div>
     </div>
-  </aside>
-  <main class="main">
-    <div class="topbar">
-      <div><h1 id="title">Abliterate</h1><div class="sub" id="subtitle"></div></div>
-      <div class="runsel"><span>run</span><select id="runSel"></select></div>
+    <div class="card hero"><div class="inner">
+      <div class="text"><div class="stats" id="heroStats"></div></div>
+      <div class="stream" id="stream"></div>
+    </div></div>
+    <div id="guide"></div>
+    <div class="card" id="runsBox" style="display:none"><h3>Earlier runs of this model</h3><div class="row"><select id="runSel"></select><span class="small">opening an earlier run only changes what the guide and Compare show</span></div></div>
+    <div class="row"><button class="btn" id="backModel">← Model</button><button class="btn primary big" id="toCmp" disabled>Continue to Compare →</button></div>
+  </section>
+
+  <!-- ============================================================ 3 compare -->
+  <section class="stage" id="s-compare">
+    <h2>Before vs after <span class="mono accent" id="cmpModel"></span></h2>
+    <p class="lead">The same prompt goes to the original and the abliterated model in Ollama. Refusal phrases are highlighted.</p>
+    <div class="card">
+      <div class="row"><span id="chatStatus" class="small">…</span></div>
+      <div id="chatPresets"></div>
+      <textarea id="chatPrompt" rows="3" placeholder="Ask both models…"></textarea>
+      <div class="row"><button class="btn primary big" id="chatSend">Send to both</button><button class="btn" id="chatStop" disabled>Stop</button><label class="small">max tokens <input type="number" id="chatTokens" value="300" min="32" max="1024" style="width:80px"></label></div>
+      <div class="pair">
+        <div class="ans" id="chatBase"><div class="h"><span id="chatBaseLbl">original</span><span id="chatBaseBadge"></span></div><div class="t"></div></div>
+        <div class="ans" id="chatAbl"><div class="h"><span id="chatAblLbl">abliterated</span><span id="chatAblBadge"></span></div><div class="t"></div></div>
+      </div>
+      <details><summary>Earlier exchanges</summary><div id="chatHistBody" class="small">none yet</div></details>
+      <details id="chatRecorded"><summary>The run's recorded A/B test</summary><div id="chatRecordedBody"></div></details>
     </div>
 
-    <!-- =============================================== abliterate -->
-    <section class="view" id="v-abl">
-      <div class="card hero"><div class="inner">
-        <div class="text">
-          <h2>Pick a GLM model, press Run, watch the refusal direction disappear.</h2>
-          <p>Every prompt flows through the model's layers. Harmful requests push the residual stream along one direction; abliteration measures that direction, tests which layer's version removes refusals best, and projects it out of the weights. The guide below explains each step as it happens, with what to look for and what changes for GLM-5.x.</p>
-          <div class="stats" id="heroStats"></div>
-        </div>
-        <div class="stream" id="stream"></div>
-      </div></div>
+    <details class="card explore"><summary><b>Explore the model's insides</b> <span class="small">load the base model into the lab, probe prompts, try other layers</span></summary>
+      <div class="row" style="margin-top:10px"><button class="btn primary" id="labLoad">Load base model into the lab</button><button class="btn" id="labUnload">Unload</button><span class="small" id="labInfo"></span></div>
+      <h3 style="margin-top:14px">Refusal meter <small>how strongly does each layer's refusal direction light up for a prompt?</small></h3>
+      <p class="sub">The last-token activation is projected onto every layer's own direction and scaled between the harmless mean (0) and the harmful mean (1) measured in the run.</p>
+      <div id="probePresets"></div>
+      <textarea id="probePrompt" rows="2" placeholder="Type any prompt…"></textarea>
+      <div class="row"><button class="btn" id="probeBtn">Probe</button><span class="small" id="probeInfo"></span></div>
+      <div id="probeOut"></div>
+      <h3 style="margin-top:18px">Try a layer live <small>temporary hooks, no weight change</small></h3>
+      <div class="row"><label>layer <input type="range" id="tryLayer" min="0" max="39" value="17"> <b class="mono" id="tryLayerVal">17</b></label><label class="small">max tokens <input type="number" id="tryTokens" value="64" min="16" max="200" style="width:70px"></label></div>
+      <textarea id="tryPrompts" rows="3"></textarea>
+      <div class="row"><button class="btn" id="tryBtn">Generate both</button><span class="small" id="tryInfo"></span></div>
+      <div id="tryOut"></div>
+    </details>
+    <div class="row"><button class="btn" id="backAbl">← Abliterate</button><button class="btn" id="toModelAgain">Start over with another model</button></div>
+  </section>
+</main>
 
-      <div class="card" id="modelCard">
-        <h3>1 · Model <small>Hugging Face repo or local folder · safetensors only, no remote code by default</small></h3>
-        <div class="row"><input type="text" id="repoInput" placeholder="THUDM/glm-edge-4b-chat" style="max-width:420px"><button class="btn" id="dlBtn">⬇ Download</button><span class="small" id="dlInfo"></span></div>
-        <div id="presets" class="row"></div>
-        <table id="modelsTable"></table>
-      </div>
+<!-- ============================================================ log drawer -->
+<aside class="drawer" id="drawer">
+  <div class="row" style="justify-content:space-between"><b>Process log</b><span class="small" id="pipeInfo"></span><button class="btn sm" id="drawerClose">close</button></div>
+  <div class="checks" id="envChecks" style="margin:8px 0"></div>
+  <div class="kv small" id="ollInfo"></div>
+  <div class="row"><button class="btn sm" id="ollUnload">Unload Ollama models from VRAM</button><button class="btn sm danger" id="pipeStop" disabled>■ Stop pipeline</button></div>
+  <div class="console" id="console">— no output yet —</div>
+</aside>
 
-      <div class="card" id="runCard">
-        <h3>2 · Run <small>measure → scan → choose → apply → verify → validate → GGUF → Ollama</small></h3>
-        <div class="row">
-          <span class="small">model <b class="mono" id="runModel">—</b></span>
-          <label class="small"><input type="checkbox" id="optPause"> pause at the layer choice</label>
-          <label class="small"><input type="checkbox" id="optOllama" checked> through Ollama (GGUF + import + A/B)</label>
-          <label class="small"><input type="checkbox" id="optVerify" checked> reload and validate after the edit</label>
-          <label class="small">device <select id="optDevice"><option value="cuda">cuda (one GPU)</option><option value="auto">auto (multi-GPU / CPU offload)</option></select></label>
-        </div>
-        <details><summary>Advanced</summary><div class="row">
-          <label class="small">prompts per group <input type="number" id="optTrain" value="256" min="16" max="2048" style="width:80px"></label>
-          <label class="small">test prompts <input type="number" id="optTest" value="16" min="4" max="64" style="width:70px"></label>
-          <label class="small">layer range <input type="text" id="optRange" value="0.2-0.8" style="width:80px"></label>
-          <label class="small">max new tokens <input type="number" id="optTokens" value="64" min="16" max="256" style="width:70px"></label>
-          <label class="small">batch <input type="number" id="optBatch" value="16" min="1" max="64" style="width:60px"></label>
-          <label class="small">gen batch <input type="number" id="optGenBatch" value="4" min="1" max="32" style="width:60px"></label>
-          <label class="small"><input type="checkbox" id="optRemote"> trust remote code (legacy ChatGLM)</label>
-        </div></details>
-        <div class="row"><button class="btn primary" id="runBtn">▶ Run abliteration</button><button class="btn danger" id="stopBtn" disabled>■ Stop</button><span class="small" id="runInfo"></span></div>
-        <div class="progress"><i id="runBar"></i></div>
-      </div>
 
-      <div id="guide"></div>
-    </section>
+<!-- ============================================================ datasets panel -->
+<section class="panel" id="dataPanel"><div class="inner">
+  <div class="row" style="justify-content:space-between"><div><h2>Datasets</h2><div class="small">the local JSONL copies the pipeline reads; every edit and removal is logged under <span class="mono">data/removed/</span> and <span class="mono">data/edits.jsonl</span></div></div><button class="btn sm" id="dataClose">close</button></div>
+  <div class="tabs" id="dataTabs"></div>
+  <div class="card" id="dataMeta"></div>
+  <div class="card">
+    <div class="row"><input type="text" id="dataQ" placeholder="search (substring, or regex with the box ticked)" style="max-width:520px"><label class="small"><input type="checkbox" id="dataRegex"> regex</label><select id="dataSource" style="display:none"></select><button class="btn" id="dataSearch">Search</button><span class="small" id="dataCount"></span></div>
+    <details><summary>Add a row</summary><div id="dataAddBox"></div></details>
+    <div class="pager"><button class="btn sm" id="dataPrev">◀</button><span id="dataPage"></span><button class="btn sm" id="dataNext">▶</button><span class="small">·</span><button class="btn sm danger" id="dataRemoveSel" disabled>remove selected</button><input type="text" id="dataReason" placeholder="reason (logged)" style="max-width:260px"></div>
+    <div id="dataRows"></div>
+  </div>
+  <details class="card"><summary>Removed rows (restorable)</summary><div id="dataRemoved"></div></details>
+</div></section>
 
-    <!-- =============================================== lab -->
-    <section class="view" id="v-lab">
-      <div class="card">
-        <h3>Resident model <small>base model + the selected run's directions, bf16</small></h3>
-        <p class="sub">Loads the untouched base model once (Ollama models are unloaded first). Pipeline stages that need the GPU unload it again.</p>
-        <div class="row"><button class="btn primary" id="labLoad">Load model</button><button class="btn" id="labUnload">Unload</button><span class="small" id="labInfo"></span></div>
-      </div>
-      <div class="card">
-        <h3>Refusal meter <small>how strongly does each layer's refusal direction light up for this prompt?</small></h3>
-        <p class="sub">The last-token activation is projected onto every layer's own direction and scaled between the harmless mean (0) and the harmful mean (1) measured in the run. Values near 1 mean "this looks like a request I would refuse" at that layer.</p>
-        <div id="probePresets"></div>
-        <textarea id="probePrompt" rows="2" placeholder="Type any prompt…"></textarea>
-        <div class="row"><button class="btn primary" id="probeBtn">Probe</button><span class="small" id="probeInfo"></span></div>
-        <div id="probeOut"></div>
-      </div>
-      <div class="card">
-        <h3>Try a layer live <small>temporary hooks, no weight change</small></h3>
-        <p class="sub">Pick any layer's candidate direction and remove it from every layer while the model answers. The untouched answer is generated once and cached.</p>
-        <div class="row"><label>layer <input type="range" id="tryLayer" min="0" max="39" value="17"> <b class="mono" id="tryLayerVal">17</b></label>
-          <label class="small">max tokens <input type="number" id="tryTokens" value="64" min="16" max="200" style="width:70px"></label></div>
-        <textarea id="tryPrompts" rows="4"></textarea>
-        <div class="row"><button class="btn primary" id="tryBtn">Generate both</button><span class="small" id="tryInfo"></span></div>
-        <div id="tryOut"></div>
-      </div>
-    </section>
+<!-- ============================================================ SBOM panel -->
+<section class="panel" id="sbomPanel"><div class="inner">
+  <div class="row" style="justify-content:space-between"><div><h2>Software bill of materials</h2><div class="small">CycloneDX 1.5: every package of <span class="mono">.venv</span> and <span class="mono">.venv-gguf</span> with licence and PyPI/OSV advisories, the project's own modules and what they import, plus Ollama, llama.cpp, the driver, the models and the datasets</div></div><button class="btn sm" id="sbomClose">close</button></div>
+  <div class="card"><div class="row"><button class="btn primary" id="sbomGen">Generate / refresh</button><span class="small" id="sbomInfo"></span></div><div id="sbomSummary"></div></div>
+  <div class="card"><h3>Project modules <small>the pipeline's own Python files and the third-party packages they use</small></h3><div id="sbomModules"></div></div>
+  <div class="card"><h3>Packages</h3><div class="row"><input type="text" id="sbomQ" placeholder="filter packages" style="max-width:300px"><label class="small"><input type="checkbox" id="sbomVulnOnly"> only with advisories</label></div><div id="sbomPackages"></div></div>
+  <div class="card"><h3>Other components</h3><div id="sbomExtra"></div></div>
+</div></section>
 
-    <!-- =============================================== chat -->
-    <section class="view" id="v-chat">
-      <div class="card">
-        <h3>Side by side in Ollama <small id="chatNames">base vs abliterated, temperature 0</small></h3>
-        <div class="row"><span id="chatStatus" class="small">…</span></div>
-        <div id="chatPresets"></div>
-        <textarea id="chatPrompt" rows="3" placeholder="Ask both models…"></textarea>
-        <div class="row"><button class="btn primary" id="chatSend">Send to both</button><button class="btn" id="chatStop" disabled>Stop</button><label class="small">max tokens <input type="number" id="chatTokens" value="300" min="32" max="1024" style="width:80px"></label></div>
-        <div class="pair">
-          <div class="ans" id="chatBase"><div class="h"><span id="chatBaseLbl">base · original</span><span id="chatBaseBadge"></span></div><div class="t"></div></div>
-          <div class="ans" id="chatAbl"><div class="h"><span id="chatAblLbl">abliterated</span><span id="chatAblBadge"></span></div><div class="t"></div></div>
-        </div>
-      </div>
-      <div class="card" id="chatHistory"><h3>Earlier exchanges</h3><div id="chatHistBody" class="small">none yet</div></div>
-      <div class="card" id="chatRecorded"></div>
-    </section>
-
-    <!-- =============================================== system -->
-    <section class="view" id="v-dash">
-      <div class="grid3">
-        <div class="card">
-          <h3>Process log <small>stdout of the running / last pipeline process</small></h3>
-          <div class="row"><span class="small" id="pipeInfo"></span><button class="btn sm danger" id="pipeStop" disabled>■ Stop</button></div>
-          <div class="console" id="console">— no output yet —</div>
-        </div>
-        <div>
-          <div class="card"><h3>Environment</h3><div class="checks" id="envChecks"></div></div>
-          <div class="card"><h3>Ollama</h3><div class="kv" id="ollInfo"></div><div class="row"><button class="btn sm" id="ollUnload">Unload models from VRAM</button></div></div>
-        </div>
-      </div>
-      <div class="card"><h3>Runs <small>runs/abliterate_*</small></h3><table id="runsTable"></table></div>
-      <div class="card"><h3>Notebook engine <small>the original notebook cells via run_pipeline.py (GLM-Edge only)</small></h3>
-        <div class="stagegrid" id="stages"></div>
-        <div class="row"><label class="small">run <select id="pipeRun"></select></label><label class="small">layer <input type="number" id="pipeLayer" min="0" max="99" style="width:70px"></label><button class="btn" id="pipeStart">▶ Start notebook stage</button></div>
-      </div>
-    </section>
-  </main>
-</div>
 <script src="/static/guide.js"></script>
 <script src="/static/app.js"></script>
 </body>

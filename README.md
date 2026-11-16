@@ -8,7 +8,7 @@ web app that drives it with a step-by-step learning guide.
 | Path | Purpose |
 |---|---|
 | `abliterate/` | The pipeline package. `arch.py` (family detection, which tensors write into the residual stream, post-norm / MoE / FP8 handling), `data.py` (prompt sets, refusal markers), `hooks.py` (plain PyTorch hooks on a HF model: measure, ablate, generate; works with `device_map=auto`), `edit.py` (shard-by-shard safetensors edit incl. per-expert / fused experts, biases, post-norm folding, FP8 block requantization), `validate.py` (six checks), `deploy.py` (GGUF, Ollama, A/B), `pipeline.py` (CLI, events). |
-| `app/` | **Abliteration Lab** (FastAPI + vanilla JS): Abliterate (model download, Run, live guide with "under the hood" and "for GLM-5.x" notes per step), Lab (refusal meter per layer and token, try any layer live), A/B chat, System. |
+| `app/` | **Abliteration Lab** (FastAPI + vanilla JS), one linear flow: **1 Model** (GLM presets or any repo id, downloaded on run) → **2 Abliterate** (one click, live step guide with plain / why / what-to-look-for text, "under the hood" and "for GLM-5.x" notes, optional pause at the layer choice) → **3 Compare** (before/after chat in Ollama; an expandable lab with the per-layer refusal meter and try-a-layer). Header tools: **datasets** (view / search / add / edit / remove rows of the harmful, harmless and DPO sets with an audit trail under `data/removed/` and `data/edits.jsonl`), **SBOM** (CycloneDX 1.5 of `.venv` + `.venv-gguf` with PyPI/OSV advisories, the project's own modules and their imports, Ollama, llama.cpp, driver, models, datasets), **log**. |
 | `abliteration_pipeline.ipynb` + `run_pipeline.py` | The original notebook (GLM-Edge only, TransformerLens) and its headless runner; kept as the reference implementation. Two fixes vs. the original: cell 1.1 accepts `CUDA UMD Version:`; cell 4.8 opens each safetensors file once. |
 | `gui/` + `build_gui.py` | The earlier standalone walkthrough page built from a run folder. |
 
@@ -22,8 +22,8 @@ py -3.13 -m venv .venv
 start_app.bat                                                       # http://localhost:8787
 ```
 
-In the app: pick a preset or paste a repo id → Download → Run. Options: pause at the layer choice, through Ollama, reload and validate,
-device map `cuda` or `auto`. Each guide step shows what is happening, why it matters, what to look for, and expands to the math and the
+In the app: pick a model → Run (downloads if needed) → Compare. Options: pause at the layer choice, finish in Ollama, reload and validate,
+device `cuda` or `auto`. Each guide step shows what is happening, why it matters, what to look for, and expands to the math and the
 GLM-5.x transfer notes.
 
 ## Run the pipeline headless
@@ -41,7 +41,8 @@ Models: `models/<slug>/` (base copy), `out/<slug>-abliterated/`, `gguf/<slug>-{b
 
 ## What transfers to GLM-5.2 / 5.3
 
-Verified on this machine: GLM-Edge-4B end to end (layer 16/17, 15/16 → 1/16 refusals, validation PASS, Ollama A/B 9/10 → 0/10),
+Verified on this machine: GLM-Edge-4B (layer 16/17, 15/16 → 1/16 refusals, validation PASS, Ollama A/B 9/10 → 0/10) and GLM-Edge-1.5B
+(layer 12, validation PASS, Ollama A/B 6/10 → 0/10) end to end,
 and the sharded edit on a synthetic checkpoint with per-expert, fused-3D-expert, FP8 block-scaled and post-norm tensors.
 GLM-5.2 (`GlmMoeDsaForCausalLM`, 78 layers, 3 dense + 75 MoE layers with 256 routed + 1 shared experts, bf16, 1.5 TB in 282 shards)
 is covered by the same code paths: measurement and scan need the model loaded (`--device-map auto` on a multi-GPU node), the edit streams

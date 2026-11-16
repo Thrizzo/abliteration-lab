@@ -29,6 +29,8 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 import rundata  # noqa: E402
 from lab import Lab  # noqa: E402
+from datasets import Datasets, FILES as DATA_FILES  # noqa: E402
+from sbom import SbomJob  # noqa: E402
 from abliterate import arch as ARCH  # noqa: E402
 
 PROJECT = os.environ.get("ABL_PROJECT") or os.path.dirname(HERE)
@@ -49,6 +51,8 @@ PRESETS = [
 
 app = FastAPI(title="Abliteration Lab")
 lab = Lab(PROJECT)
+datasets = Datasets(os.path.join(PROJECT, "data"))
+sbom = SbomJob(PROJECT)
 
 
 # ------------------------------------------------------------------------- pipeline subprocess
@@ -426,6 +430,100 @@ def ollama_unload():
     return {"unloaded": done}
 
 
+# ------------------------------------------------------------------------- API: datasets
+@app.get("/api/data")
+def data_status():
+    return datasets.status()
+
+
+@app.get("/api/data/{fname}")
+def data_rows(fname: str, q: str = "", offset: int = 0, limit: int = 50, source: str | None = None, regex: bool = False):
+    if fname not in DATA_FILES:
+        raise HTTPException(404, "unknown file")
+    try:
+        return datasets.search(fname, q, max(0, offset), min(max(1, limit), 500), source, regex)
+    except re.error as e:
+        raise HTTPException(400, f"bad regex: {e}")
+
+
+class RowAdd(BaseModel):
+    prompt: str | None = None
+    source: str | None = None
+    chosen: list | None = None
+    rejected: list | None = None
+
+
+@app.post("/api/data/{fname}/rows")
+def data_add(fname: str, r: RowAdd):
+    if fname not in DATA_FILES:
+        raise HTTPException(404, "unknown file")
+    body = {k: v for k, v in r.model_dump().items() if v is not None}
+    if DATA_FILES[fname]["kind"] == "prompt" and not body.get("prompt"):
+        raise HTTPException(400, "prompt required")
+    return datasets.add(fname, body)
+
+
+class RowEdit(BaseModel):
+    prompt: str | None = None
+    chosen: list | None = None
+    rejected: list | None = None
+
+
+@app.put("/api/data/{fname}/rows/{rid}")
+def data_edit(fname: str, rid: str, r: RowEdit):
+    try:
+        return datasets.edit(fname, rid, {k: v for k, v in r.model_dump().items() if v is not None})
+    except KeyError:
+        raise HTTPException(404, "row not found")
+
+
+class RowsRemove(BaseModel):
+    ids: list[str]
+    reason: str = ""
+
+
+@app.post("/api/data/{fname}/remove")
+def data_remove(fname: str, r: RowsRemove):
+    if fname not in DATA_FILES:
+        raise HTTPException(404, "unknown file")
+    return datasets.remove(fname, r.ids, r.reason)
+
+
+@app.get("/api/data/{fname}/removed")
+def data_removed(fname: str):
+    return datasets.removed_rows(fname)
+
+
+class RowsRestore(BaseModel):
+    ids: list[str]
+
+
+@app.post("/api/data/{fname}/restore")
+def data_restore(fname: str, r: RowsRestore):
+    return datasets.restore(fname, r.ids)
+
+
+# ------------------------------------------------------------------------- API: SBOM
+@app.get("/api/sbom")
+def sbom_status():
+    return sbom.status()
+
+
+@app.post("/api/sbom/generate")
+def sbom_generate():
+    return sbom.start()
+
+
+@app.get("/api/sbom/file/{name}")
+def sbom_file(name: str):
+    if not re.fullmatch(r"(sbom|summary|vulnerabilities)-[\w\-]+\.(cdx\.)?json", name):
+        raise HTTPException(400, "bad name")
+    path = os.path.join(PROJECT, "sbom", name)
+    if not os.path.isfile(path):
+        raise HTTPException(404)
+    return FileResponse(path, media_type="application/json", filename=name)
+
+
 # ------------------------------------------------------------------------- static UI
 STATIC = os.path.join(HERE, "static")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -446,6 +544,8 @@ def main():
     PROJECT = os.path.abspath(a.project)
     PY = os.path.join(PROJECT, ".venv", "Scripts", "python.exe")
     lab.project = PROJECT
+    datasets.dir = os.path.join(PROJECT, "data")
+    sbom.project, sbom.dir = PROJECT, os.path.join(PROJECT, "sbom")
     if not os.path.isdir(os.path.join(PROJECT, "abliterate")):
         raise SystemExit(f"{PROJECT} has no abliterate/ package - pass --project")
     import uvicorn

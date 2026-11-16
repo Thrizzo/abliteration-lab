@@ -1,9 +1,10 @@
-/* Abliteration Lab front-end: Abliterate (model, run, live guide), Lab (probe / try a layer), A/B chat, System. */
+/* Abliteration Lab: Model -> Abliterate -> Compare. */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const fmt = (x, d=1) => (x==null||isNaN(x)) ? '–' : Number(x).toFixed(d);
-const S = { env:null, models:[], presets:[], model:null, runs:[], runId:null, run:null, events:[], ES:{}, pipe:{running:false}, logNext:0, evNext:0, lab:null, chatHist:[] };
+const S = { env:null, models:[], presets:[], model:null, runs:[], runId:null, run:null, events:[], ES:{}, pipe:{running:false}, logNext:0, evNext:0, lab:null, chatHist:[], stage:'model' };
 const OLLAMA = 'http://localhost:11434';
+const slugOf = repo => repo.replace(/\/+$/,'').split('/').pop().toLowerCase();
 
 async function api(path, body, method){
   const r = await fetch('/api'+path, body ? {method: method||'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)} : {method: method||'GET'});
@@ -64,58 +65,81 @@ function lineChart(el, series, labels, o){
   el.querySelectorAll('circle').forEach(c=>{ c.addEventListener('mousemove',e=>showTip(e,`${series[+c.dataset.k].name}\ntoken ${labels[+c.dataset.i]}\n${fmt(series[+c.dataset.k].values[+c.dataset.i],2)}`)); c.addEventListener('mouseleave',hideTip); });
 }
 
-// ------------------------------------------------------------------ navigation
-const VIEWS={abl:['Abliterate','pick a model, run the pipeline, follow the guide'], lab:['Lab','probe the resident model, try any layer live'], chat:['A/B chat','base and abliterated side by side in Ollama'], dash:['System','environment, process log, runs, notebook engine']};
-function show(v){ document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active', x.id==='v-'+v)); document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active', b.dataset.view===v));
-  $('#title').textContent=VIEWS[v][0]; $('#subtitle').textContent=VIEWS[v][1]; location.hash=v; $('.main').scrollTo(0,0); if(v==='chat') chatStatus(); }
-document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>show(b.dataset.view));
-window.addEventListener('hashchange', ()=>{ const v=location.hash.slice(1); if(VIEWS[v] && !$('#v-'+v).classList.contains('active')) show(v); });
+// ------------------------------------------------------------------ stages
+function go(stage){
+  if(stage==='abl' && !S.model) return toast('pick a model first', true);
+  if(stage==='compare' && !cmpReady()) return toast('finish an abliteration through Ollama first', true);
+  S.stage=stage; document.querySelectorAll('.stage').forEach(x=>x.classList.toggle('active', x.id==='s-'+stage));
+  document.querySelectorAll('.stages li').forEach(li=>li.classList.toggle('active', li.dataset.stage===stage));
+  location.hash=stage; window.scrollTo(0,0); if(stage==='compare') chatStatus();
+}
+document.querySelectorAll('.stages li').forEach(li=>li.onclick=()=>go(li.dataset.stage));
+$('#toAbl').onclick=()=>go('abl'); $('#backModel').onclick=()=>go('model'); $('#toCmp').onclick=()=>go('compare'); $('#backAbl').onclick=()=>go('abl'); $('#toModelAgain').onclick=()=>go('model');
+$('#logToggle').onclick=()=>$('#drawer').classList.toggle('open'); $('#drawerClose').onclick=()=>$('#drawer').classList.remove('open');
+function cmpReady(){ const n=S.run?.meta?.ollama || S.run?.ollama?.names; return !!(n && S.env?.ollama?.models?.some(m=>m.startsWith(n.base))); }
+function updateHeader(){
+  $('#stModel').textContent = S.model ? S.model.repo : 'choose a GLM model';
+  const r=S.run, running=S.pipe.running && S.pipe.run_id===S.runId;
+  $('#stAbl').textContent = running ? `running · ${S.pipe.current||''}` : (r ? (r.meta?.status==='awaiting_choice' ? 'paused at the layer choice' : (r.validation ? `done · layer ${r.choice.layer} · ${r.validation.verdict}` : (r.scan ? 'scanned' : 'started'))) : 'not run');
+  $('#stCmp').textContent = cmpReady() ? `${S.run.meta?.ollama?.base||''} vs …-abl` : 'needs a finished run';
+  document.querySelector('.stages li[data-stage=abl]').classList.toggle('done', !!(r&&r.validation)); document.querySelector('.stages li[data-stage=abl]').classList.toggle('locked', !S.model);
+  document.querySelector('.stages li[data-stage=compare]').classList.toggle('locked', !cmpReady()); document.querySelector('.stages li[data-stage=model]').classList.toggle('done', !!S.model);
+  $('#toAbl').disabled=!S.model; $('#toCmp').disabled=!cmpReady();
+  $('#ablModel').textContent=$('#cmpModel').textContent = S.model ? S.model.repo : '';
+}
 
 // ------------------------------------------------------------------ env
 async function loadEnv(){
   try{ S.env=await api('/env'); }catch(e){ return; }
   const e=S.env, g=e.gpu;
-  if(g){ $('#gpuName').textContent=g.name.replace('NVIDIA ',''); $('#gpuVal').textContent=`${g.vram_used_gb}/${g.vram_total_gb} GB`; $('#gpuBar').style.width=(100*g.vram_used_gb/g.vram_total_gb)+'%'; }
-  $('#diskVal').textContent=e.disk_free_gb+' GB';
-  $('#dotOll').className='dot '+(e.ollama.reachable?'on':'bad'); $('#sysOll').textContent=e.ollama.reachable?`${e.ollama.loaded.length} loaded`:'offline';
-  const chk=[['.venv (torch CUDA)',e.venv],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable]];
+  if(g){ $('#gpuVal').textContent=`${g.vram_used_gb}/${g.vram_total_gb} GB`; $('#dotGpu').className='dot '+(g.vram_used_gb/g.vram_total_gb>0.5?'busy':'on'); }
+  $('#dotOll').className='dot '+(e.ollama.reachable?'on':'bad');
+  const chk=[['.venv (torch CUDA)',e.venv],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable],[`disk free ${e.disk_free_gb} GB`, e.disk_free_gb>30]];
   $('#envChecks').innerHTML=chk.map(([l,ok])=>`<div class="check"><span class="dot ${ok?'on':'bad'}"></span>${l}</div>`).join('');
   $('#ollInfo').innerHTML = e.ollama.reachable ? `<b>models</b><span class="mono">${e.ollama.models.filter(m=>/glm/i.test(m)).join(', ')||'none'}</span><b>in VRAM</b><span class="mono">${e.ollama.loaded.map(m=>`${m.name} (${m.vram_gb} GB)`).join(', ')||'none'}</span>` : `<b>status</b><span>not reachable - start Ollama</span>`;
-  if(!$('#stages').children.length){ $('#stages').innerHTML=Object.entries(e.notebook_stages).map(([k,v])=>`<div class="stage" data-stage="${k}"><b>${k}</b><span>${esc(v)}</span></div>`).join('');
-    $('#stages').querySelectorAll('.stage').forEach(d=>d.onclick=()=>{ $('#stages').querySelectorAll('.stage').forEach(x=>x.classList.remove('sel')); d.classList.add('sel'); }); }
+  updateHeader();
 }
 
 // ------------------------------------------------------------------ models
 async function loadModels(){
   const m=await api('/models'); S.models=m.models; S.presets=m.presets;
-  $('#presets').innerHTML = '<span class="small">GLM family:</span>' + S.presets.map(p=>`<span class="chip" data-repo="${esc(p.repo)}" title="${esc(p.size+' · '+p.note)}">${esc(p.repo.split('/')[1])}${p.local_ok?'':' ⚠'}</span>`).join('');
-  $('#presets').querySelectorAll('.chip').forEach(c=>c.onclick=()=>{ $('#repoInput').value=c.dataset.repo; const p=S.presets.find(x=>x.repo===c.dataset.repo); $('#dlInfo').textContent=p?`${p.family} · ${p.size} · ${p.note}`:''; });
-  if(!S.model && S.models.length) S.model = S.models.find(x=>x.complete) || null;
-  $('#modelsTable').innerHTML = S.models.length ? '<tr><th></th><th>local model</th><th>family</th><th class="num">layers</th><th class="num">params</th><th class="num">size</th><th>edit</th><th>notes</th></tr>' +
-    S.models.map(x=>{ const a=x.arch||{}; const sel=S.model&&S.model.slug===x.slug; return `<tr class="clickable ${sel?'chosen':''}" data-slug="${x.slug}"><td>${sel?'●':'○'}</td><td class="mono">${x.slug}${x.copy_info.repo?`<div class="small">${esc(x.copy_info.repo)} @ ${(x.copy_info.revision||'').slice(0,8)}</div>`:''}</td><td>${esc(a.family||a.model_type||'?')}</td><td class="num">${a.n_layers??'–'}</td><td class="num">${a.params_b?a.params_b+'B':'–'}</td><td class="num">${x.size_gb} GB${x.complete?'':' <span class="badge warn">incomplete</span>'}</td><td>${a.support?`<span class="badge ${a.support==='exact'?'pass':(a.support==='unsupported'?'fail':'info')}">${a.support}</span>`:''}${a.moe?' <span class="badge ghost">MoE</span>':''}${a.quantization?' <span class="badge ghost">FP8</span>':''}${x.abliterated?' <span class="badge pass">abliterated</span>':''}${a.fits_16gb_bf16===false?' <span class="badge warn">multi-GPU</span>':''}</td><td class="small">${(a.notes||[]).map(n=>esc(n)).join('<br>')}</td></tr>`; }).join('')
-    : '<tr><td class="empty">No local models yet. Pick a preset or paste a repo id and press Download.</td></tr>';
-  $('#modelsTable').querySelectorAll('tr.clickable').forEach(tr=>tr.onclick=()=>{ S.model=S.models.find(x=>x.slug===tr.dataset.slug); loadModels(); });
-  $('#runModel').textContent = S.model ? (S.model.copy_info.repo || S.model.slug) : '— none selected —';
-  if(S.model?.arch){ const a=S.model.arch; if(a.fits_16gb_bf16===false) $('#optDevice').value='auto'; $('#optRemote').checked=!!a.needs_remote_code; }
+  const local = Object.fromEntries(S.models.map(x=>[x.slug,x]));
+  const entries = S.presets.map(p=>({repo:p.repo, slug:slugOf(p.repo), preset:p, local:local[slugOf(p.repo)]}));
+  for(const x of S.models) if(!entries.find(e=>e.slug===x.slug)) entries.push({repo:x.copy_info?.repo||x.slug, slug:x.slug, preset:null, local:x});
+  if(S.model){ const e=entries.find(x=>x.slug===S.model.slug); if(e) S.model=e; }
+  $('#modelCards').innerHTML = entries.map(e=>{ const a=e.local?.arch, p=e.preset, sel=S.model&&S.model.slug===e.slug;
+    const tags=[ e.local?.complete?'<span class="badge pass">on disk</span>':'<span class="badge ghost">download on run</span>', e.local?.abliterated?'<span class="badge info">abliterated</span>':'', a?.moe?'<span class="badge ghost">MoE</span>':'', (a?a.fits_16gb_bf16===false:(p&&!p.local_ok))?'<span class="badge warn">multi-GPU</span>':'' ].join(' ');
+    return `<div class="mcard ${sel?'sel':''} ${(p&&!p.local_ok&&!e.local)?'far':''}" data-slug="${e.slug}"><b>${esc(e.repo)}</b><div class="fam">${esc(a?.family||p?.family||'GLM')}</div><div class="meta">${esc(p?.size||(e.local?e.local.size_gb+' GB':''))}${a?` · ${a.n_layers} layers · edit ${a.support}`:''}<br>${esc(p?.note||(a?.notes||[]).join(' ')||'')}</div><div class="tags">${tags}</div></div>`; }).join('');
+  $('#modelCards').querySelectorAll('.mcard').forEach(c=>c.onclick=()=>selectModel(entries.find(e=>e.slug===c.dataset.slug)));
+  if(!S.model){ const first = entries.find(e=>e.local?.complete) ; if(first) selectModel(first, true); }
+  updateHeader();
 }
-$('#dlBtn').onclick=async()=>{ const repo=$('#repoInput').value.trim(); if(!repo) return toast('enter a repo id', true); try{ await api('/models/download', {repo}); toast('download started - progress in the System log'); S.logNext=0; $('#console').innerHTML=''; }catch(e){ toast(e.message, true); } };
+async function selectModel(e, silent){
+  S.model=e; $('#modelCards').querySelectorAll('.mcard').forEach(c=>c.classList.toggle('sel', c.dataset.slug===e.slug));
+  const a=e.local?.arch, p=e.preset, d=$('#modelDetail'); d.style.display='';
+  const supportBadge = a ? `<span class="badge ${a.support==='exact'?'pass':(a.support==='unsupported'?'fail':'info')}">${a.support}</span>` : '';
+  const statsHtml = a ? '<div class="stats">' + [[a.n_layers,'layers'],[a.hidden_size,'hidden size'],[a.params_b?a.params_b+'B':'?','parameters'],[supportBadge,'edit'],[a.moe?'MoE':'dense','block type'],[e.local.size_gb+' GB','on disk']].map(([v,l])=>'<div class="stat"><div class="v" style="font-size:18px">'+v+'</div><div class="l">'+l+'</div></div>').join('') + '</div>' + (a.notes||[]).map(n=>'<div class="narr small">'+esc(n)+'</div>').join('') : '';
+  const farNote = (p&&!p.local_ok) ? '<div class="narr small">This model does not fit a single 16 GB GPU in bf16. Measure and scan would need <b>device auto</b> (multi-GPU or CPU offload, slow); the weight edit itself streams shard by shard and works anywhere with the disk space.</div>' : '';
+  const notLocal = a ? '' : '<p class="sub">'+esc(p?.size||'')+'. '+esc(p?.note||'')+' Not on disk yet: it is downloaded when you press Run (safetensors only).</p>'+farNote;
+  d.innerHTML='<h3>'+esc(e.repo)+' <small>'+esc(a?.family||p?.family||'')+'</small></h3>'+statsHtml+notLocal;
+  if(a){ $('#optDevice').value = a.fits_16gb_bf16===false ? 'auto' : 'cuda'; $('#optRemote').checked=!!a.needs_remote_code; } else if(p&&!p.local_ok) $('#optDevice').value='auto';
+  await loadRuns(); updateHeader();
+  if(!silent) go('abl');
+}
+$('#useRepo').onclick=()=>{ const repo=$('#repoInput').value.trim(); if(!repo) return; selectModel({repo, slug:slugOf(repo), preset:null, local:S.models.find(x=>x.slug===slugOf(repo))}); };
 
-// ------------------------------------------------------------------ runs
+// ------------------------------------------------------------------ runs (per model)
 async function loadRuns(keep){
-  S.runs=await api('/runs');
-  const opts=S.runs.map(r=>`<option value="${r.id}">${r.id} · ${r.slug}${r.layer!=null?' · L'+r.layer:''} · ${r.status}</option>`).join('');
-  $('#runSel').innerHTML = opts || '<option value="">no runs yet</option>'; $('#pipeRun').innerHTML=opts;
-  if(!keep || !S.runs.find(r=>r.id===S.runId)) S.runId = S.runs[0]?.id || null;
-  $('#runSel').value=S.runId; $('#pipeRun').value=S.runId;
-  $('#runsTable').innerHTML = S.runs.length ? '<tr><th>run</th><th>model</th><th>engine</th><th>status</th><th class="num">baseline</th><th>best layers</th><th class="num">layer</th><th class="num">after</th><th>validation</th><th></th></tr>' +
-    S.runs.map(r=>`<tr class="clickable" data-id="${r.id}"><td class="mono">${r.id}</td><td class="mono">${r.slug}</td><td>${r.engine}</td><td><span class="badge ${r.status==='done'?'pass':(r.status==='error'?'fail':'ghost')}">${r.status}</span></td><td class="num">${r.n_base!=null?r.n_base+'/'+r.n_test:'–'}</td><td class="mono">${r.best_layers.slice(0,6).join(', ')||'–'}</td><td class="num">${r.layer??'–'}</td><td class="num">${r.n_after!=null?r.n_after+'/'+r.n_test:'–'}</td><td>${r.verdict?statusBadge(r.verdict):''}</td><td><button class="btn sm">open</button></td></tr>`).join('')
-    : '<tr><td class="empty">No runs yet.</td></tr>';
-  $('#runsTable').querySelectorAll('tr.clickable').forEach(tr=>tr.onclick=()=>{ selectRun(tr.dataset.id); show('abl'); });
+  const all=await api('/runs'); S.runs = S.model ? all.filter(r=>r.slug===S.model.slug) : [];
+  const running = S.pipe.running && S.pipe.run_id && S.runs.find(r=>r.id===S.pipe.run_id);
+  if(!(keep && S.runs.find(r=>r.id===S.runId))) S.runId = running ? running.id : (S.runs[0]?.id||null);
+  $('#runsBox').style.display = S.runs.length>1 ? '' : 'none';
+  $('#runSel').innerHTML=S.runs.map(r=>`<option value="${r.id}">${r.id.replace('_',' ')} · ${r.status}${r.layer!=null?' · layer '+r.layer:''}${r.verdict?' · '+r.verdict:''}</option>`).join(''); $('#runSel').value=S.runId;
   await selectRun(S.runId);
 }
 async function selectRun(id){
   S.runId=id; $('#runSel').value=id;
-  if(!id){ S.run=null; S.events=[]; S.ES={}; renderHero(); renderGuide(); return; }
+  if(!id){ S.run=null; S.events=[]; S.ES={}; renderHero(); renderGuide(); renderRecorded(); updateHeader(); return; }
   S.run=await api('/runs/'+id); MARKERS=S.run.refusal_markers||MARKERS;
   const live = S.pipe.running && S.pipe.run_id===id;
   if(!live){ S.events=(await api(`/runs/${id}/events`)).events; S.ES=foldEvents(S.events); S.evNext=0; }
@@ -124,11 +148,12 @@ async function selectRun(id){
     $('#probePresets').innerHTML=$('#chatPresets').innerHTML=pre.map(p=>`<span class="chip">${esc(p)}</span>`).join('');
     $('#probePresets').querySelectorAll('.chip').forEach(c=>c.onclick=()=>$('#probePrompt').value=c.textContent); $('#chatPresets').querySelectorAll('.chip').forEach(c=>c.onclick=()=>$('#chatPrompt').value=c.textContent); }
   if(S.run.measure){ const [lo,hi]=S.run.measure.scan_range; $('#tryLayer').min=lo; $('#tryLayer').max=hi; }
-  if(S.run.choice?.layer!=null){ $('#tryLayer').value=S.run.choice.layer; $('#tryLayerVal').textContent=S.run.choice.layer; $('#pipeLayer').value=S.run.choice.layer; }
-  const names=chatNames(); $('#chatNames').textContent=`${names.base} vs ${names.abl}, temperature 0`; $('#chatBaseLbl').textContent=names.base+' · original'; $('#chatAblLbl').textContent=names.abl+' · abliterated';
+  if(S.run.choice?.layer!=null){ $('#tryLayer').value=S.run.choice.layer; $('#tryLayerVal').textContent=S.run.choice.layer; }
+  const names=chatNames(); $('#chatBaseLbl').textContent=names.base+' · original'; $('#chatAblLbl').textContent=names.abl+' · abliterated';
+  updateHeader();
 }
 $('#runSel').onchange=e=>selectRun(e.target.value);
-function chatNames(){ return S.run?.meta?.ollama || (S.run?.ollama?.names) || {base:'glm-edge-base', abl:'glm-edge-abl'}; }
+function chatNames(){ return S.run?.meta?.ollama || S.run?.ollama?.names || {base:(S.model?.slug||'glm-edge-4b-chat')+'-base', abl:(S.model?.slug||'glm-edge-4b-chat')+'-abl'}; }
 
 // ------------------------------------------------------------------ events -> step state
 function foldEvents(evs){
@@ -159,14 +184,14 @@ function stepState(key){
 
 // ------------------------------------------------------------------ hero
 function renderHero(){
-  const R=S.run, n=R?.model?.n_layers||40, W=420, H=230, bw=W/n, sc=R?.measure?.scan_range||[0,-1], ch=R?.choice?.layer;
+  const R=S.run, n=R?.model?.n_layers||S.model?.local?.arch?.n_layers||40, W=420, H=200, bw=W/n, sc=R?.measure?.scan_range||[0,-1], ch=R?.choice?.layer;
   let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%">`;
-  for(let l=0;l<n;l++){ const sep=R?.measure?.separation_pct?.[l]||20, h=40+sep*1.6; s+=`<rect class="band ${l>=sc[0]&&l<=sc[1]?'scan':''} ${l===ch?'chosen':''}" x="${l*bw+1}" y="${(H-h)/2}" width="${Math.max(1,bw-2)}" height="${h}" rx="2"/>`; }
-  for(let k=0;k<7;k++){ const yy=60+k*18+(k%2)*6, d=3.2+k*0.35; s+=`<circle class="pulse" r="2.2" cy="${yy}" cx="0"><animate attributeName="cx" from="-4" to="${W+4}" dur="${d}s" begin="${-k*0.9}s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="${d}s" begin="${-k*0.9}s" repeatCount="indefinite"/></circle>`; }
+  for(let l=0;l<n;l++){ const sep=R?.measure?.separation_pct?.[l]||20, h=36+sep*1.4; s+=`<rect class="band ${l>=sc[0]&&l<=sc[1]?'scan':''} ${l===ch?'chosen':''}" x="${l*bw+1}" y="${(H-h)/2}" width="${Math.max(1,bw-2)}" height="${h}" rx="2"/>`; }
+  for(let k=0;k<7;k++){ const yy=50+k*16+(k%2)*6, d=3.2+k*0.35; s+=`<circle class="pulse" r="2.2" cy="${yy}" cx="0"><animate attributeName="cx" from="-4" to="${W+4}" dur="${d}s" begin="${-k*0.9}s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="${d}s" begin="${-k*0.9}s" repeatCount="indefinite"/></circle>`; }
   s+=`<text x="6" y="${H-8}">layer 0</text><text x="${W-6}" y="${H-8}" text-anchor="end">layer ${n-1}</text>`;
-  if(ch!=null) s+=`<text x="${ch*bw+bw/2}" y="16" text-anchor="middle" style="fill:var(--s3)">▼ ${ch}</text>`;
+  if(ch!=null) s+=`<text x="${ch*bw+bw/2}" y="14" text-anchor="middle" style="fill:var(--s3)">▼ ${ch}</text>`;
   $('#stream').innerHTML=s+'</svg>';
-  const st = R ? [[R.model.slug,'model',true],[R.choice.layer??'–','chosen layer'],[R.scan?`${R.scan.n_base}→${R.apply?.n_after??'?'}`:'–',`refusals of ${R.config.n_inst_test||16}`],[R.validation?.verdict||R.meta?.status||'–','validation'],[R.validation?fmt(R.validation.kl,3):'–','KL on harmless']] : [['–','no run yet']];
+  const st = R ? [[R.choice.layer??'–','chosen layer',true],[R.scan?`${R.scan.n_base}→${R.apply?.n_after??'?'}`:'–',`refusals of ${R.config.n_inst_test||16}`],[R.validation?.verdict||R.meta?.status||'–','validation'],[R.validation?fmt(R.validation.kl,3):'–','KL on harmless'],[R.meta?.ollama?'ready':'–','in Ollama']] : [['–','no run yet for this model']];
   $('#heroStats').innerHTML=st.map(([v,l,a])=>`<div class="stat"><div class="v ${a?'accent':''}">${esc(v)}</div><div class="l">${l}</div></div>`).join('');
 }
 
@@ -177,21 +202,22 @@ function renderGuide(){
   if(!guideBuilt){ g.innerHTML=GUIDE.map((s,i)=>`<div class="gstep" id="g-${s.key}"><div class="ghead"><span class="gnum">${i+1}</span><h3>${s.title}</h3><span class="gstate badge ghost">pending</span><span class="gtime small"></span></div>
       <div class="gbody"><div class="gtext"><p>${s.plain}</p><p><b>Why it matters.</b> ${s.why}</p><p><b>What to look for.</b> ${s.look}</p></div><div class="glive" id="gl-${s.key}"></div>
       <details><summary>Under the hood</summary><p class="small">${s.hood}</p></details><details><summary>For GLM-5.x</summary><p class="small">${s.glm5}</p></details></div></div>`).join(''); guideBuilt=true; }
+  document.querySelectorAll('#guide > .narr').forEach(x=>x.remove());
   let done=0;
   for(const s of GUIDE){ const st=stepState(s.key), el=$('#g-'+s.key); el.className='gstep st-'+st; const b=el.querySelector('.gstate'); b.textContent=st; b.className='gstate badge '+({done:'pass',running:'info',waiting:'warn',error:'fail'}[st]||'ghost'); if(st==='done') done++;
     const es=S.ES[s.key]; el.querySelector('.gtime').textContent = es&&es.first&&es.last&&st==='done'&&es.last>es.first ? `${Math.round(es.last-es.first)} s` : '';
     try{ RENDER[s.key]($('#gl-'+s.key), S.ES[s.key]||{}, S.run, st); }catch(e){ console.error(s.key, e); } }
-  if(S.ES._error){ const e=S.ES._error, el=document.createElement('div'); el.className='narr'; el.style.borderLeftColor='var(--critical)'; el.innerHTML=`<b style="color:var(--critical)">The run stopped:</b> ${esc(e.message||e.status)}`; g.prepend(el); }
+  if(S.ES._error){ const e=S.ES._error, el=document.createElement('div'); el.className='narr'; el.style.borderLeftColor='var(--critical)'; el.innerHTML=`<b style="color:var(--critical)">The run stopped:</b> ${esc(e.message||e.status)} — details in the log.`; g.prepend(el); }
   const run=S.pipe.running && S.pipe.run_id===S.runId;
   $('#runBar').style.width = run ? (100*done/GUIDE.length)+'%' : (done===GUIDE.length?'100%':'0');
 }
 const RENDER = {
-  download(el, es, R){ const m=S.models.find(x=>x.slug===R?.model?.slug); el.innerHTML = es.path||m ? `<div class="kv"><b>folder</b><span class="mono">${esc(es.path||m?.path||'')}</span><b>revision</b><span class="mono">${esc(es.revision||m?.copy_info?.revision||R?.model?.revision||'–')}</span>${es.total_gb?`<b>size</b><span>${es.total_gb} GB</span>`:''}${es.cached?`<b>status</b><span>already present</span>`:''}</div>` : '<span class="small">waiting…</span>'; },
-  inspect(el, es, R){ const a = es.family!==undefined ? es : (R?.model?.arch || (S.models.find(x=>x.slug===R?.model?.slug)||{}).arch); if(!a||a.family===undefined){ el.innerHTML='<span class="small">waiting…</span>'; return; }
+  download(el, es, R){ const m=S.model?.local; el.innerHTML = es.path||m ? `<div class="kv"><b>folder</b><span class="mono">${esc(es.path||m?.path||'')}</span><b>revision</b><span class="mono">${esc(es.revision||m?.copy_info?.revision||R?.model?.revision||'–')}</span>${es.total_gb?`<b>size</b><span>${es.total_gb} GB</span>`:''}${es.cached?`<b>status</b><span>already present</span>`:''}</div>` : '<span class="small">downloaded when you press Run</span>'; },
+  inspect(el, es, R){ const a = es.family!==undefined ? es : (R?.model?.arch || S.model?.local?.arch); if(!a||a.family===undefined){ el.innerHTML='<span class="small">after the download</span>'; return; }
     el.innerHTML=`<div class="stats">${[[a.family||a.model_type,'family',true],[a.n_layers,'layers'],[a.hidden_size,'hidden size'],[a.params_b?a.params_b+'B':'?','parameters'],[`<span class="badge ${a.support==='exact'?'pass':(a.support==='unsupported'?'fail':'info')}">${a.support}</span>`,'edit']].map(([v,l,ac])=>`<div class="stat"><div class="v ${ac?'accent':''}" style="font-size:18px">${v}</div><div class="l">${l}</div></div>`).join('')}</div>
       <div class="kv"><b>architecture</b><span class="mono">${esc((a.architectures||[]).join(', '))}</span><b>MoE</b><span>${a.moe?`${a.moe_info?.n_routed_experts} routed + ${a.moe_info?.n_shared_experts||0} shared experts, ${a.moe_info?.num_experts_per_tok} active, first ${a.moe_info?.first_k_dense_replace??0} layers dense`:'no (dense)'}</span><b>post-norm</b><span>${a.post_norm?'yes - direction folded through the norm weight':'no - exact edit'}</span><b>quantized</b><span>${a.quantization?esc(JSON.stringify(a.quantization)):'no (bf16)'}</span><b>targets in index</b><span class="mono">${esc(JSON.stringify(a.tensor_kinds||{}))}</span></div>
       ${(a.notes||[]).map(n=>`<div class="narr small">${esc(n)}</div>`).join('')}`; },
-  load(el, es, R){ el.innerHTML = es.n_layers ? `<div class="kv"><b>loaded</b><span>${es.n_layers} layers, d_model ${es.d_model}, ${esc(es.dtype||'')} on ${esc(es.device_map||'')}</span></div>` : (R?.measure?`<div class="kv"><b>loaded</b><span>${R.model.n_layers} layers, d_model ${R.model.d_model}</span></div>`:'<span class="small">waiting…</span>'); },
+  load(el, es, R){ el.innerHTML = es.n_layers ? `<div class="kv"><b>loaded</b><span>${es.n_layers} layers, d_model ${es.d_model}, ${esc(es.dtype||'')} on ${esc(es.device_map||'')}</span></div>` : (R?.measure?`<div class="kv"><b>loaded</b><span>${R.model.n_layers} layers, d_model ${R.model.d_model}</span></div>`:''); },
   measure(el, es, R, st){
     if(st==='running'&&es.progress){ const p=es.progress; el.innerHTML=`<div class="narr">Measuring the <b>${p.group}</b> group: batch ${p.batch}/${p.batches} (${p.seconds}s each)</div><div class="progress"><i style="width:${100*p.batch/p.batches}%"></i></div>`; return; }
     const M=R?.measure; const sep = M?.separation_pct || es.separation_pct; if(!sep){ el.innerHTML=st==='running'?'<div class="narr">starting…</div>':''; return; }
@@ -209,7 +235,7 @@ const RENDER = {
     const by = SC ? Object.fromEntries(SC.layers.map(l=>[l.layer,l])) : Object.fromEntries((es.layers||[]).map(e=>[e.layer,e]));
     const prompts = SC?.prompts || null, baseline = SC?.baseline || es.baseline?.baseline, n_base = SC?.n_base ?? es.baseline?.n_base, NT = SC?.prompts.length ?? es.baseline?.n_test ?? es.n_test ?? 16;
     if(!layers.length && n_base==null){ el.innerHTML = live?'<div class="narr">generating the baseline…</div>':''; return; }
-    const allLayers = (es.layers_planned||es.layersPlanned) || (R?.measure ? Array.from({length:R.measure.scan_range[1]-R.measure.scan_range[0]+1},(_,i)=>R.measure.scan_range[0]+i) : layers);
+    const allLayers = es.layers_planned || (R?.measure ? Array.from({length:R.measure.scan_range[1]-R.measure.scan_range[0]+1},(_,i)=>R.measure.scan_range[0]+i) : layers);
     const chosen=R?.choice?.layer;
     if(live || !SC){
       const last = layers.length ? by[layers[layers.length-1]] : null;
@@ -270,44 +296,43 @@ const RENDER = {
     if(st==='running'){ el.innerHTML=`<div class="narr">importing${es.progress?.created?` (${es.progress.created} created)`:''}…</div>`; return; }
     if(!o && es.n_ref_base==null){ el.innerHTML=''; return; }
     const nb=es.n_ref_base??o?.n_ref_base, na=es.n_ref_abl??o?.n_ref_abl, nh=o?.harmful?.length??10;
-    el.innerHTML=`<div class="stats"><div class="stat"><div class="v">${nb}/${nh}</div><div class="l">base refusals</div></div><div class="stat"><div class="v accent">${na}/${nh}</div><div class="l">abliterated refusals</div></div></div><div class="kv"><b>Ollama models</b><span class="mono">${names?`${names.base} · ${names.abl}`:'–'}</span></div><div class="row"><button class="btn sm primary" onclick="show('chat')">open the A/B chat</button></div>${o?`<details><summary>recorded A/B answers</summary>${recordedHtml()}</details>`:''}`;
+    el.innerHTML=`<div class="stats"><div class="stat"><div class="v">${nb}/${nh}</div><div class="l">base refusals</div></div><div class="stat"><div class="v accent">${na}/${nh}</div><div class="l">abliterated refusals</div></div></div><div class="kv"><b>Ollama models</b><span class="mono">${names?`${names.base} · ${names.abl}`:'–'}</span></div><div class="row"><button class="btn sm primary" onclick="go('compare')">Compare before vs after →</button></div>`;
   },
 };
-function recordedHtml(){ const o=S.run?.ollama; if(!o) return ''; const all=[...o.harmful,...o.normal]; return all.map((p,i)=>o.results.base[i]==null?'':`<div class="prompt"><span class="i">${i<o.harmful.length?'harmful':'normal'}</span>${esc(p)}</div><div class="pair">${answerBox('base',o.results.base[i])}${answerBox('abliterated',o.results.abl[i])}</div>`).join(''); }
-function renderRecorded(){ const o=S.run?.ollama; $('#chatRecorded').innerHTML = o?`<h3>Recorded A/B test <small>from the run</small></h3><p class="small">Refusals via Ollama: base ${o.n_ref_base}/${o.harmful.length}, abliterated ${o.n_ref_abl}/${o.harmful.length}.</p>${recordedHtml()}`:''; $('#chatRecorded').style.display=o?'':'none'; }
+function recordedHtml(){ const o=S.run?.ollama; if(!o) return ''; const all=[...o.harmful,...o.normal]; return all.map((p,i)=>o.results.base[i]==null?'':`<div class="prompt"><span class="i">${i<o.harmful.length?'harmful':'normal'}</span>${esc(p)}</div><div class="pair">${answerBox('original',o.results.base[i])}${answerBox('abliterated',o.results.abl[i])}</div>`).join(''); }
+function renderRecorded(){ const o=S.run?.ollama; $('#chatRecordedBody').innerHTML = o?`<p class="small">Refusals via Ollama: original ${o.n_ref_base}/${o.harmful.length}, abliterated ${o.n_ref_abl}/${o.harmful.length}.</p>${recordedHtml()}`:''; $('#chatRecorded').style.display=o?'':'none'; }
 
 // ------------------------------------------------------------------ run control
 $('#runBtn').onclick=async()=>{
-  if(!S.model) return toast('select a local model first (download one)', true);
-  const body={engine:'abliterate', stage:'all', model:S.model.copy_info.repo||S.model.path, pause_at_choice:$('#optPause').checked, no_ollama:!$('#optOllama').checked, skip_verify:!$('#optVerify').checked, device_map:$('#optDevice').value,
+  if(!S.model) return toast('pick a model first', true);
+  const body={engine:'abliterate', stage:'all', model:S.model.repo, pause_at_choice:$('#optPause').checked, no_ollama:!$('#optOllama').checked, skip_verify:!$('#optVerify').checked, device_map:$('#optDevice').value,
     n_train:+$('#optTrain').value, n_test:+$('#optTest').value, layer_range:$('#optRange').value, max_new_tokens:+$('#optTokens').value, batch:+$('#optBatch').value, gen_batch:+$('#optGenBatch').value, trust_remote_code:$('#optRemote').checked};
-  try{ await api('/pipeline/start', body); S.ES={}; S.events=[]; S.evNext=0; S.logNext=0; $('#console').innerHTML=''; S.runId=null; S.run=null; renderHero(); renderGuide(); toast('run started'); }catch(e){ toast(e.message, true); }
+  try{ await api('/pipeline/start', body); S.ES={}; S.events=[]; S.evNext=0; S.logNext=0; $('#console').innerHTML=''; S.runId=null; S.run=null; renderHero(); renderGuide(); updateHeader(); toast('run started'); }catch(e){ toast(e.message, true); }
 };
 $('#stopBtn').onclick=$('#pipeStop').onclick=async()=>{ await api('/pipeline/stop', {}); toast('stopped'); };
-$('#pipeStart').onclick=async()=>{ const stage=$('#stages .stage.sel')?.dataset.stage; if(!stage) return toast('pick a notebook stage', true);
-  const body={engine:'notebook', stage}; if(['apply','validate'].includes(stage)){ body.run_id=$('#pipeRun').value; if($('#pipeLayer').value!=='') body.layer=+$('#pipeLayer').value; }
-  try{ await api('/pipeline/start', body); S.logNext=0; $('#console').innerHTML=''; toast(`started notebook stage ${stage}`); }catch(e){ toast(e.message, true); } };
 $('#ollUnload').onclick=async()=>{ const r=await api('/ollama/unload', {}); toast('unloaded: '+(r.unloaded.join(', ')||'nothing')); loadEnv(); };
 
 async function pollPipeline(){
   try{
     const st=await api('/pipeline/status'); const was=S.pipe.running; S.pipe=st;
     $('#dotPipe').className='dot '+(st.running?'busy':(st.exit_code===0?'on':(st.exit_code!=null?'bad':'')));
-    $('#sysPipe').textContent = st.running ? `${st.stage} ${Math.floor(st.elapsed_s/60)}:${String(st.elapsed_s%60).padStart(2,'0')}` : (st.stage?`${st.stage} exit ${st.exit_code}`:'idle');
+    $('#sysPipe').textContent = st.running ? `${st.stage} ${Math.floor(st.elapsed_s/60)}:${String(st.elapsed_s%60).padStart(2,'0')}` : 'idle';
     $('#runBtn').disabled=st.running; $('#stopBtn').disabled=$('#pipeStop').disabled=!st.running;
-    $('#runInfo').textContent = st.running ? `${st.engine} · ${st.stage} · ${st.current||'starting'}` : (st.stage?`last: ${st.engine} ${st.stage}, exit ${st.exit_code}`:'');
+    $('#runInfo').textContent = st.running ? `${st.stage} · ${st.current||'starting'}` : (st.stage?`last: ${st.stage}, exit ${st.exit_code}`:'');
     $('#pipeInfo').textContent = $('#runInfo').textContent;
     if(st.n_lines < S.logNext){ S.logNext=0; $('#console').innerHTML=''; }
     if(st.n_lines > S.logNext){ const lg=await api(`/pipeline/log?start=${S.logNext}`); S.logNext=lg.next; appendLog(lg.lines); }
     if(st.engine==='abliterate' && st.run_id){
-      if(st.running && S.runId!==st.run_id){ await loadRuns(false); await selectRun(st.run_id); S.ES={}; S.events=[]; S.evNext=0; }
+      if(st.running && S.runId!==st.run_id){ await loadRuns(false); if(S.runId!==st.run_id){ /* run of another model: switch model */ const all=await api('/runs'); const r=all.find(x=>x.id===st.run_id); if(r){ await loadModels(); const e=S.models.find(x=>x.slug===r.slug); if(e) await selectModel({repo:e.copy_info?.repo||e.slug, slug:e.slug, preset:S.presets.find(p=>slugOf(p.repo)===e.slug)||null, local:e}, true); } } S.ES={}; S.events=[]; S.evNext=0; }
       if(st.run_id===S.runId && (st.running || st.n_events>S.evNext)){
         if(st.n_events < S.evNext){ S.evNext=0; S.events=[]; }
         if(st.n_events > S.evNext){ const ev=await api(`/pipeline/events?start=${S.evNext}`); S.evNext=ev.next; S.events.push(...ev.events); S.ES=foldEvents(S.events);
           if(ev.events.some(e=>['done','waiting','error'].includes(e.status)&&['measure','scan','choose','apply','verify','validate','ollama','done','error'].includes(e.step))) S.run=await api('/runs/'+S.runId);
-          renderHero(); renderGuide(); } }
+          if(ev.events.some(e=>e.step==='download'&&e.status==='done')) loadModels();
+          renderHero(); renderGuide(); updateHeader(); } }
     }
-    if(was && !st.running){ toast(`${st.engine} ${st.stage} finished (exit ${st.exit_code})`, st.exit_code!==0); await loadRuns(true); loadModels(); loadEnv(); }
+    if(was && !st.running){ toast(`${st.stage} finished (exit ${st.exit_code})`, st.exit_code!==0); await loadModels(); await loadRuns(true); loadEnv(); }
+    updateHeader();
   }catch(e){ console.error(e); }
 }
 function appendLog(lines){ const c=$('#console'); if(c.textContent.startsWith('— no output')) c.innerHTML='';
@@ -316,10 +341,9 @@ function appendLog(lines){ const c=$('#console'); if(c.textContent.startsWith('�
 
 // ------------------------------------------------------------------ lab
 async function labStatus(){ try{ S.lab=await api('/lab/status'); }catch(e){ return; } const l=S.lab;
-  $('#dotLab').className='dot '+(l.busy?'busy':(l.loaded?'on':'')); $('#sysLab').textContent=l.busy||(l.loaded?'resident':'not loaded');
-  $('#labInfo').innerHTML = l.loaded ? `resident since ${l.loaded_at} · <span class="mono">${esc((l.model_dir||'').split(/[\\/]/).pop())}</span> · directions from <span class="mono">${esc(l.run_dir||'')}</span> · VRAM free ${l.vram_free_gb}/${l.vram_total_gb} GB` : `not loaded · VRAM free ${l.vram_free_gb??'?'} GB`;
+  $('#labInfo').innerHTML = l.loaded ? `resident since ${l.loaded_at} · <span class="mono">${esc((l.model_dir||'').split(/[\\/]/).pop())}</span> · VRAM free ${l.vram_free_gb}/${l.vram_total_gb} GB` : `not loaded · VRAM free ${l.vram_free_gb??'?'} GB`;
   $('#labLoad').disabled=!!l.busy; $('#probeBtn').disabled=$('#tryBtn').disabled=!l.loaded||!!l.busy; }
-$('#labLoad').onclick=async()=>{ if(!S.runId) return toast('select a run', true); if(!S.run?.measure) return toast('this run has no measured directions yet', true); $('#labInfo').textContent='loading (~30 s)…'; $('#labLoad').disabled=true; try{ await api('/lab/load', {run_id:S.runId}); toast('model resident'); }catch(e){ toast(e.message, true); } labStatus(); loadEnv(); };
+$('#labLoad').onclick=async()=>{ if(!S.runId) return toast('no run for this model yet', true); if(!S.run?.measure) return toast('this run has no measured directions yet', true); $('#labInfo').textContent='loading (~30 s)…'; $('#labLoad').disabled=true; try{ await api('/lab/load', {run_id:S.runId}); toast('model resident'); }catch(e){ toast(e.message, true); } labStatus(); loadEnv(); };
 $('#labUnload').onclick=async()=>{ await api('/lab/unload', {}); labStatus(); loadEnv(); };
 $('#probeBtn').onclick=async()=>{ const prompt=$('#probePrompt').value.trim(); if(!prompt) return; $('#probeInfo').textContent='probing…'; $('#probeBtn').disabled=true;
   try{ const r=await api('/lab/probe', {prompt}); const NL=r.layers.length, sc=S.run?.measure?.scan_range||[0,NL-1], score=r.layers.map(x=>x.score);
@@ -336,7 +360,7 @@ $('#tryBtn').onclick=async()=>{ const prompts=$('#tryPrompts').value.split('\n')
 
 // ------------------------------------------------------------------ chat
 async function chatStatus(){ const names=chatNames(); try{ const j=await (await fetch(OLLAMA+'/api/tags')).json(); const have=(j.models||[]).map(m=>m.name); const miss=[names.base,names.abl].filter(n=>!have.includes(n)&&!have.includes(n+':latest'));
-  $('#chatStatus').innerHTML = miss.length? `<span class="badge warn">missing</span> ${miss.join(', ')} — run the pipeline through Ollama` : '<span class="badge pass">ready</span> both models present'; }catch(e){ $('#chatStatus').innerHTML='<span class="badge fail">Ollama not reachable</span>'; } }
+  $('#chatStatus').innerHTML = miss.length? `<span class="badge warn">missing in Ollama</span> ${miss.join(', ')}` : `<span class="badge pass">ready</span> ${names.base} and ${names.abl}`; }catch(e){ $('#chatStatus').innerHTML='<span class="badge fail">Ollama not reachable</span>'; } }
 let ctrl=null;
 async function ask(model, box, badgeEl, prompt){ const t=box.querySelector('.t'); t.textContent=''; badgeEl.innerHTML='';
   const res=await fetch(OLLAMA+'/api/chat', {method:'POST', signal:ctrl.signal, headers:{'Content-Type':'application/json'}, body:JSON.stringify({model, stream:true, options:{temperature:0, num_predict:+$('#chatTokens').value||300}, messages:[{role:'user', content:prompt}]})});
@@ -345,14 +369,70 @@ async function ask(model, box, badgeEl, prompt){ const t=box.querySelector('.t')
   while(true){ const {value,done}=await rd.read(); if(done) break; buf+=dec.decode(value,{stream:true}); let i; while((i=buf.indexOf('\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+1); if(!line.trim()) continue; try{ const j=JSON.parse(line); full+=j.message?.content||''; t.innerHTML=highlight(full); badgeEl.innerHTML=badge(full); }catch(e){} } }
   return full; }
 $('#chatSend').onclick=async()=>{ const prompt=$('#chatPrompt').value.trim(); if(!prompt) return; const names=chatNames(); ctrl=new AbortController(); $('#chatSend').disabled=true; $('#chatStop').disabled=false;
-  try{ const [b,a]=await Promise.all([ask(names.base,$('#chatBase'),$('#chatBaseBadge'),prompt), ask(names.abl,$('#chatAbl'),$('#chatAblBadge'),prompt)]); S.chatHist.unshift({prompt,b,a}); $('#chatHistBody').innerHTML=S.chatHist.slice(1).map(h=>`<div class="prompt">${esc(h.prompt)}</div><div class="pair">${answerBox(names.base,h.b)}${answerBox(names.abl,h.a)}</div>`).join('')||'none yet'; }
+  try{ const [b,a]=await Promise.all([ask(names.base,$('#chatBase'),$('#chatBaseBadge'),prompt), ask(names.abl,$('#chatAbl'),$('#chatAblBadge'),prompt)]); S.chatHist.unshift({prompt,b,a}); $('#chatHistBody').innerHTML=S.chatHist.slice(1).map(h=>`<div class="prompt">${esc(h.prompt)}</div><div class="pair">${answerBox('original',h.b)}${answerBox('abliterated',h.a)}</div>`).join('')||'none yet'; }
   catch(e){ if(e.name!=='AbortError') $('#chatBase .t').textContent='Error: '+e.message; }
   $('#chatSend').disabled=false; $('#chatStop').disabled=true; loadEnv(); };
 $('#chatStop').onclick=()=>ctrl&&ctrl.abort();
 
 // ------------------------------------------------------------------ boot
 (async function boot(){
-  await loadEnv(); await loadModels(); await loadRuns(); await labStatus(); await pollPipeline();
-  show(['abl','lab','chat','dash'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'abl');
+  await loadEnv(); await pollPipeline(); await loadModels(); await labStatus();
+  const h=location.hash.slice(1);
+  if(h==='compare' && cmpReady()) go('compare'); else if(h==='abl' && S.model) go('abl'); else if(S.pipe.running && S.model) go('abl'); else go('model');
   setInterval(pollPipeline, 2000); setInterval(loadEnv, 8000); setInterval(labStatus, 5000);
 })();
+
+// ================================================================== datasets panel
+const DS = { file:'harmful_train.jsonl', q:'', regex:false, source:'', offset:0, limit:40, status:[], sel:new Set(), last:null };
+$('#dataToggle').onclick=()=>{ $('#dataPanel').classList.add('open'); $('#sbomPanel').classList.remove('open'); dataLoad(); };
+$('#dataClose').onclick=()=>$('#dataPanel').classList.remove('open');
+async function dataLoad(){ DS.status=await api('/data'); $('#dataTabs').innerHTML=DS.status.map(f=>`<button class="${f.file===DS.file?'active':''}" data-f="${f.file}">${esc(f.label)} <span class="mono">${f.rows_now}</span>${f.edited?' ✎':''}</button>`).join('');
+  $('#dataTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{ DS.file=b.dataset.f; DS.offset=0; DS.source=''; DS.sel.clear(); dataLoad(); });
+  const f=DS.status.find(x=>x.file===DS.file); $('#dataMeta').innerHTML=`<div class="kv"><b>file</b><span class="mono">data/${f.file}</span><b>source</b><span class="mono">${esc(f.repo)} @ ${(f.revision||'').slice(0,8)} · exported ${esc(f.exported||'')}</span><b>used for</b><span>${esc(f.used)}</span><b>rows</b><span>${f.rows_original??'?'} original · ${f.rows_now} now · ${f.removed} removed · ${f.edited?'<span class="badge warn">edited</span>':'<span class="badge pass">unchanged</span>'} · ${f.size_mb} MB</span></div>`;
+  $('#dataAddBox').innerHTML = f.kind==='prompt' ? `<div class="row"><input type="text" id="addPrompt" placeholder="new prompt" style="max-width:600px"><button class="btn sm" id="addBtn">add</button></div>` : `<div class="row"><input type="text" id="addPrompt" placeholder="user prompt"><input type="text" id="addChosen" placeholder="chosen answer"><input type="text" id="addRejected" placeholder="rejected answer"><input type="text" id="addSource" placeholder="source" style="max-width:140px"><button class="btn sm" id="addBtn">add</button></div>`;
+  $('#addBtn').onclick=async()=>{ const pr=$('#addPrompt').value.trim(); if(!pr) return; const body = f.kind==='prompt' ? {prompt:pr} : {source:$('#addSource').value||'app', chosen:[{role:'user',content:pr},{role:'assistant',content:$('#addChosen').value}], rejected:[{role:'user',content:pr},{role:'assistant',content:$('#addRejected').value}]};
+    try{ await api(`/data/${DS.file}/rows`, body); toast('row added'); dataLoad(); }catch(e){ toast(e.message,true); } };
+  await dataSearch(); dataRemoved();
+}
+async function dataSearch(){ DS.q=$('#dataQ').value; DS.regex=$('#dataRegex').checked;
+  try{ const r=await api(`/data/${DS.file}?q=${encodeURIComponent(DS.q)}&offset=${DS.offset}&limit=${DS.limit}&regex=${DS.regex}${DS.source?'&source='+encodeURIComponent(DS.source):''}`); DS.last=r;
+    $('#dataCount').textContent=`${r.matches} of ${r.total} rows${DS.q?' match':''}`; $('#dataPage').textContent=`${r.offset+1}–${Math.min(r.offset+r.limit,r.matches)}`;
+    const srcSel=$('#dataSource'); if(r.sources){ srcSel.style.display=''; srcSel.innerHTML='<option value="">all sources</option>'+r.sources.map(([s,n])=>`<option value="${esc(s)}" ${s===DS.source?'selected':''}>${esc(s)} (${n})</option>`).join(''); } else srcSel.style.display='none';
+    const kind=DS.status.find(x=>x.file===DS.file).kind;
+    $('#dataRows').innerHTML = r.rows.map(row=>{ const id=row.id; const pr = kind==='prompt' ? row.prompt : (row.chosen?.[0]?.content||''); const chosen=row.chosen?.slice(1).map(m=>m.content).join('\n')||'', rejected=row.rejected?.slice(1).map(m=>m.content).join('\n')||'';
+      return `<div class="rowbox" data-id="${esc(id)}"><div class="row" style="margin:0;justify-content:space-between"><span><input type="checkbox" class="selrow" ${DS.sel.has(id)?'checked':''}> <span class="id">${esc(id)}${row.source?' · '+esc(row.source):''}${row.edited_at?' · edited':''}${row.added_by?' · added':''}</span></span><span class="acts"><button class="btn sm editrow">edit</button><button class="btn sm danger delrow">remove</button></span></div><div class="txt">${highlightQ(pr)}</div>${kind==='dpo'?`<div class="dpo"><div><b>chosen (trained in)</b>${highlightQ(chosen)}</div><div><b>rejected</b>${highlightQ(rejected)}</div></div>`:''}</div>`; }).join('') || '<div class="empty">no rows</div>';
+    $('#dataRows').querySelectorAll('.selrow').forEach(c=>c.onchange=e=>{ const id=c.closest('.rowbox').dataset.id; e.target.checked?DS.sel.add(id):DS.sel.delete(id); $('#dataRemoveSel').disabled=!DS.sel.size; $('#dataRemoveSel').textContent=`remove selected (${DS.sel.size})`; });
+    $('#dataRows').querySelectorAll('.delrow').forEach(b=>b.onclick=async()=>{ const id=b.closest('.rowbox').dataset.id; if(!confirm(`Remove ${id}? It is logged and restorable.`)) return; await api(`/data/${DS.file}/remove`, {ids:[id], reason:$('#dataReason').value}); toast('removed'); dataLoad(); });
+    $('#dataRows').querySelectorAll('.editrow').forEach(b=>b.onclick=()=>{ const box=b.closest('.rowbox'), id=box.dataset.id, row=r.rows.find(x=>x.id===id); const txt=box.querySelector('.txt');
+      if(kind==='prompt'){ txt.innerHTML=`<textarea rows="3">${esc(row.prompt)}</textarea><div class="acts"><button class="btn sm primary saverow">save</button><button class="btn sm cancelrow">cancel</button></div>`; }
+      else { txt.innerHTML=`<label class="small">prompt</label><textarea rows="2">${esc(row.chosen?.[0]?.content||'')}</textarea><label class="small">chosen</label><textarea rows="3">${esc(row.chosen?.slice(1).map(m=>m.content).join('\n')||'')}</textarea><label class="small">rejected</label><textarea rows="3">${esc(row.rejected?.slice(1).map(m=>m.content).join('\n')||'')}</textarea><div class="acts"><button class="btn sm primary saverow">save</button><button class="btn sm cancelrow">cancel</button></div>`; box.querySelector('.dpo')?.remove(); }
+      txt.querySelector('.cancelrow').onclick=()=>dataSearch();
+      txt.querySelector('.saverow').onclick=async()=>{ const tas=[...txt.querySelectorAll('textarea')].map(t=>t.value); const body = kind==='prompt' ? {prompt:tas[0]} : {chosen:[{role:'user',content:tas[0]},{role:'assistant',content:tas[1]}], rejected:[{role:'user',content:tas[0]},{role:'assistant',content:tas[2]}]};
+        try{ await api(`/data/${DS.file}/rows/${encodeURIComponent(id)}`, body, 'PUT'); toast('saved'); dataLoad(); }catch(e){ toast(e.message,true); } }; });
+  }catch(e){ toast(e.message,true); } }
+function highlightQ(t){ let h=esc(t||''); if(DS.q && !DS.regex){ const re=new RegExp(esc(DS.q).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'ig'); h=h.replace(re,x=>`<mark>${x}</mark>`); } return h; }
+$('#dataSearch').onclick=()=>{ DS.offset=0; dataSearch(); }; $('#dataQ').onkeydown=e=>{ if(e.key==='Enter'){ DS.offset=0; dataSearch(); } };
+$('#dataSource').onchange=e=>{ DS.source=e.target.value; DS.offset=0; dataSearch(); };
+$('#dataPrev').onclick=()=>{ DS.offset=Math.max(0,DS.offset-DS.limit); dataSearch(); }; $('#dataNext').onclick=()=>{ if(DS.last && DS.offset+DS.limit<DS.last.matches){ DS.offset+=DS.limit; dataSearch(); } };
+$('#dataRemoveSel').onclick=async()=>{ if(!DS.sel.size) return; if(!confirm(`Remove ${DS.sel.size} rows? They are logged and restorable.`)) return; await api(`/data/${DS.file}/remove`, {ids:[...DS.sel], reason:$('#dataReason').value}); DS.sel.clear(); toast('removed'); dataLoad(); };
+async function dataRemoved(){ const rows=await api(`/data/${DS.file}/removed`); $('#dataRemoved').innerHTML = rows.length ? rows.slice().reverse().map(r=>`<div class="rowbox"><span class="id">${esc(r.id)} · ${esc(r.at)} · ${esc(r.reason||'')}</span><div class="txt">${esc((r.prompt||r.chosen?.[0]?.content||'').slice(0,300))}</div><div class="acts"><button class="btn sm restore" data-id="${esc(r.id)}">restore</button></div></div>`).join('') : '<div class="small">nothing removed</div>';
+  $('#dataRemoved').querySelectorAll('.restore').forEach(b=>b.onclick=async()=>{ await api(`/data/${DS.file}/restore`, {ids:[b.dataset.id]}); toast('restored'); dataLoad(); }); }
+
+// ================================================================== SBOM panel
+let sbomT=null;
+$('#sbomToggle').onclick=()=>{ $('#sbomPanel').classList.add('open'); $('#dataPanel').classList.remove('open'); sbomLoad(); };
+$('#sbomClose').onclick=()=>{ $('#sbomPanel').classList.remove('open'); clearInterval(sbomT); };
+$('#sbomGen').onclick=async()=>{ await api('/sbom/generate', {}); toast('SBOM generation started (PyPI advisory lookups, ~1 min)'); clearInterval(sbomT); sbomT=setInterval(sbomLoad, 3000); };
+$('#sbomQ').oninput=$('#sbomVulnOnly').onchange=()=>sbomRenderPkgs();
+let SB=null;
+async function sbomLoad(){ const st=await api('/sbom'); $('#sbomGen').disabled=st.running; $('#sbomInfo').textContent = st.running ? `generating: ${st.progress}` : (st.error ? 'error: '+st.error : (st.latest ? `latest ${st.latest.file} · ${st.latest.n_components} components · ${st.latest.n_vulnerabilities} advisories` : 'no SBOM yet'));
+  if(!st.running) clearInterval(sbomT);
+  const L=st.latest; if(!L){ $('#sbomSummary').innerHTML='<div class="empty">Press Generate.</div>'; return; }
+  SB=L.summary;
+  $('#sbomSummary').innerHTML=`<div class="stats">${[[L.n_components,'components'],[L.n_vulnerabilities,'advisories'],...Object.entries(SB?.envs||{}).map(([e,v])=>[`${v.packages} / <span class="${v.vulnerable?'vuln':''}">${v.vulnerable}</span>`, e+' packages / vulnerable'])].map(([v,l])=>`<div class="stat"><div class="v" style="font-size:18px">${v}</div><div class="l">${l}</div></div>`).join('')}</div><div class="row"><a class="btn sm" href="/api/sbom/file/${L.file}" download>download ${L.file}</a>${(SB?.notes||[]).map(n=>`<span class="small">${esc(n)}</span>`).join(' · ')}</div>`;
+  $('#sbomModules').innerHTML = SB ? `<table><tr><th>module</th><th class="num">lines</th><th>third-party imports</th><th>resolved packages</th></tr>${SB.project_modules.map(m=>`<tr><td class="mono">${esc(m.path)}</td><td class="num">${m.lines}</td><td class="mono small">${esc(m.imports.join(', '))||'–'}</td><td class="mono small">${esc((m.packages||[]).join(', '))}${m.unresolved?.length?` <span class="small">(${esc(m.unresolved.join(', '))} not in .venv)</span>`:''}</td></tr>`).join('')}</table>` : '';
+  $('#sbomExtra').innerHTML = SB ? `<table><tr><th>type</th><th>name</th><th>version</th><th>purl / hash</th></tr>${SB.extra.map(c=>`<tr><td>${esc(c.type)}</td><td class="mono">${esc(c.name)}</td><td class="mono">${esc(c.version)}</td><td class="mono small">${esc(c.purl||'')}${c.hashes?` sha256 ${esc(c.hashes[0].content.slice(0,16))}…`:''}</td></tr>`).join('')}</table>` : '';
+  sbomRenderPkgs(); }
+function sbomRenderPkgs(){ if(!SB) return; const q=$('#sbomQ').value.toLowerCase(), only=$('#sbomVulnOnly').checked;
+  const rows=SB.packages.filter(p=>(!q||p.name.toLowerCase().includes(q))&&(!only||p.vulns.length));
+  $('#sbomPackages').innerHTML=`<div class="small">${rows.length} packages</div><table><tr><th>env</th><th>package</th><th>version</th><th>licence</th><th>advisories</th></tr>${rows.map(p=>`<tr><td class="small">${esc(p.env)}</td><td class="mono">${esc(p.name)}</td><td class="mono">${esc(p.version)}</td><td class="small">${esc(p.license||'')}</td><td class="small">${p.vulns.length?p.vulns.map(v=>`<div class="vuln"><b>${esc(v.id)}</b> fix: ${esc(v.fixed_in.join(', ')||'none')} — ${esc(v.summary)}</div>`).join(''):(p.error?'<span class="small">not checkable</span>':'')}</td></tr>`).join('')}</table>`; }
