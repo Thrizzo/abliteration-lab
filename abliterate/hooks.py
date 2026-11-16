@@ -1,0 +1,177 @@
+"""Measuring and ablating the residual stream with plain PyTorch hooks on a Hugging Face model.
+No TransformerLens: works with device_map="auto" sharding, MoE blocks and multimodal text decoders."""
+import contextlib
+import gc
+import time
+
+import torch
+
+from .arch import find_layers
+
+
+def _hs_from_args(args, kwargs):
+    if args:
+        return args[0], True
+    return kwargs.get("hidden_states"), False
+
+
+class HookedModel:
+    def __init__(self, model, tokenizer, log=print):
+        self.model, self.tok, self.log = model, tokenizer, log
+        self.layers_name, self.layers = find_layers(model)
+        self.n_layers = len(self.layers)
+        self.d_model = model.config.hidden_size if hasattr(model.config, "hidden_size") else model.config.text_config.hidden_size
+        self.device = next(model.parameters()).device
+        gen_cfg = getattr(model, "generation_config", None)
+        self.eos = getattr(gen_cfg, "eos_token_id", None) or tokenizer.eos_token_id
+        log(f"hooks: {self.layers_name} ({self.n_layers} layers), d_model={self.d_model}, first device {self.device}")
+
+    # ------------------------------------------------------------ tokenization (left padding, chat template)
+    def encode(self, prompts):
+        enc = self.tok.apply_chat_template([[{"role": "user", "content": p}] for p in prompts],
+                                           add_generation_prompt=True, padding=True, return_tensors="pt", return_dict=True)
+        return enc["input_ids"].to(self.device), enc["attention_mask"].to(self.device)
+
+    # ------------------------------------------------------------ measurement: resid_pre at the last token
+    @torch.no_grad()
+    def mean_resid_pre(self, prompts, batch_size, label="", progress=None, per_token=False):
+        """Mean of each layer's input hidden state at the last token -> [n_layers, d_model] float32 (CPU).
+        Also returns the mean activation norm per layer (for the 'separation %' chart)."""
+        total = torch.zeros(self.n_layers, self.d_model, dtype=torch.float32)
+        norm_total = torch.zeros(self.n_layers, dtype=torch.float32)
+        captured = {}
+
+        def make_hook(li):
+            def hook(mod, args, kwargs):
+                hs, _ = _hs_from_args(args, kwargs)
+                captured[li] = hs[:, -1, :].detach().float().cpu()
+            return hook
+
+        handles = [l.register_forward_pre_hook(make_hook(i), with_kwargs=True) for i, l in enumerate(self.layers)]
+        try:
+            n_batches = (len(prompts) + batch_size - 1) // batch_size
+            for b, i in enumerate(range(0, len(prompts), batch_size)):
+                t = time.time()
+                ids, mask = self.encode(prompts[i:i + batch_size])
+                self.model(input_ids=ids, attention_mask=mask, use_cache=False)
+                for li in range(self.n_layers):
+                    total[li] += captured[li].sum(0)
+                    norm_total[li] += captured[li].norm(dim=-1).sum()
+                captured.clear()
+                if progress:
+                    progress(b + 1, n_batches, time.time() - t)
+                gc.collect(); torch.cuda.empty_cache()
+        finally:
+            for h in handles:
+                h.remove()
+        mean = total / len(prompts)
+        if not torch.isfinite(mean).all():
+            raise RuntimeError(f"NaN/Inf in the {label} activations")
+        return mean, norm_total / len(prompts)
+
+    # ------------------------------------------------------------ one prompt, all layers, all tokens (lab probe)
+    @torch.no_grad()
+    def resid_pre_all(self, prompt):
+        """[n_layers, seq, d_model] float32 CPU + token ids."""
+        captured = {}
+
+        def make_hook(li):
+            def hook(mod, args, kwargs):
+                hs, _ = _hs_from_args(args, kwargs)
+                captured[li] = hs[0].detach().float().cpu()
+            return hook
+
+        handles = [l.register_forward_pre_hook(make_hook(i), with_kwargs=True) for i, l in enumerate(self.layers)]
+        try:
+            ids, mask = self.encode([prompt])
+            self.model(input_ids=ids, attention_mask=mask, use_cache=False)
+        finally:
+            for h in handles:
+                h.remove()
+        return torch.stack([captured[i] for i in range(self.n_layers)]), ids[0].tolist()
+
+    # ------------------------------------------------------------ inference-time ablation
+    @contextlib.contextmanager
+    def ablated(self, direction):
+        """Removes `direction` from the residual stream at every layer input and output (and from the
+        attention-block output where no post-norm sits in between). Hooks are removed on exit."""
+        if direction is None:
+            yield
+            return
+        cache = {}
+
+        def d_for(t):
+            key = (t.device, t.dtype)
+            if key not in cache:
+                cache[key] = direction.to(t.device, t.dtype)
+            return cache[key]
+
+        def proj_out(t):
+            d = d_for(t)
+            return t - (t @ d).unsqueeze(-1) * d
+
+        def pre(mod, args, kwargs):
+            hs, positional = _hs_from_args(args, kwargs)
+            if hs is None:
+                return None
+            hs = proj_out(hs)
+            if positional:
+                return (hs, *args[1:]), kwargs
+            kwargs = dict(kwargs); kwargs["hidden_states"] = hs
+            return args, kwargs
+
+        def post(mod, args, out):
+            if isinstance(out, tuple):
+                return (proj_out(out[0]), *out[1:])
+            return proj_out(out)
+
+        handles = []
+        for l in self.layers:
+            handles.append(l.register_forward_pre_hook(pre, with_kwargs=True))
+            handles.append(l.register_forward_hook(post))
+            attn = getattr(l, "self_attn", None) or getattr(l, "self_attention", None) or getattr(l, "linear_attn", None)
+            if attn is not None and not hasattr(l, "post_self_attn_layernorm"):
+                handles.append(attn.register_forward_hook(post))
+        try:
+            yield
+        finally:
+            for h in handles:
+                h.remove()
+
+    @torch.no_grad()
+    def generate(self, prompts, max_new_tokens, batch_size, direction=None):
+        outs = []
+        with self.ablated(direction):
+            for i in range(0, len(prompts), batch_size):
+                ids, mask = self.encode(prompts[i:i + batch_size])
+                toks = self.model.generate(input_ids=ids, attention_mask=mask, max_new_tokens=max_new_tokens, do_sample=False,
+                                           eos_token_id=self.eos, pad_token_id=self.tok.pad_token_id)
+                outs += self.tok.batch_decode(toks[:, ids.shape[1]:], skip_special_tokens=True)
+                gc.collect(); torch.cuda.empty_cache()
+        return outs
+
+    @torch.no_grad()
+    def next_token_logits(self, prompts, batch_size=8):
+        out = []
+        for i in range(0, len(prompts), batch_size):
+            ids, mask = self.encode(prompts[i:i + batch_size])
+            out.append(self.model(input_ids=ids, attention_mask=mask, use_cache=False).logits[:, -1, :].float().cpu())
+        return torch.cat(out)
+
+
+def load_model(model_dir, dtype="bfloat16", device_map="cuda", trust_remote_code=False, log=print):
+    """AutoModelForCausalLM + tokenizer with left padding. device_map='auto' shards over all GPUs (+ CPU offload)."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    tok = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
+    tok.padding_side = "left"
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    kw = {"dtype": getattr(torch, dtype), "trust_remote_code": trust_remote_code}
+    if device_map == "auto":
+        kw["device_map"] = "auto"
+        model = AutoModelForCausalLM.from_pretrained(model_dir, **kw)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(model_dir, **kw).to(device_map)
+    model.eval()
+    log(f"model loaded: {type(model).__name__}, dtype {dtype}, device_map {device_map}")
+    return model, tok

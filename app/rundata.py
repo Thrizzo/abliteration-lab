@@ -34,7 +34,8 @@ def list_runs(project):
         la, bl, scan, gens, val = (load(os.path.join(d, f)) for f in
                                    ("layer_analysis.json", "baseline.json", "scan_results.json", "generations.json", "validation.json"))
         settings = load(os.path.join(project, "abliteration_settings.json"), {})
-        if not (la or scan or gens):
+        meta = load(os.path.join(d, "run.json"), {})
+        if not (la or scan or gens or meta):
             continue                                  # empty folder (aborted before 4.2)
         n_after = sum(is_refusal(t) for t in gens["after_orthogonalization"]) if gens else None
         out.append({
@@ -46,6 +47,9 @@ def list_runs(project):
             "layer": gens["layer"] if gens else None, "n_after": n_after,
             "verdict": val["verdict"] if val else None,
             "saved_layer": settings.get("layer_to_abliterate"),
+            "model": meta.get("model_repo", "THUDM/glm-edge-4b-chat"), "slug": meta.get("slug", "glm-edge-4b-chat"),
+            "status": meta.get("status", "done" if gens else ("scanned" if scan else "partial")), "engine": "abliterate" if meta else "notebook",
+            "ollama": meta.get("ollama"), "family": (meta.get("arch") or {}).get("family"), "recommended": meta.get("recommended"),
         })
     return out
 
@@ -79,7 +83,9 @@ def collect(project, run_dir):
             if mm:
                 cfg[k] = int(mm.group(1)) if mm.group(1).isdigit() else mm.group(1)
 
-    ollama = load(os.path.join(project, "runs", "ollama_ab_latest.json"))
+    meta = load(os.path.join(rd, "run.json"), {})
+    apply_stats = load(os.path.join(rd, "apply.json"), {})
+    ollama = load(os.path.join(rd, "ollama_ab.json")) or (load(os.path.join(project, "runs", "ollama_ab_latest.json")) if not meta else None)
     if ollama and ollama.get("results", {}).get("base"):
         n = min(len(ollama["harmful"]), len(ollama["results"]["base"]))
         ollama["n_ref_base"] = sum(is_refusal(t) for t in ollama["results"]["base"][:n])
@@ -89,18 +95,21 @@ def collect(project, run_dir):
 
     return {
         "generated": datetime.now().isoformat(timespec="minutes"), "run_dir": os.path.relpath(rd, project).replace(os.sep, "/"), "run_id": run_id(rd),
-        "model": {"name": "THUDM/glm-edge-4b-chat", "n_layers": la["n_layers"] if la else None,
-                  "d_model": la["d_model"] if la else None, "revision": copy_info.get("revision")},
+        "model": {"name": meta.get("model_repo", "THUDM/glm-edge-4b-chat"), "slug": meta.get("slug", "glm-edge-4b-chat"),
+                  "n_layers": la["n_layers"] if la else None, "d_model": la["d_model"] if la else None,
+                  "revision": copy_info.get("revision"), "arch": meta.get("arch")},
+        "meta": {k: meta.get(k) for k in ("status", "stage", "started", "updated", "layer", "recommended", "ollama", "out_dir", "model_dir", "error")},
         "config": {"n_inst_train": la["n_inst_train"] if la else None, "n_inst_test": len(bl["prompts"]) if bl else None, **cfg},
         "refusal_markers": REFUSAL_MARKERS,
         "prompts": ({"harmful_train_examples": la["harmful_train_examples"], "harmless_train_examples": la["harmless_train_examples"]} if la else None),
         "measure": ({k: la[k] for k in ("separation_pct", "norms", "act_size", "similarity", "cos_next", "peak", "stable", "scan_range")} if la else None),
         "scan": ({"prompts": bl["prompts"], "baseline": bl["baseline"], "n_base": bl["n_base"],
                   "layers": [{k: s[k] for k in ("layer", "refusals", "norm", "cjk_ratio", "generations")} for s in scan]} if (bl and scan) else None),
-        "choice": {"layer": gens["layer"] if gens else settings.get("layer_to_abliterate"), "saved": settings.get("saved"),
+        "choice": {"layer": gens["layer"] if gens else (meta.get("layer") if meta else settings.get("layer_to_abliterate")), "saved": settings.get("saved"),
                    "saved_layer": settings.get("layer_to_abliterate"), "refusals_in_scan": settings.get("refusals_in_scan")},
         "apply": ({"orthogonality": orth, "after": gens["after_orthogonalization"],
-                   "n_after": sum(is_refusal(t) for t in gens["after_orthogonalization"]), "changed_tensors": vd.get("changed_tensors")} if gens else None),
+                   "n_after": sum(is_refusal(t) for t in gens["after_orthogonalization"]), "changed_tensors": vd.get("changed_tensors") or apply_stats.get("n_changed"),
+                   "stats": apply_stats or None} if gens else ({"stats": apply_stats, "orthogonality": orth, "after": None, "n_after": None, "changed_tensors": apply_stats.get("n_changed")} if apply_stats else None)),
         "validation": ({"verdict": val["verdict"], "checks": val["checks"], "kl": vd.get("kl"),
                         "harmless": {"prompts": vd.get("eval_harmless", []), "base": vd.get("base_harmless", []), "abl": vd.get("abl_harmless", [])}}
                        if val else None),

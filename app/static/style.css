@@ -141,3 +141,20 @@ svg{display:block;max-width:100%}
 .empty{color:var(--muted);padding:30px;text-align:center;border:1px dashed var(--axis);border-radius:12px}
 .toast{position:fixed;right:20px;bottom:20px;background:var(--raised);border:1px solid var(--border);border-radius:10px;padding:10px 14px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.4);display:none;z-index:10}
 .toast.err{border-color:var(--critical)}
+
+/* ---------------- guide steps */
+.gstep{position:relative;background:linear-gradient(180deg,rgba(255,255,255,.02),transparent 40%),var(--surface);border:1px solid var(--border);border-left:3px solid var(--axis);border-radius:var(--r);padding:16px 20px;margin:0 0 12px;opacity:.72;transition:.2s}
+.gstep.st-running{opacity:1;border-left-color:var(--accent);box-shadow:var(--glow)}
+.gstep.st-waiting{opacity:1;border-left-color:var(--warn);box-shadow:0 0 0 1px rgba(250,178,25,.3),0 0 24px rgba(250,178,25,.15)}
+.gstep.st-done{opacity:1;border-left-color:var(--s3)}
+.gstep.st-error{opacity:1;border-left-color:var(--critical)}
+.ghead{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.ghead h3{margin:0;font-size:15px;flex:1}
+.gnum{display:grid;place-items:center;width:26px;height:26px;border-radius:50%;background:var(--surface2);font:600 12px var(--mono);color:var(--ink2);flex:none}
+.st-running .gnum{background:var(--accent);color:var(--accent-ink)}.st-done .gnum{background:var(--s3);color:#fff}.st-waiting .gnum{background:var(--warn);color:#0b0b0b}
+.gtext p{margin:0 0 6px;font-size:13.5px;color:var(--ink2);max-width:90ch}
+.gtext p b{color:var(--ink)}
+.glive{margin:10px 0}
+.gstep details{margin:6px 0 0}.gstep details p{margin:6px 0 0;max-width:100ch;line-height:1.6}
+.gstep code{font-size:12px}
+.kv .mono{word-break:break-all}
