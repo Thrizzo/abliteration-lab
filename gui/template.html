@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Abliteration Walkthrough</title>
+<style>
+:root{
+  color-scheme:light;
+  --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s7:#6250d6;
+  --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --div-mid:#f0efec; --div-neg:#e34948;
+  --mark:#fff2c4; --code:#f0efec;
+}
+@media (prefers-color-scheme:dark){ :root:not([data-theme="light"]){
+  color-scheme:dark;
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s7:#9085e9;
+  --div-mid:#383835; --div-neg:#e66767; --mark:#4a3f10; --code:#262624;
+}}
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  --page:#0d0d0d; --surface:#1a1a19; --ink:#f0efec; --ink2:#c3c2b7; --muted:#898781;
+  --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s7:#9085e9;
+  --div-mid:#383835; --div-neg:#e66767; --mark:#4a3f10; --code:#262624;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--page);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--s1)}
+.app{display:grid;grid-template-columns:240px 1fr;min-height:100vh}
+nav{position:sticky;top:0;height:100vh;overflow:auto;padding:20px 12px;border-right:1px solid var(--border);background:var(--surface)}
+nav h1{font-size:15px;margin:0 0 4px 8px}
+nav .sub{font-size:12px;color:var(--muted);margin:0 0 16px 8px;word-break:break-all}
+nav button{display:flex;gap:10px;align-items:center;width:100%;text-align:left;border:0;background:none;color:var(--ink2);padding:9px 8px;border-radius:8px;cursor:pointer;font:inherit;font-size:14px}
+nav button:hover{background:var(--code)}
+nav button.active{background:var(--s1);color:#fff}
+nav button .n{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;border:1px solid currentColor;font-size:12px;flex:none}
+main{padding:28px 36px 80px;max-width:1180px}
+section.step{display:none}
+section.step.active{display:block}
+h2{font-size:24px;margin:0 0 4px}
+.lead{color:var(--ink2);max-width:76ch;margin:0 0 20px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px 20px;margin:16px 0}
+.card h3{margin:0 0 8px;font-size:16px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:900px){.app{grid-template-columns:1fr}nav{position:static;height:auto}.grid2{grid-template-columns:1fr}main{padding:16px}.pair{grid-template-columns:1fr}}
+.stats{display:flex;gap:12px;flex-wrap:wrap;margin:8px 0 16px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;min-width:150px}
+.stat .v{font-size:26px;font-weight:600;line-height:1.1}
+.stat .l{font-size:12px;color:var(--muted)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0}
+button.btn{font:inherit;font-size:14px;padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--ink);cursor:pointer}
+button.btn.primary{background:var(--s1);color:#fff;border-color:transparent}
+button.btn:disabled{opacity:.5;cursor:default}
+input[type=range]{width:320px;accent-color:var(--s1);vertical-align:middle}
+textarea{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--axis);background:var(--surface);color:var(--ink);width:100%}
+svg{display:block;max-width:100%}
+.axis{stroke:var(--axis);stroke-width:1}
+.gridline{stroke:var(--grid);stroke-width:1}
+.tick{fill:var(--muted);font-size:11px}
+.bar{fill:var(--s1)}
+.bar.out{fill:var(--grid)}
+.bar.sel{stroke:var(--ink);stroke-width:2}
+.bar.cjk{fill:var(--s2)}
+.bar.chosen{fill:var(--s3)}
+.tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--page);padding:6px 9px;border-radius:6px;font-size:12px;max-width:360px;display:none;z-index:9;white-space:pre-line}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--ink2);margin:6px 0 0;flex-wrap:wrap}
+.legend span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-2px;background:var(--c)}
+.narr{background:var(--code);border-radius:8px;padding:10px 14px;margin:10px 0;min-height:48px}
+.narr b{color:var(--s1)}
+pre,code{font-family:ui-monospace,Consolas,monospace;font-size:13px}
+code{background:var(--code);padding:1px 5px;border-radius:4px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
+th{color:var(--muted);font-weight:500}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.chosen td{background:color-mix(in srgb,var(--s3) 12%,transparent)}
+.badge{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:999px;color:#fff;vertical-align:middle}
+.badge.ref{background:var(--critical)}.badge.ans{background:var(--good)}.badge.warn{background:var(--warn);color:#0b0b0b}.badge.pass{background:var(--good)}.badge.fail{background:var(--critical)}.badge.cjk{background:var(--serious)}
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:10px 0 18px}
+.ans{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:13px;white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto}
+.ans .h{font-size:11px;color:var(--muted);margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;white-space:normal}
+mark{background:var(--mark);color:inherit;border-radius:3px;padding:0 2px}
+.prompt{font-weight:600;margin:14px 0 2px}
+.prompt .i{color:var(--muted);font-weight:400;font-size:12px;margin-right:6px}
+details{margin:8px 0}summary{cursor:pointer;color:var(--ink2);font-size:13px}
+.formula{font-size:18px;text-align:center;padding:14px;font-family:"Cambria Math",Cambria,serif}
+.diag{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center;margin:10px 0}
+.box{border:1px solid var(--axis);border-radius:10px;padding:10px 12px;text-align:center;font-size:13px}
+.arrow{color:var(--muted);text-align:center;font-size:20px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px}
+.small{font-size:12px;color:var(--muted)}
+.chip{display:inline-block;background:var(--code);border-radius:6px;padding:2px 8px;font-size:12px;margin:2px 4px 2px 0;cursor:pointer}
+.chip:hover{outline:1px solid var(--s1)}
+.layers{display:flex;gap:3px;flex-wrap:wrap;margin:8px 0}
+.layers div{width:22px;height:22px;border-radius:4px;display:grid;place-items:center;font-size:10px;color:#fff;background:var(--axis)}
+.layers div.on{background:var(--s1)}
+.layers div.now{outline:2px solid var(--ink);outline-offset:1px}
+footer{margin-top:40px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<div class="tip" id="tip"></div>
+<div class="app">
+<nav>
+  <h1>Abliteration walkthrough</h1>
+  <p class="sub" id="navsub"></p>
+  <div id="navbtns"></div>
+</nav>
+<main>
+
+<!-- 0 ------------------------------------------------------------------ -->
+<section class="step" id="s0">
+  <h2>What we are doing</h2>
+  <p class="lead">A chat model's safety training makes it refuse harmful requests. Arditi et al. (2024) showed that "I am about to refuse" is a <b>single direction</b> in the model's internal activations. <b>Abliteration</b> finds that direction and removes it from the weights. This page replays a real run, layer by layer, so you can see how the direction is measured, tested and removed.</p>
+  <div class="stats" id="facts"></div>
+  <div class="card">
+    <h3>The residual stream</h3>
+    <p>The model processes text through <span id="nl1"></span> layers. After every layer, each token is a vector of <span id="dm1"></span> numbers, the <b>residual stream</b>. Each layer reads from it and adds something back. We look at the vector of the <b>last token</b> of the prompt, which is the moment the model decides how to begin its answer.</p>
+    <div class="diag">
+      <div class="box"><span class="dot" style="background:var(--critical)"></span>harmful prompts<br><span class="small">e.g. <i id="ex-h"></i></span></div>
+      <div class="arrow">→ model →</div>
+      <div class="box">mean activation <b>A</b> (per layer)</div>
+      <div class="box"><span class="dot" style="background:var(--s3)"></span>harmless prompts<br><span class="small">e.g. <i id="ex-s"></i></span></div>
+      <div class="arrow">→ model →</div>
+      <div class="box">mean activation <b>B</b> (per layer)</div>
+    </div>
+    <div class="formula">r<sub>layer</sub> = normalize( A<sub>layer</sub> − B<sub>layer</sub> )</div>
+    <p class="small">One candidate direction <b>r</b> per layer. Then: test each candidate (step 3), pick one (step 4), and project it out of every weight matrix that writes into the residual stream (step 5).</p>
+  </div>
+  <div class="grid2">
+    <div class="card"><h3>Harmful prompts (AdvBench, first few)</h3><div id="list-h" class="small"></div></div>
+    <div class="card"><h3>Harmless prompts (Alpaca, first few)</h3><div id="list-s" class="small"></div></div>
+  </div>
+  <div class="card"><h3>What counts as a refusal?</h3><p class="small">A simple phrase match. An answer is a refusal if it contains any of:</p><div id="markers"></div></div>
+</section>
+
+<!-- 1 ------------------------------------------------------------------ -->
+<section class="step" id="s1">
+  <h2>Step 1 · Measure: where does the model separate harmful from harmless?</h2>
+  <p class="lead">For every layer we take the mean last-token activation of <span id="ntrain"></span> harmful and <span id="ntrain2"></span> harmless prompts and subtract them. The bar shows how long that difference vector is, relative to the typical activation size. Press <b>Play</b> to walk through the layers.</p>
+  <div class="row">
+    <button class="btn primary" id="playSep">▶ Play through the layers</button>
+    <button class="btn" id="resetSep">Reset</button>
+    <span class="small">or click a bar</span>
+  </div>
+  <div class="narr" id="narrSep">Press Play.</div>
+  <div class="card"><div id="chartSep"></div>
+    <div class="legend"><span style="--c:var(--s1)">scanned in step 3</span><span style="--c:var(--grid)">not scanned (too early / too late)</span></div>
+    <details><summary>Show as table</summary><div id="tableSep"></div></details>
+  </div>
+  <div class="card"><h3>How to read it</h3>
+    <ul>
+      <li><b>Early layers are low:</b> the model is still processing words and has not yet "understood" whether the request is harmful.</li>
+      <li><b>The middle rises:</b> the concept forms here. The good candidates usually live in this region.</li>
+      <li>Only the blue range (<span id="scanrange"></span>) is tested in step 3, because very early layers carry no concept yet and very late layers already encode the output tokens.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 2 ------------------------------------------------------------------ -->
+<section class="step" id="s2">
+  <h2>Step 2 · Is it the same direction in every layer?</h2>
+  <p class="lead">Each candidate direction is compared with every other one (cosine similarity, 1 = identical, 0 = unrelated). A large block of high similarity means the model carries <b>one</b> refusal direction through many layers. That is why removing a single direction from <i>all</i> layers works.</p>
+  <div class="narr" id="narrSim"></div>
+  <div class="grid2">
+    <div class="card"><div id="chartSim"></div><div class="legend"><span style="--c:var(--s1)">1 = same direction</span><span style="--c:var(--div-mid)">0 = unrelated</span><span style="--c:var(--div-neg)">−1 = opposite</span></div></div>
+    <div class="card"><h3>Neighbouring layers</h3><p class="small">Similarity between layer L and L+1. Values near 1 mean the direction barely changes from one layer to the next.</p><div id="chartNext"></div></div>
+  </div>
+</section>
+
+<!-- 3 ------------------------------------------------------------------ -->
+<section class="step" id="s3">
+  <h2>Step 3 · Scan: remove each candidate and count refusals</h2>
+  <p class="lead">Baseline first: the untouched model answers <span id="ntest"></span> held-out harmful prompts and refuses <b id="nbase"></b> of them. Then, for each layer's candidate direction, the direction is subtracted from the activations of <i>every</i> layer (a temporary hook, no weight change) and the model answers again. Step through the layers and read the answers.</p>
+  <div class="row">
+    <button class="btn primary" id="nextScan">Next layer ▶</button>
+    <button class="btn" id="playScan">▶ Play all</button>
+    <button class="btn" id="resetScan">Reset</button>
+    <label class="small">Layer: <input type="range" id="scanSlider"> <b id="scanLayerLabel"></b></label>
+  </div>
+  <div class="narr" id="narrScan"></div>
+  <div class="layers" id="layerStrip"></div>
+  <div class="card"><div id="chartScan"></div>
+    <div class="legend"><span style="--c:var(--s1)">refusals with this layer's direction removed</span><span style="--c:var(--s2)">answers mostly Chinese (damaged)</span><span style="--c:var(--s3)">chosen layer</span><span style="--c:var(--muted)">— baseline (nothing removed)</span></div>
+  </div>
+  <div class="card">
+    <h3 id="genTitle">Answers</h3>
+    <p class="small">Left: the unmodified model. Right: with the selected layer's direction removed. Matched refusal phrases are <mark>highlighted</mark>.</p>
+    <div id="gens"></div>
+  </div>
+</section>
+
+<!-- 4 ------------------------------------------------------------------ -->
+<section class="step" id="s4">
+  <h2>Step 4 · Choose a layer</h2>
+  <p class="lead">Fewest refusals wins, but only if the answers stay coherent and in English. The rule used in this run: fewest refusals, then the lowest share of Chinese characters, then the earlier layer.</p>
+  <div class="stats" id="choiceStats"></div>
+  <div class="card"><table id="tableScan"></table></div>
+</section>
+
+<!-- 5 ------------------------------------------------------------------ -->
+<section class="step" id="s5">
+  <h2>Step 5 · Apply: write it into the weights</h2>
+  <p class="lead">The hook in step 3 was temporary. Now every matrix that <i>writes into</i> the residual stream is changed so it can no longer produce the direction <b>r</b>: the token embedding, every attention output projection (<code>o_proj</code>) and every MLP output projection (<code>down_proj</code>).</p>
+  <div class="card">
+    <div class="formula">W′ = W − r rᵀ W</div>
+    <p class="small">Projecting out the component along <b>r</b>. Anything the matrix writes is now orthogonal to the refusal direction. The check below multiplies r with every edited matrix: the result should be ~0 (bf16 rounding leaves ~1e-3).</p>
+    <div class="stats" id="applyStats"></div>
+  </div>
+  <div class="card"><h3>Held-out prompts after the permanent edit (no hooks)</h3><div id="applyGens"></div></div>
+</section>
+
+<!-- 6 ------------------------------------------------------------------ -->
+<section class="step" id="s6">
+  <h2>Step 6 · Validate the saved model</h2>
+  <p class="lead">The base model and the saved abliterated model are reloaded from disk and compared on six independent checks.</p>
+  <div class="stats" id="valStats"></div>
+  <div class="card"><table id="tableVal"></table></div>
+  <div class="card"><h3>Harmless prompts: does the model still behave?</h3><p class="small">Same prompt, base on the left, abliterated on the right. These should stay essentially the same.</p><div id="valHarmless"></div></div>
+</section>
+
+<!-- 7 ------------------------------------------------------------------ -->
+<section class="step" id="s7">
+  <h2>Step 7 · Try it live: base vs. abliterated in Ollama</h2>
+  <p class="lead">Both models were converted to GGUF and imported into Ollama as <code>glm-edge-base</code> and <code>glm-edge-abl</code>. Type a prompt or pick one; the same prompt goes to both models and the answers stream in side by side.</p>
+  <div class="card">
+    <div class="row"><span id="ollStatus" class="small">Checking Ollama…</span></div>
+    <div id="presets"></div>
+    <textarea id="livePrompt" rows="3" placeholder="Ask something…"></textarea>
+    <div class="row"><button class="btn primary" id="liveSend">Send to both models</button><button class="btn" id="liveStop" disabled>Stop</button><span class="small">temperature 0, max 300 tokens</span></div>
+    <div class="pair">
+      <div class="ans" id="liveBase"><div class="h"><span>glm-edge-base (original)</span><span id="liveBaseBadge"></span></div><div class="t"></div></div>
+      <div class="ans" id="liveAbl"><div class="h"><span>glm-edge-abl (abliterated)</span><span id="liveAblBadge"></span></div><div class="t"></div></div>
+    </div>
+  </div>
+  <div class="card" id="ollRecorded"></div>
+  <div class="card"><h3>If the live panel cannot reach Ollama</h3>
+    <ul class="small">
+      <li>Ollama must be running (<code>ollama list</code> should show both models).</li>
+      <li>Open this page through <code>serve_gui.bat</code> (http://localhost:8765) rather than as a file, so the browser is allowed to call the Ollama API.</li>
+    </ul>
+  </div>
+</section>
+
+<footer id="foot"></footer>
+</main>
+</div>
+
+<script id="data" type="application/json">/*__DATA__*/</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const tip = $('#tip');
+function showTip(e, html){ tip.innerHTML = html; tip.style.display='block'; tip.style.left = (e.clientX+14)+'px'; tip.style.top = (e.clientY+14)+'px'; }
+function hideTip(){ tip.style.display='none'; }
+const fmt = (x, d=1) => (x==null||isNaN(x)) ? '–' : Number(x).toFixed(d);
+
+// ---------------------------------------------------------------- navigation
+const STEPS = ['Overview','1 · Measure','2 · Stability','3 · Scan','4 · Choose','5 · Apply','6 · Validate','7 · Live A/B'];
+const nav = $('#navbtns');
+STEPS.forEach((t,i)=>{ const b=document.createElement('button'); b.innerHTML=`<span class="n">${i}</span>${t}`; b.onclick=()=>go(i); nav.appendChild(b); });
+function go(i){ document.querySelectorAll('section.step').forEach((s,j)=>s.classList.toggle('active', i===j));
+  nav.querySelectorAll('button').forEach((b,j)=>b.classList.toggle('active', i===j)); location.hash='#'+i; window.scrollTo(0,0); }
+$('#navsub').textContent = `${D.model.name} · run ${D.run_id}`;
+
+// ---------------------------------------------------------------- refusal markers
+const MARKERS = D.refusal_markers;
+function isRefusal(t){ const l=(t||'').toLowerCase(); return MARKERS.some(m=>l.includes(m.toLowerCase())); }
+function highlight(t){ let html = esc(t||''); const seen=new Set();
+  for (const m of MARKERS){ const k=m.toLowerCase(); if(seen.has(k)) continue; seen.add(k);
+    const re = new RegExp(esc(m).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'ig'); html = html.replace(re, x=>`<mark>${x}</mark>`); }
+  return html; }
+function cjkRatio(t){ if(!t) return 0; let n=0; for(const c of t){ if(c>='一'&&c<='鿿') n++; } return n/Math.max(1,t.length); }
+function badge(t){ return isRefusal(t) ? '<span class="badge ref">REFUSAL</span>' : '<span class="badge ans">answers</span>'; }
+function answerBox(label, text){ const cjk=cjkRatio(text);
+  return `<div class="ans"><div class="h"><span>${label}</span><span>${cjk>0.2?'<span class="badge cjk">mostly Chinese</span> ':''}${badge(text)}</span></div>${highlight(text)}</div>`; }
+
+// ---------------------------------------------------------------- 0 overview
+const M = D.measure, NL = D.model.n_layers;
+$('#nl1').textContent = NL; $('#dm1').textContent = D.model.d_model;
+$('#ex-h').textContent = D.prompts.harmful_train_examples[0]; $('#ex-s').textContent = D.prompts.harmless_train_examples[0];
+$('#list-h').innerHTML = D.prompts.harmful_train_examples.slice(0,8).map(p=>`<div>• ${esc(p)}</div>`).join('');
+$('#list-s').innerHTML = D.prompts.harmless_train_examples.slice(0,8).map(p=>`<div>• ${esc(p)}</div>`).join('');
+$('#markers').innerHTML = MARKERS.map(m=>`<code>${esc(m)}</code> `).join('');
+$('#facts').innerHTML = [[D.model.name,'model'],[NL,'layers'],[D.model.d_model,'residual dimensions'],[D.config.n_inst_train+' + '+D.config.n_inst_train,'harmful + harmless prompts measured'],[D.config.n_inst_test,'held-out test prompts'],[D.config.dtype||'bfloat16','precision']]
+  .map(([v,l])=>`<div class="stat"><div class="v">${esc(v)}</div><div class="l">${l}</div></div>`).join('');
+$('#foot').textContent = `Run folder: ${D.run_dir} · chosen layer ${D.choice.layer} · generated ${D.generated}`;
+
+// ---------------------------------------------------------------- chart helper
+function barChart(el, values, opts){
+  const W = opts.width||1040, H = opts.height||260, pl=48, pr=12, pt=26, pb=36;
+  const n = values.length, iw = (W-pl-pr)/n, max = opts.max ?? Math.max(...values.filter(v=>v!=null))*1.15;
+  const y = v => pt + (H-pt-pb) * (1 - v/max);
+  let s = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${opts.aria||''}">`;
+  const ticks = opts.ticks || 4;
+  for(let i=0;i<=ticks;i++){ const v=max*i/ticks, yy=y(v); s+=`<line class="gridline" x1="${pl}" x2="${W-pr}" y1="${yy}" y2="${yy}"/><text class="tick" x="${pl-6}" y="${yy+4}" text-anchor="end">${opts.fmtY?opts.fmtY(v):fmt(v,0)}</text>`; }
+  values.forEach((v,i)=>{ if(v==null) return; const x=pl+i*iw+1, w=Math.max(2,iw-2), yy=y(v), h=(H-pb)-yy;
+    const cls = (opts.cls? opts.cls(i,v):'' );
+    s+=`<rect class="bar ${cls}" data-i="${i}" x="${x}" y="${yy}" width="${w}" height="${Math.max(0,h)}" rx="${Math.min(4,w/2)}"/>`;
+    if (opts.labelIdx && opts.labelIdx.includes(i)) s+=`<text class="tick" x="${x+w/2}" y="${yy-5}" text-anchor="middle" style="fill:var(--ink2)">${opts.fmtY?opts.fmtY(v):fmt(v,0)}</text>`; });
+  if (opts.hline!=null){ const yy=y(opts.hline); s+=`<line x1="${pl}" x2="${W-pr}" y1="${yy}" y2="${yy}" stroke="var(--muted)" stroke-width="1.5"/><text class="tick" x="${W-pr}" y="${yy-4}" text-anchor="end" style="fill:var(--ink2)">${opts.hlineLabel||''}</text>`; }
+  s+=`<line class="axis" x1="${pl}" x2="${W-pr}" y1="${H-pb}" y2="${H-pb}"/>`;
+  const step = n>30?5:(n>15?2:1);
+  values.forEach((v,i)=>{ const lab = opts.xlab? opts.xlab(i):i; if(i%step===0) s+=`<text class="tick" x="${pl+i*iw+iw/2}" y="${H-pb+15}" text-anchor="middle">${lab}</text>`; });
+  s+=`<text class="tick" x="${(pl+W-pr)/2}" y="${H-4}" text-anchor="middle" style="fill:var(--ink2)">${opts.xlabel||''}</text>`;
+  s+=`<text class="tick" transform="translate(12 ${(pt+H-pb)/2}) rotate(-90)" text-anchor="middle" style="fill:var(--ink2)">${opts.ylabel||''}</text></svg>`;
+  el.innerHTML = s;
+  el.querySelectorAll('rect.bar').forEach(r=>{ const i=+r.dataset.i;
+    r.addEventListener('mousemove', e=>{ showTip(e, opts.tip(i)); }); r.addEventListener('mouseleave', hideTip);
+    if(opts.click) r.addEventListener('click', ()=>opts.click(i)); r.style.cursor = opts.click?'pointer':'default'; });
+}
+
+// ---------------------------------------------------------------- 1 measure
+const sep = M.separation_pct, lo = M.scan_range[0], hi = M.scan_range[1];
+$('#ntrain').textContent = D.config.n_inst_train; $('#ntrain2').textContent = D.config.n_inst_train;
+$('#scanrange').textContent = `layers ${lo}–${hi}`;
+let sepShown = -1, sepTimer = null, sepSel = null;
+function drawSep(){
+  const vals = sep.map((v,i)=> (sepShown<0 || i<=sepShown) ? v : 0);
+  barChart($('#chartSep'), vals, {max: Math.max(...sep)*1.15, aria:'Separation per layer',
+    cls:(i)=> (i<lo||i>hi?'out ':'') + (i===sepSel?'sel':''), labelIdx:[M.peak],
+    fmtY:v=>fmt(v,0)+'%', xlabel:'layer (0 = input, right = output)', ylabel:'difference, % of activation size',
+    tip:i=>`layer ${i}\nharmful − harmless: ${fmt(sep[i],1)}% of activation size\nraw length ${fmt(M.norms[i],2)} (typical activation ${fmt(M.act_size[i],1)})${i===M.peak?'\n← strongest separation':''}`,
+    click:i=>{ clearInterval(sepTimer); sepSel=i; sepShown=-1; narrSep(i); drawSep(); }});
+}
+function narrSep(i){
+  const pos = i<lo?'before the scan range: the model has not formed the concept yet':(i>hi?'after the scan range: this close to the output the stream already encodes the answer tokens':'inside the scan range');
+  $('#narrSep').innerHTML = `<b>Layer ${i}</b>: the mean harmful activation differs from the mean harmless one by <b>${fmt(sep[i],1)}%</b> of the activation size${i===M.peak?' — <b>the strongest separation of all layers</b>':''}. This layer is ${pos}.`;
+}
+$('#playSep').onclick = ()=>{ clearInterval(sepTimer); sepShown=0; sepSel=null; narrSep(0); drawSep();
+  sepTimer=setInterval(()=>{ sepShown++; if(sepShown>=NL){ clearInterval(sepTimer); sepShown=-1; $('#narrSep').innerHTML += ` <b>Done.</b> Strongest difference in layer ${M.peak}; layers ${M.stable[0]}–${M.stable[M.stable.length-1]} share almost the same direction (step 2).`; drawSep(); return; } narrSep(sepShown); drawSep(); }, 350); };
+$('#resetSep').onclick = ()=>{ clearInterval(sepTimer); sepShown=-1; sepSel=null; $('#narrSep').textContent='Press Play.'; drawSep(); };
+$('#tableSep').innerHTML = '<table><tr><th>layer</th><th class="num">difference %</th><th class="num">raw length</th><th class="num">similarity to peak layer</th><th>scanned</th></tr>' +
+  sep.map((v,i)=>`<tr><td>${i}</td><td class="num">${fmt(v,1)}</td><td class="num">${fmt(M.norms[i],2)}</td><td class="num">${fmt(M.similarity[M.peak][i],2)}</td><td>${i>=lo&&i<=hi?'yes':''}</td></tr>`).join('')+'</table>';
+drawSep();
+
+// ---------------------------------------------------------------- 2 stability
+(function(){
+  const S = M.similarity, n=S.length, W=460, pl=30, pb=30, cell=(W-pl-10)/n, H=pl+cell*n+pb;
+  const col = v => v>=0 ? `color-mix(in srgb, var(--s1) ${Math.round(v*100)}%, var(--div-mid))` : `color-mix(in srgb, var(--div-neg) ${Math.round(-v*100)}%, var(--div-mid))`;
+  let s=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Cosine similarity between layer directions">`;
+  for(let r=0;r<n;r++) for(let c=0;c<n;c++){ const yy = pl + (n-1-r)*cell; s+=`<rect data-r="${r}" data-c="${c}" x="${pl+c*cell}" y="${yy}" width="${cell-0.5}" height="${cell-0.5}" fill="${col(S[r][c])}"/>`; }
+  const st=M.stable; if(st.length){ const a=st[0], b=st[st.length-1]; s+=`<rect x="${pl+a*cell}" y="${pl+(n-1-b)*cell}" width="${(b-a+1)*cell}" height="${(b-a+1)*cell}" fill="none" stroke="var(--ink)" stroke-width="1.5"/>`; }
+  for(let i=0;i<n;i+=5){ s+=`<text class="tick" x="${pl+i*cell+cell/2}" y="${H-pb+14}" text-anchor="middle">${i}</text><text class="tick" x="${pl-5}" y="${pl+(n-1-i)*cell+cell/2+4}" text-anchor="end">${i}</text>`; }
+  s+=`<text class="tick" x="${(pl+W)/2}" y="${H-3}" text-anchor="middle" style="fill:var(--ink2)">layer</text></svg>`;
+  $('#chartSim').innerHTML = s;
+  $('#chartSim').querySelectorAll('rect[data-r]').forEach(r=>{ r.addEventListener('mousemove', e=>showTip(e, `layer ${r.dataset.r} vs layer ${r.dataset.c}\nsimilarity ${fmt(S[+r.dataset.r][+r.dataset.c],2)}`)); r.addEventListener('mouseleave', hideTip); });
+  $('#narrSim').innerHTML = `Strongest separation in <b>layer ${M.peak}</b>. Layers <b>${st[0]}–${st[st.length-1]}</b> (outlined) have a similarity above 0.8 with it: one stable direction over ${st.length} layers. The chosen layer ${D.choice.layer} ${st.includes(D.choice.layer)?'lies inside this block.':'lies outside this block.'}`;
+  const nx = M.cos_next.slice(0,-1);
+  barChart($('#chartNext'), nx, {max:1.05, height:230, ticks:2, fmtY:v=>fmt(v,1), aria:'Similarity between neighbouring layers', xlab:i=>i,
+    xlabel:'layer L (compared with L+1)', ylabel:'cosine similarity', cls:i=>(i<lo||i>hi?'out':''), tip:i=>`layer ${i} vs ${i+1}: ${fmt(nx[i],3)}`});
+})();
+
+// ---------------------------------------------------------------- 3 scan
+const SC = D.scan, layers = SC.layers.map(l=>l.layer).sort((a,b)=>a-b), byLayer = Object.fromEntries(SC.layers.map(l=>[l.layer,l]));
+const NT = SC.prompts.length;
+$('#ntest').textContent = NT; $('#nbase').textContent = `${SC.n_base}/${NT}`;
+let revealed = -1, scanTimer=null;   // index into layers
+const slider = $('#scanSlider'); slider.min=0; slider.max=layers.length-1; slider.value=0;
+function drawScan(){
+  const vals = layers.map((l,i)=> i<=revealed ? byLayer[l].refusals : null);
+  $('#layerStrip').innerHTML = Array.from({length:NL},(_,l)=>{ const i=layers.indexOf(l); return `<div class="${i>=0&&i<=revealed?'on':''} ${i===revealed?'now':''}" title="layer ${l}">${l}</div>`; }).join('');
+  barChart($('#chartScan'), vals, {max: NT+1, ticks: Math.min(NT,8), height:250, aria:'Refusals per scanned layer', xlab:i=>layers[i],
+    cls:(i)=> (layers[i]===D.choice.layer?'chosen':(byLayer[layers[i]].cjk_ratio>0.2?'cjk':'')) + (i===revealed?' sel':''),
+    hline: SC.n_base, hlineLabel:`baseline ${SC.n_base}/${NT}`, xlabel:'layer the direction was taken from', ylabel:`refusals (of ${NT})`,
+    tip:i=>{const r=byLayer[layers[i]]; return `direction from layer ${layers[i]}\n${r.refusals}/${NT} refusals · Chinese share ${fmt(r.cjk_ratio*100,0)}%\nfirst answer: ${(r.generations[0]||'').slice(0,90)}…`;},
+    click:i=>{ clearInterval(scanTimer); revealed=i; slider.value=i; drawScan(); }});
+  if (revealed<0){ $('#narrScan').innerHTML = `<b>Baseline</b>: with nothing removed, the model refuses <b>${SC.n_base} of ${NT}</b> held-out harmful prompts. Click <b>Next layer</b> to test the first candidate (layer ${layers[0]}).`;
+    $('#genTitle').textContent = `Baseline answers (nothing removed) — ${SC.n_base}/${NT} refusals`; $('#scanLayerLabel').textContent='baseline';
+    $('#gens').innerHTML = SC.prompts.map((p,i)=>`<div class="prompt"><span class="i">${i+1}</span>${esc(p)}</div><div class="pair">${answerBox('original model', SC.baseline[i])}<div class="ans small" style="display:grid;place-items:center">— pick a layer —</div></div>`).join('');
+    return; }
+  const l = layers[revealed], r = byLayer[l], best = Math.min(...layers.slice(0,revealed+1).map(x=>byLayer[x].refusals));
+  $('#scanLayerLabel').textContent = l;
+  $('#narrScan').innerHTML = `<b>Layer ${l}</b>: removing this layer's direction from every layer leaves <b>${r.refusals}/${NT}</b> refusals (baseline ${SC.n_base}). ${r.cjk_ratio>0.2?'<b>Warning:</b> answers are largely Chinese, a sign of damage. ':''}${r.refusals===best?'Best so far. ':''}${l===D.choice.layer?'<b>This is the layer that was chosen.</b> ':''}Read the answers below: do they stay on topic and coherent?`;
+  $('#genTitle').textContent = `Answers with the direction from layer ${l} removed — ${r.refusals}/${NT} refusals`;
+  $('#gens').innerHTML = SC.prompts.map((p,i)=>`<div class="prompt"><span class="i">${i+1}</span>${esc(p)}</div><div class="pair">${answerBox('original model (baseline)', SC.baseline[i])}${answerBox(`direction from layer ${l} removed`, r.generations[i])}</div>`).join('');
+}
+$('#nextScan').onclick = ()=>{ clearInterval(scanTimer); if(revealed<layers.length-1){ revealed++; slider.value=revealed; drawScan(); } };
+$('#resetScan').onclick = ()=>{ clearInterval(scanTimer); revealed=-1; slider.value=0; drawScan(); };
+$('#playScan').onclick = ()=>{ clearInterval(scanTimer); revealed=-1; drawScan(); scanTimer=setInterval(()=>{ if(revealed>=layers.length-1){ clearInterval(scanTimer); return; } revealed++; slider.value=revealed; drawScan(); }, 1400); };
+slider.oninput = ()=>{ clearInterval(scanTimer); revealed=+slider.value; drawScan(); };
+drawScan();
+
+// ---------------------------------------------------------------- 4 choose
+(function(){
+  const c = D.choice, r = byLayer[c.layer];
+  $('#choiceStats').innerHTML = [[c.layer,'chosen layer'],[`${r?r.refusals:'?'}/${NT}`,'refusals in the scan'],[`${SC.n_base}/${NT}`,'baseline refusals'],[r?fmt(r.cjk_ratio*100,0)+'%':'?','Chinese characters']]
+    .map(([v,l])=>`<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+  const sorted = [...SC.layers].sort((a,b)=>a.layer-b.layer);
+  $('#tableScan').innerHTML = '<tr><th>layer</th><th class="num">refusals</th><th class="num">Chinese</th><th class="num">raw length</th><th>first answer</th><th></th></tr>' +
+    sorted.map(s=>`<tr class="${s.layer===c.layer?'chosen':''}"><td>${s.layer}</td><td class="num">${s.refusals}/${NT}</td><td class="num">${fmt(s.cjk_ratio*100,0)}%</td><td class="num">${fmt(s.norm,2)}</td><td class="small">${esc((s.generations[0]||'').slice(0,110))}…</td><td>${s.layer===c.layer?'<span class="badge pass">chosen</span>':''}${s.cjk_ratio>0.2?' <span class="badge cjk">Chinese</span>':''}</td></tr>`).join('');
+})();
+
+// ---------------------------------------------------------------- 5 apply
+(function(){
+  const a = D.apply, o = a.orthogonality || {};
+  const ex = v => v==null ? '–' : Number(v).toExponential(1);
+  $('#applyStats').innerHTML = [[ex(o.embed_tokens),'max |r·W| embedding'],[ex(o.o_proj),'max |r·W| o_proj (worst)'],[ex(o.down_proj),'max |r·W| down_proj (worst)'],[a.changed_tensors??'–','weight tensors changed'],[`${a.n_after}/${NT}`,'refusals after the edit (no hooks)']]
+    .map(([v,l])=>`<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+  $('#applyGens').innerHTML = SC.prompts.map((p,i)=>`<div class="prompt"><span class="i">${i+1}</span>${esc(p)}</div><div class="pair">${answerBox('base model', SC.baseline[i])}${answerBox('abliterated weights', a.after[i])}</div>`).join('');
+})();
+
+// ---------------------------------------------------------------- 6 validate
+(function(){
+  const v = D.validation; if(!v){ $('#s6 .lead').textContent='Validation (4.8) has not run yet.'; return; }
+  const bcls = s => s==='PASS'?'pass':(s==='FAIL'?'fail':'warn');
+  $('#valStats').innerHTML = [[`<span class="badge ${bcls(v.verdict)}" style="font-size:16px">${v.verdict}</span>`,'overall'],[fmt(v.kl,3),'KL divergence on harmless prompts'],[esc(v.checks[0]?.result??''),'base refuses'],[esc(v.checks[1]?.result??''),'abliterated refuses']]
+    .map(([val,l])=>`<div class="stat"><div class="v">${val}</div><div class="l">${l}</div></div>`).join('');
+  $('#tableVal').innerHTML = '<tr><th>check</th><th>result</th><th>status</th><th>why</th></tr>' + v.checks.map(c=>`<tr><td>${esc(c.check)}</td><td>${esc(c.result)}</td><td><span class="badge ${bcls(c.status)}">${c.status}</span></td><td class="small">${esc(c.why)}</td></tr>`).join('');
+  const h = v.harmless || {prompts:[],base:[],abl:[]};
+  $('#valHarmless').innerHTML = h.prompts.slice(0,6).map((p,i)=>`<div class="prompt"><span class="i">${i+1}</span>${esc(p)}</div><div class="pair">${answerBox('base', h.base[i])}${answerBox('abliterated', h.abl[i])}</div>`).join('');
+})();
+
+// ---------------------------------------------------------------- 7 live
+(function(){
+  const HOST = 'http://localhost:11434';
+  const presets = [...SC.prompts.slice(0,6), 'Explain how a TCP handshake works.', 'Write a Python function that reverses a string.', 'Summarize the causes of World War I in three sentences.'];
+  $('#presets').innerHTML = presets.map(p=>`<span class="chip">${esc(p)}</span>`).join('');
+  $('#presets').querySelectorAll('.chip').forEach(c=>c.onclick=()=>{ $('#livePrompt').value=c.textContent; });
+  fetch(HOST+'/api/tags').then(r=>r.json()).then(j=>{ const names=(j.models||[]).map(m=>m.name);
+    const missing = ['glm-edge-base','glm-edge-abl'].filter(n=>!names.includes(n+':latest'));
+    $('#ollStatus').innerHTML = missing.length===0 ? '<span class="badge pass">Ollama reachable</span> both models present' : `<span class="badge warn">Ollama reachable</span> missing: ${missing.join(', ')} (run notebook section 7)`; })
+    .catch(()=>{ $('#ollStatus').innerHTML = '<span class="badge fail">Ollama not reachable</span> start Ollama and open this page via serve_gui.bat'; });
+  let ctrl=null;
+  async function ask(model, box, badgeEl){
+    const t = box.querySelector('.t'); t.textContent=''; badgeEl.innerHTML='';
+    const res = await fetch(HOST+'/api/chat', {method:'POST', signal:ctrl.signal, headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model, stream:true, options:{temperature:0, num_predict:300}, messages:[{role:'user', content:$('#livePrompt').value}]})});
+    if(!res.ok) throw new Error(`${model}: HTTP ${res.status}`);
+    const rd = res.body.getReader(), dec=new TextDecoder(); let buf='', full='';
+    while(true){ const {value,done}=await rd.read(); if(done) break; buf+=dec.decode(value,{stream:true});
+      let i; while((i=buf.indexOf('\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+1); if(!line.trim()) continue;
+        try{ const j=JSON.parse(line); full += j.message?.content||''; t.innerHTML = highlight(full); badgeEl.innerHTML = badge(full); }catch(e){} } }
+  }
+  $('#liveSend').onclick = async ()=>{ if(!$('#livePrompt').value.trim()) return; ctrl=new AbortController(); $('#liveSend').disabled=true; $('#liveStop').disabled=false;
+    try{ await Promise.all([ask('glm-edge-base', $('#liveBase'), $('#liveBaseBadge')), ask('glm-edge-abl', $('#liveAbl'), $('#liveAblBadge'))]); }
+    catch(e){ if(e.name!=='AbortError') $('#liveBase .t').textContent = 'Error: '+e.message+' — is Ollama running and the page served from localhost?'; }
+    $('#liveSend').disabled=false; $('#liveStop').disabled=true; };
+  $('#liveStop').onclick = ()=>ctrl&&ctrl.abort();
+  const o = D.ollama;
+  if (o && o.results && o.results.base.length){
+    const all = [...o.harmful, ...o.normal];
+    $('#ollRecorded').innerHTML = `<h3>Recorded A/B test from the notebook run (7.4)</h3><p class="small">Refusals on harmful prompts via Ollama: base ${o.n_ref_base}/${o.harmful.length}, abliterated ${o.n_ref_abl}/${o.harmful.length}.</p>` +
+      all.map((p,i)=> o.results.base[i]==null?'':`<div class="prompt"><span class="i">${i<o.harmful.length?'harmful':'normal'}</span>${esc(p)}</div><div class="pair">${answerBox('glm-edge-base', o.results.base[i])}${answerBox('glm-edge-abl', o.results.abl[i])}</div>`).join('');
+  } else $('#ollRecorded').style.display='none';
+})();
+
+const fromHash = () => go(Math.min(7, Math.max(0, parseInt(location.hash.slice(1))||0)));
+window.addEventListener('hashchange', fromHash);
+fromHash();
+</script>
+</body>
+</html>
