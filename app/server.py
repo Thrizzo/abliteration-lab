@@ -32,9 +32,11 @@ from lab import Lab  # noqa: E402
 from datasets import Datasets, FILES as DATA_FILES  # noqa: E402
 from sbom import SbomJob  # noqa: E402
 from abliterate import arch as ARCH  # noqa: E402
+from abliterate import platform as PL  # noqa: E402
 
-PROJECT = os.environ.get("ABL_PROJECT") or os.path.dirname(HERE)
-OLLAMA = "http://localhost:11434"
+CODE = os.path.dirname(HERE)                                    # where abliterate/, run_pipeline.py live
+PROJECT = os.path.abspath(os.environ.get("ABL_PROJECT") or CODE)   # where models/, runs/, data/ live
+OLLAMA = PL.ollama_host()
 NOTEBOOK_STAGES = {"setup": "1 · setup (torch, packages, llama.cpp)", "data": "3 · dataset audit + local copies",
                    "abl": "4 · measure, scan, choose, apply, validate", "apply": "4.6-4.8 · apply the chosen layer + validate",
                    "validate": "4.8 · validate the saved model", "ollama": "7 · GGUF, Ollama import, A/B test", "main": "2-4 + 7 · the whole pipeline"}
@@ -83,7 +85,8 @@ class Pipeline:
                 pass
         os.makedirs(os.path.join(PROJECT, "runs"), exist_ok=True)
         self.log_path = os.path.join(PROJECT, "runs", f"app_{engine}_{stage}_{datetime.now():%Y%m%d_%H%M%S}.log")
-        env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "MPLBACKEND": "Agg", "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
+        env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "MPLBACKEND": "Agg", "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+               "PYTHONPATH": CODE + os.pathsep + os.environ.get("PYTHONPATH", "")}
         self.lines, self.events, self.stage, self.engine, self.started, self.exit_code, self.run_dir = [], [], stage, engine, time.time(), None, run_dir
         self.proc = subprocess.Popen(cmd, cwd=PROJECT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, encoding="utf-8", errors="replace", bufsize=1)
@@ -139,7 +142,7 @@ class Pipeline:
 
 
 pipeline = Pipeline()
-PY = os.path.join(PROJECT, ".venv", "Scripts", "python.exe")
+PY = PL.pipeline_python(PROJECT)
 
 
 def save_layer(layer, run_dir=None):
@@ -167,11 +170,27 @@ def ollama_post(path, body, timeout=30):
         return json.loads(r.read())
 
 
+_cuda = {"checked": False, "available": None, "torch": None}
+
+
+def cuda_available():
+    """torch.cuda.is_available() computed once in a thread (importing torch costs ~2 s); None until known."""
+    if not _cuda["checked"]:
+        _cuda["checked"] = True
+        def probe():
+            try:
+                import torch
+                _cuda["available"], _cuda["torch"] = bool(torch.cuda.is_available()), torch.__version__
+            except Exception as e:
+                _cuda["available"], _cuda["torch"] = False, f"import failed: {e}"
+        threading.Thread(target=probe, daemon=True).start()
+    return _cuda["available"]
+
+
 def gpu_info():
+    out = PL.nvidia_smi()
     try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=10).stdout.strip().split(", ")
-        return {"name": out[0], "vram_used_gb": round(int(out[1]) / 1024, 1), "vram_total_gb": round(int(out[2]) / 1024, 1), "util": int(out[3])}
+        return {"name": out[0], "vram_used_gb": round(int(out[1]) / 1024, 1), "vram_total_gb": round(int(out[2]) / 1024, 1), "util": int(out[3])} if out else None
     except Exception:
         return None
 
@@ -198,9 +217,10 @@ def env():
         oll = {"reachable": True, "models": models, "loaded": loaded}
     except Exception as e:
         oll = {"reachable": False, "error": str(e), "models": [], "loaded": []}
-    return {"project": PROJECT, "gpu": gpu_info(), "disk_free_gb": round(disk.free / 1e9, 1),
-            "venv": os.path.isfile(PY), "venv_gguf": os.path.isfile(p(".venv-gguf", "Scripts", "python.exe")),
-            "llama_cpp": os.path.isfile(p("llama.cpp", "convert_hf_to_gguf.py")), "data": os.path.isfile(p("data", "harmful_test.jsonl")),
+    return {"project": PROJECT, "code": CODE, "gpu": gpu_info(), "cuda": cuda_available(), "torch": _cuda["torch"], "os": os.name,
+            "notebook_engine": os.name == "nt", "disk_free_gb": round(disk.free / 1e9, 1), "python": PY, "ollama_host": OLLAMA,
+            "venv": os.path.isfile(PY), "venv_gguf": os.path.isfile(PL.gguf_python(PROJECT)),
+            "llama_cpp": os.path.isfile(os.path.join(PL.llama_cpp_dir(PROJECT), "convert_hf_to_gguf.py")), "data": os.path.isfile(p("data", "harmful_test.jsonl")),
             "ollama": oll, "notebook_stages": NOTEBOOK_STAGES, "settings": rundata.load(p("abliteration_settings.json"), {})}
 
 
@@ -314,13 +334,15 @@ class Start(BaseModel):
 def pipeline_start(s: Start):
     run_dir = os.path.join("runs", f"abliterate_{s.run_id}") if s.run_id else None
     if s.engine == "notebook":
+        if os.name != "nt" or os.environ.get("ABL_NOTEBOOK_ENGINE") == "0":
+            raise HTTPException(400, "the notebook engine (run_pipeline.py / TransformerLens) is Windows-only; use engine=abliterate")
         if s.stage not in NOTEBOOK_STAGES:
             raise HTTPException(400, f"unknown notebook stage {s.stage}")
         if s.stage in ("apply", "validate") and not run_dir:
             raise HTTPException(400, "apply/validate need a run_id")
         if s.layer is not None:
             save_layer(s.layer, run_dir)
-        cmd = [PY, "-u", os.path.join(PROJECT, "run_pipeline.py"), s.stage] + (["--run-dir", run_dir] if run_dir else [])
+        cmd = [PY, "-u", os.path.join(CODE, "run_pipeline.py"), s.stage] + (["--run-dir", run_dir] if run_dir else [])
         return pipeline.start(cmd, "notebook", s.stage, run_dir)
     if s.stage not in ("all", "download", "measure", "scan", "continue", "apply", "validate", "deploy"):
         raise HTTPException(400, f"unknown stage {s.stage}")
@@ -416,6 +438,42 @@ async def lab_try(t: Try):
         return await run_in_threadpool(lab.try_layer, t.layer, t.prompts[:8], min(t.max_new_tokens, 200))
     except RuntimeError as e:
         raise HTTPException(409, str(e))
+
+
+# ------------------------------------------------------------------------- API: Ollama proxy (the browser never talks to Ollama directly)
+@app.get("/api/ollama/tags")
+def ollama_tags():
+    try:
+        return ollama_get("/api/tags")
+    except Exception as e:
+        raise HTTPException(502, f"Ollama not reachable at {OLLAMA}: {e}")
+
+
+class ChatReq(BaseModel):
+    model: str
+    prompt: str
+    num_predict: int = 300
+
+
+@app.post("/api/ollama/chat")
+def ollama_chat_proxy(c: ChatReq):
+    from fastapi.responses import StreamingResponse
+    body = json.dumps({"model": c.model, "stream": True, "options": {"temperature": 0, "num_predict": min(max(c.num_predict, 16), 2048)},
+                       "messages": [{"role": "user", "content": c.prompt}]}).encode()
+    req = urllib.request.Request(f"{OLLAMA}/api/chat", data=body, headers={"Content-Type": "application/json"})
+    try:
+        upstream = urllib.request.urlopen(req, timeout=600)
+    except Exception as e:
+        raise HTTPException(502, f"Ollama error: {e}")
+
+    def gen():
+        with upstream:
+            while True:
+                chunk = upstream.read(4096)
+                if not chunk:
+                    break
+                yield chunk
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
 
 
 @app.post("/api/ollama/unload")
@@ -538,21 +596,21 @@ def main():
     global PROJECT, PY
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", default=PROJECT)
-    ap.add_argument("--port", type=int, default=8787)
+    ap.add_argument("--port", type=int, default=int(os.environ.get("ABL_PORT", "8787")))
+    ap.add_argument("--host", default=os.environ.get("ABL_HOST", "127.0.0.1"), help="bind address; 0.0.0.0 only behind a reverse proxy with auth")
     ap.add_argument("--open", action="store_true", help="open the browser")
     a = ap.parse_args()
     PROJECT = os.path.abspath(a.project)
-    PY = os.path.join(PROJECT, ".venv", "Scripts", "python.exe")
+    os.makedirs(PROJECT, exist_ok=True)
+    PY = PL.pipeline_python(PROJECT)
     lab.project = PROJECT
     datasets.dir = os.path.join(PROJECT, "data")
     sbom.project, sbom.dir = PROJECT, os.path.join(PROJECT, "sbom")
-    if not os.path.isdir(os.path.join(PROJECT, "abliterate")):
-        raise SystemExit(f"{PROJECT} has no abliterate/ package - pass --project")
     import uvicorn
-    print(f"Abliteration Lab: project {PROJECT} -> http://localhost:{a.port}")
+    print(f"Abliteration Lab: code {CODE}, project {PROJECT}, python {PY}, ollama {OLLAMA} -> http://{a.host}:{a.port}")
     if a.open:
         threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{a.port}")).start()
-    uvicorn.run(app, host="127.0.0.1", port=a.port, log_level="warning")
+    uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
 
 
 if __name__ == "__main__":

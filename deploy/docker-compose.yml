@@ -1,0 +1,51 @@
+# Abliteration Lab: app + Ollama + Caddy (basic auth). Works with Docker Desktop and Rancher Desktop (moby backend);
+# with the containerd backend use `nerdctl compose`. Needs the NVIDIA container toolkit on the host.
+#   cp deploy/.env.example deploy/.env   # set WORKSPACE, CADDY_USER, CADDY_HASH
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+services:
+  app:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    image: abliteration-lab:latest
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      ABL_HOST: 0.0.0.0
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ${WORKSPACE:-./workspace}:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+    depends_on: [ollama]
+    restart: unless-stopped
+    # the app is only reachable through caddy; uncomment to expose it directly on the host (no auth!)
+    # ports: ["127.0.0.1:8787:8787"]
+
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_KEEP_ALIVE: 5m
+    volumes:
+      - ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "${BIND_ADDR:-0.0.0.0}:${HTTP_PORT:-8080}:8080"
+    environment:
+      CADDY_USER: ${CADDY_USER:-admin}
+      CADDY_HASH: "${CADDY_HASH:?CADDY_HASH is empty - see deploy/.env.example}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [app]
+    restart: unless-stopped
+
+volumes:
+  ollama: {}
+  caddy_data: {}

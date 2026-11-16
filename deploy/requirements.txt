@@ -1,0 +1,15 @@
+# main environment of the container (/opt/venv): pipeline + app. torch comes from the cu128 index (see Dockerfile).
+torch>=2.8
+transformers>=4.57
+datasets>=3.0
+accelerate>=1.0
+safetensors>=0.5
+huggingface_hub>=0.30
+sentencepiece
+protobuf
+tiktoken
+numpy
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2
+matplotlib

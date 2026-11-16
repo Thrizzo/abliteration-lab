@@ -14,6 +14,9 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from abliterate import platform as PL  # noqa: E402
+
 INVENTORY_SCRIPT = r'''
 import json, importlib.metadata as md
 out = []
@@ -140,7 +143,7 @@ class SbomJob:
 
     def generate(self):
         p = lambda *a: os.path.join(self.project, *a)
-        envs_py = {".venv": p(".venv", "Scripts", "python.exe"), ".venv-gguf": p(".venv-gguf", "Scripts", "python.exe")}
+        envs_py = {"main": PL.pipeline_python(self.project), "gguf-converter": PL.gguf_python(self.project)}
         envs, flat = {}, []
         for name, py in envs_py.items():
             if not os.path.isfile(py):
@@ -159,7 +162,7 @@ class SbomJob:
         mods = project_imports(self.project)
         # map imports to packages via top_level.txt of the .venv inventory
         top = {}
-        for pk in envs.get(".venv", []):
+        for pk in envs.get("main", []):
             for t in pk.get("top_level") or [pk["name"].lower().replace("-", "_")]:
                 top.setdefault(t, pk)
         for m in mods:
@@ -180,25 +183,24 @@ class SbomJob:
                           "properties": [{"name": "imports", "value": ", ".join(m["imports"])}, {"name": "lines", "value": str(m["lines"])}]})
         extra, notes = [], []
         ollama = None
-        for cand in ("ollama", os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")):
-            ov = tool_version([cand, "--version"])
-            if ov:
-                ollama = ov; break
+        try:
+            with urllib.request.urlopen(PL.ollama_host() + "/api/version", timeout=5) as r:
+                m = re.search(r"(\d+)\.(\d+)\.(\d+)", json.loads(r.read()).get("version", ""))
+                ollama = tuple(int(x) for x in m.groups()) if m else None
+        except Exception:
+            exe = PL.ollama_exe()
+            ollama = tool_version([exe, "--version"]) if exe else None
         if ollama:
             ok = ollama >= MIN_OLLAMA
             extra.append({"type": "application", "name": "ollama", "version": ".".join(map(str, ollama)), "purl": f"pkg:github/ollama/ollama@v{'.'.join(map(str, ollama))}"})
             notes.append(f"Ollama {'.'.join(map(str, ollama))}: {'OK' if ok else 'UPDATE NEEDED (>= 0.17.6)'}")
-        if os.path.isdir(p("llama.cpp", ".git")):
-            rev = subprocess.run(["git", "-C", p("llama.cpp"), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        if os.path.isdir(os.path.join(PL.llama_cpp_dir(self.project), ".git")):
+            rev = subprocess.run(["git", "-C", PL.llama_cpp_dir(self.project), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
             extra.append({"type": "library", "name": "llama.cpp", "version": rev[:12], "purl": f"pkg:github/ggml-org/llama.cpp@{rev}"})
             notes.append(f"llama.cpp {rev[:12]} (Python converter only; it does not parse untrusted GGUF)")
-        try:
-            out = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=30).stdout
-            m = re.search(r"CUDA (?:UMD )?Version:\s*([\d.]+)", out)
-            if m:
-                extra.append({"type": "platform", "name": "nvidia-driver-cuda", "version": m.group(1)})
-        except Exception:
-            pass
+        cv = PL.driver_cuda_version()
+        if cv:
+            extra.append({"type": "platform", "name": "nvidia-driver-cuda", "version": cv})
         models_dir = p("models")
         if os.path.isdir(models_dir):
             for slug in sorted(os.listdir(models_dir)):

@@ -26,6 +26,38 @@ In the app: pick a model → Run (downloads if needed) → Compare. Options: pau
 device `cuda` or `auto`. Each guide step shows what is happening, why it matters, what to look for, and expands to the math and the
 GLM-5.x transfer notes.
 
+## Run it in Docker (Linux, Docker Desktop, Rancher Desktop)
+
+The image holds the pipeline, the app and the GGUF converter environment; models and runs live on a volume at `/workspace`.
+Ollama runs as its own container and the app talks to it over the API (`OLLAMA_HOST`), so no Ollama CLI is needed in the image.
+The host needs an NVIDIA driver and the NVIDIA container toolkit (Docker Desktop on Windows: WSL2 + a current driver, nothing else).
+
+```bash
+cp deploy/.env.example deploy/.env         # set WORKSPACE and CADDY_HASH (docker run --rm caddy:2 caddy hash-password --plaintext 'secret')
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+```
+
+Open http://localhost:8080 (Caddy, basic auth). Headless pipeline runs use the same image:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm app --model THUDM/glm-edge-4b-chat
+```
+
+Environment knobs (all optional): `ABL_PROJECT` (workspace, default `/workspace`), `OLLAMA_HOST`, `ABL_HOST`/`ABL_PORT`, `ABL_GGUF_PY`, `ABL_LLAMA_CPP`, `HF_TOKEN`.
+The same variables let the plain Windows/Linux install point at other locations (`abliterate/platform.py`).
+
+**Rancher Desktop.** With the *moby* (dockerd) backend the compose file works as is (`docker compose`). With the *containerd* backend use
+`nerdctl compose -f deploy/docker-compose.yml up -d --build`. GPU passthrough into Rancher Desktop containers on Windows is not supported by
+Rancher Desktop itself (it is on Docker Desktop); on a Linux host install the NVIDIA container toolkit and it works with either backend.
+
+**Rancher / Kubernetes.** `deploy/k8s/abliteration.yaml` is a single-pod deployment (app + Ollama sharing the workspace), a PVC for the
+workspace, a Service and an ingress-nginx Ingress with basic auth. Push the image to a registry the cluster can pull from, install the
+NVIDIA device plugin (enable time-slicing if a node has one GPU, because both containers request `nvidia.com/gpu`), create the
+`basic-auth` secret, set the host name, then `kubectl apply -f deploy/k8s/abliteration.yaml`.
+
+Security: the app has no login of its own and can run subprocesses, edit datasets and write models. Only expose it through the proxy
+(or an ingress) with authentication, never bind `0.0.0.0` on an open network.
+
 ## Run the pipeline headless
 
 ```powershell

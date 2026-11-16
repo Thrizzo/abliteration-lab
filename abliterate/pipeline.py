@@ -64,6 +64,11 @@ def step_download(run, repo, models_dir, token=None):
     import hashlib
     slug = slug_of(repo)
     dst = os.path.join(models_dir, slug)
+    if not os.path.isfile(os.path.join(dst, "config.json")) and os.path.isdir(models_dir):   # case-insensitive filesystems / hand-copied folders
+        for d in os.listdir(models_dir):
+            if d.lower() == slug and os.path.isfile(os.path.join(models_dir, d, "config.json")):
+                dst = os.path.join(models_dir, d)
+                break
     if os.path.isfile(os.path.join(dst, "config.json")):
         run.log(f"model: local copy present {dst}")
         run.event("download", "done", path=dst, cached=True)
@@ -235,10 +240,10 @@ def step_deploy(run, args, project, model_dir, out_dir, slug, prompts):
         if os.path.isfile(p):
             tpl += open(p, encoding="utf-8").read()
     names = {"base": f"{slug}-base", "abl": f"{slug}-abl"}
-    run.event("ollama", "start", names=names)
+    run.event("ollama", "start", names=names, host=DP.P.ollama_host())
     for tag, gguf in (("base", base_g), ("abl", abl_g)):
-        mf = DP.write_modelfile(os.path.join(gguf_dir, f"Modelfile-{slug}-{tag}"), gguf, tpl)
-        DP.ollama_create(names[tag], mf, args.quantize, run.log)
+        DP.write_modelfile(os.path.join(gguf_dir, f"Modelfile-{slug}-{tag}"), gguf, tpl)   # for manual `ollama create`
+        DP.ollama_create(names[tag], gguf, tpl, args.quantize, run.log)                  # over the API (works across containers)
         run.event("ollama", "progress", created=names[tag])
     run.update_meta(ollama=names, gguf={"base": base_g, "abl": abl_g})
     ok = {n: DP.template_ok(n) for n in names.values()}

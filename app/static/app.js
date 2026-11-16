@@ -3,7 +3,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const fmt = (x, d=1) => (x==null||isNaN(x)) ? '–' : Number(x).toFixed(d);
 const S = { env:null, models:[], presets:[], model:null, runs:[], runId:null, run:null, events:[], ES:{}, pipe:{running:false}, logNext:0, evNext:0, lab:null, chatHist:[], stage:'model' };
-const OLLAMA = 'http://localhost:11434';
+// Ollama is reached through the server (/api/ollama/*), so the browser works from any machine and inside Docker
 const slugOf = repo => repo.replace(/\/+$/,'').split('/').pop().toLowerCase();
 
 async function api(path, body, method){
@@ -94,7 +94,8 @@ async function loadEnv(){
   const e=S.env, g=e.gpu;
   if(g){ $('#gpuVal').textContent=`${g.vram_used_gb}/${g.vram_total_gb} GB`; $('#dotGpu').className='dot '+(g.vram_used_gb/g.vram_total_gb>0.5?'busy':'on'); }
   $('#dotOll').className='dot '+(e.ollama.reachable?'on':'bad');
-  const chk=[['.venv (torch CUDA)',e.venv],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable],[`disk free ${e.disk_free_gb} GB`, e.disk_free_gb>30]];
+  if(e.cuda===false && !document.querySelector('#cudaWarn')){ const w=document.createElement('div'); w.id='cudaWarn'; w.className='narr'; w.style.borderLeftColor='var(--critical)'; w.innerHTML='<b style="color:var(--critical)">No CUDA GPU is visible to the app.</b> In Docker start the stack with the NVIDIA runtime (<span class="mono">--gpus all</span> / compose device reservation); measure, scan and the lab will fail without it.'; $('#s-abl').insertBefore(w, $('#s-abl').firstChild.nextSibling); }
+  const chk=[['python + torch'+(e.torch?' '+e.torch:''),e.venv],['CUDA visible',e.cuda!==false],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable],[`disk free ${e.disk_free_gb} GB`, e.disk_free_gb>30]];
   $('#envChecks').innerHTML=chk.map(([l,ok])=>`<div class="check"><span class="dot ${ok?'on':'bad'}"></span>${l}</div>`).join('');
   $('#ollInfo').innerHTML = e.ollama.reachable ? `<b>models</b><span class="mono">${e.ollama.models.filter(m=>/glm/i.test(m)).join(', ')||'none'}</span><b>in VRAM</b><span class="mono">${e.ollama.loaded.map(m=>`${m.name} (${m.vram_gb} GB)`).join(', ')||'none'}</span>` : `<b>status</b><span>not reachable - start Ollama</span>`;
   updateHeader();
@@ -359,11 +360,11 @@ $('#tryBtn').onclick=async()=>{ const prompts=$('#tryPrompts').value.split('\n')
   catch(e){ toast(e.message, true); $('#tryInfo').textContent=''; } labStatus(); };
 
 // ------------------------------------------------------------------ chat
-async function chatStatus(){ const names=chatNames(); try{ const j=await (await fetch(OLLAMA+'/api/tags')).json(); const have=(j.models||[]).map(m=>m.name); const miss=[names.base,names.abl].filter(n=>!have.includes(n)&&!have.includes(n+':latest'));
+async function chatStatus(){ const names=chatNames(); try{ const j=await api('/ollama/tags'); const have=(j.models||[]).map(m=>m.name); const miss=[names.base,names.abl].filter(n=>!have.includes(n)&&!have.includes(n+':latest'));
   $('#chatStatus').innerHTML = miss.length? `<span class="badge warn">missing in Ollama</span> ${miss.join(', ')}` : `<span class="badge pass">ready</span> ${names.base} and ${names.abl}`; }catch(e){ $('#chatStatus').innerHTML='<span class="badge fail">Ollama not reachable</span>'; } }
 let ctrl=null;
 async function ask(model, box, badgeEl, prompt){ const t=box.querySelector('.t'); t.textContent=''; badgeEl.innerHTML='';
-  const res=await fetch(OLLAMA+'/api/chat', {method:'POST', signal:ctrl.signal, headers:{'Content-Type':'application/json'}, body:JSON.stringify({model, stream:true, options:{temperature:0, num_predict:+$('#chatTokens').value||300}, messages:[{role:'user', content:prompt}]})});
+  const res=await fetch('/api/ollama/chat', {method:'POST', signal:ctrl.signal, headers:{'Content-Type':'application/json'}, body:JSON.stringify({model, prompt, num_predict:+$('#chatTokens').value||300})});
   if(!res.ok) throw new Error(`${model}: HTTP ${res.status}`);
   const rd=res.body.getReader(), dec=new TextDecoder(); let buf='', full='';
   while(true){ const {value,done}=await rd.read(); if(done) break; buf+=dec.decode(value,{stream:true}); let i; while((i=buf.indexOf('\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+1); if(!line.trim()) continue; try{ const j=JSON.parse(line); full+=j.message?.content||''; t.innerHTML=highlight(full); badgeEl.innerHTML=badge(full); }catch(e){} } }

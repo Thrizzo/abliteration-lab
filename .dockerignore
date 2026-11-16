@@ -1,0 +1,15 @@
+# applied when the build context is the project root (see compose: context ..)
+.venv
+.venv-gguf
+llama.cpp
+models
+out
+gguf
+runs
+data
+sbom
+*.gguf
+glm-edge-4b-chat-abliterated*
+.claude
+gui/data.json
+__pycache__

@@ -14,3 +14,4 @@ models/
 out/
 runs/
 sbom/
+deploy/.env

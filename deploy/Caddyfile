@@ -1,0 +1,13 @@
+# Basic auth in front of the app. For TLS, replace ":8080" with your hostname and Caddy fetches a certificate.
+:8080 {
+    basic_auth {
+        {$CADDY_USER} {$CADDY_HASH}
+    }
+    reverse_proxy app:8787 {
+        flush_interval -1
+        transport http {
+            read_timeout 0
+            write_timeout 0
+        }
+    }
+}

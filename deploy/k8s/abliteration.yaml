@@ -1,0 +1,93 @@
+# Abliteration Lab on Kubernetes (Rancher / RKE2 / k3s / Rancher Desktop).
+#   kubectl apply -f deploy/k8s/abliteration.yaml
+# Prerequisites on the cluster:
+#   - the NVIDIA device plugin (nvidia.com/gpu resources). With ONE GPU per node, enable time-slicing in the
+#     device plugin so the app and Ollama containers can both request a share; otherwise give the node 2 GPUs.
+#   - a StorageClass for the workspace PVC (hundreds of GB for large models).
+#   - an ingress controller; the basic-auth secret below is for ingress-nginx (`htpasswd -c auth admin`).
+# The image must be pushed to a registry the cluster can pull from (see README): kubectl set image ... or edit below.
+apiVersion: v1
+kind: Namespace
+metadata: { name: abliteration }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: workspace, namespace: abliteration }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 200Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: ollama, namespace: abliteration }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 100Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: abliteration, namespace: abliteration }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: abliteration } }
+  template:
+    metadata: { labels: { app: abliteration } }
+    spec:
+      runtimeClassName: nvidia          # remove if the device plugin is installed without a runtime class
+      containers:
+        - name: app
+          image: abliteration-lab:latest   # e.g. registry.example.com/abliteration-lab:1.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: OLLAMA_HOST, value: "http://127.0.0.1:11434" }   # ollama runs in the same pod
+            - { name: ABL_HOST, value: "0.0.0.0" }
+            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf, key: token, optional: true } } }
+          ports: [{ containerPort: 8787, name: http }]
+          volumeMounts: [{ name: workspace, mountPath: /workspace }]
+          resources:
+            limits: { nvidia.com/gpu: 1, memory: 48Gi }
+            requests: { cpu: "2", memory: 16Gi }
+          readinessProbe: { httpGet: { path: /api/env, port: 8787 }, initialDelaySeconds: 15, periodSeconds: 20 }
+        - name: ollama
+          image: ollama/ollama:latest
+          env:
+            - { name: OLLAMA_KEEP_ALIVE, value: "5m" }
+            - { name: OLLAMA_HOST, value: "0.0.0.0:11434" }
+          ports: [{ containerPort: 11434, name: ollama }]
+          volumeMounts: [{ name: ollama, mountPath: /root/.ollama }]
+          resources:
+            limits: { nvidia.com/gpu: 1 }        # second GPU, or a time-sliced share of the first
+            requests: { cpu: "1", memory: 8Gi }
+      volumes:
+        - { name: workspace, persistentVolumeClaim: { claimName: workspace } }
+        - { name: ollama, persistentVolumeClaim: { claimName: ollama } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: abliteration, namespace: abliteration }
+spec:
+  selector: { app: abliteration }
+  ports: [{ port: 80, targetPort: 8787, name: http }]
+---
+# basic auth for ingress-nginx:  htpasswd -c auth admin && kubectl -n abliteration create secret generic basic-auth --from-file=auth
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: abliteration
+  namespace: abliteration
+  annotations:
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: basic-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Abliteration Lab"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: abliteration.example.com      # change
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: abliteration, port: { number: 80 } } }

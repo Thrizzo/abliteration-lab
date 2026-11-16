@@ -1,9 +1,14 @@
-"""GGUF conversion (llama.cpp converter in .venv-gguf), Ollama Modelfiles / import, A/B test over the Ollama API."""
+"""GGUF conversion (llama.cpp converter in its own environment), Ollama import over the HTTP API (works when Ollama is
+another container: the GGUF is uploaded as a blob, no CLI needed), A/B test over the API."""
+import hashlib
+import http.client
 import json
 import os
 import subprocess
+import urllib.parse
 import urllib.request
 
+from . import platform as P
 from .data import count_refusals, is_refusal
 
 GLM_EDGE_TEMPLATE = ('{{- range .Messages }}{{- if eq .Role "system" }}<|system|>\n{{ .Content }}'
@@ -24,10 +29,9 @@ def check_model_folder(path):
 
 
 def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=False):
-    py = os.path.join(project, ".venv-gguf", "Scripts", "python.exe")
-    conv = os.path.join(project, "llama.cpp", "convert_hf_to_gguf.py")
+    py, conv = P.gguf_python(project), os.path.join(P.llama_cpp_dir(project), "convert_hf_to_gguf.py")
     if not (os.path.isfile(py) and os.path.isfile(conv)):
-        raise RuntimeError("converter environment missing (.venv-gguf / llama.cpp): run notebook cell 1.5 or run_pipeline.py setup")
+        raise RuntimeError(f"converter environment missing ({py} / {conv}): run notebook cell 1.5, run_pipeline.py setup, or set ABL_GGUF_PY / ABL_LLAMA_CPP")
     if os.path.isfile(outfile) and not force:
         log(f"gguf: {outfile} exists - skipping")
         return outfile
@@ -49,36 +53,96 @@ def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=Fa
     return outfile
 
 
+def template_for(chat_template_text):
+    return GLM4_TEMPLATE if "[gMASK]" in (chat_template_text or "") else GLM_EDGE_TEMPLATE
+
+
 def write_modelfile(path, gguf, chat_template_text):
-    tpl = GLM4_TEMPLATE if "[gMASK]" in (chat_template_text or "") else GLM_EDGE_TEMPLATE
+    """Kept for people who want to `ollama create` by hand; the pipeline itself uses the API."""
     with open(path, "w", encoding="utf-8", newline="\n") as f:
-        f.write(f"FROM {os.path.abspath(gguf)}\n\nTEMPLATE \"\"\"{tpl}\"\"\"\n\n" + "".join(f'PARAMETER stop "{s}"\n' for s in STOPS) + "PARAMETER temperature 0\n")
+        f.write(f"FROM {os.path.abspath(gguf)}\n\nTEMPLATE \"\"\"{template_for(chat_template_text)}\"\"\"\n\n"
+                + "".join(f'PARAMETER stop "{s}"\n' for s in STOPS) + "PARAMETER temperature 0\n")
     return path
 
 
-def ollama_exe():
-    import shutil
-    return shutil.which("ollama") or os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
+# ------------------------------------------------------------------ Ollama HTTP API
+def _url(path):
+    return P.ollama_host() + path
 
 
-def ollama_create(name, modelfile, quantize="q8_0", log=print):
-    cmd = [ollama_exe(), "create", name, "-f", modelfile] + (["--quantize", quantize] if quantize else [])
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    out = (r.stdout + r.stderr).replace("\r", "\n")
-    lines = [l for l in out.splitlines() if l.strip() and "copying file" not in l and "quantizing" not in l]
-    for l in lines[-4:]:
-        log("  " + l.strip()[:120])
-    if r.returncode != 0:
-        raise RuntimeError(f"ollama create {name} failed: {lines[-1] if lines else r.returncode}")
+def api_get(path, timeout=10):
+    with urllib.request.urlopen(_url(path), timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def api_post(path, body, timeout=600, stream=False):
+    req = urllib.request.Request(_url(path), data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    r = urllib.request.urlopen(req, timeout=timeout)
+    if stream:
+        return r
+    with r:
+        return json.loads(r.read())
+
+
+def _sha256(path, log=None):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 24), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def upload_blob(path, log=print):
+    """Pushes a file into Ollama's blob store (idempotent: skipped if the digest exists). Returns 'sha256:<digest>'."""
+    digest = "sha256:" + _sha256(path)
+    u = urllib.parse.urlparse(P.ollama_host())
+    conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=3600)
+    conn.request("HEAD", f"/api/blobs/{digest}")
+    resp = conn.getresponse(); resp.read()
+    if resp.status == 200:
+        log(f"ollama: blob {digest[:19]}… already present")
+        conn.close()
+        return digest
+    size = os.path.getsize(path)
+    log(f"ollama: uploading {os.path.basename(path)} ({size / 1e9:.1f} GB) as {digest[:19]}…")
+    with open(path, "rb") as f:
+        conn.request("POST", f"/api/blobs/{digest}", body=f, headers={"Content-Length": str(size), "Content-Type": "application/octet-stream"})
+        resp = conn.getresponse(); body = resp.read()
+    conn.close()
+    if resp.status not in (200, 201):
+        raise RuntimeError(f"blob upload failed: HTTP {resp.status} {body[:200]!r}")
+    return digest
+
+
+def ollama_create(name, gguf, chat_template_text, quantize="q8_0", log=print):
+    """Creates a model from a GGUF through the API: upload the file as a blob, then /api/create with template + stops."""
+    digest = upload_blob(gguf, log)
+    body = {"model": name, "files": {os.path.basename(gguf): digest}, "template": template_for(chat_template_text),
+            "parameters": {"stop": STOPS, "temperature": 0}, "stream": True}
+    if quantize:
+        body["quantize"] = quantize
+    r = api_post("/api/create", body, timeout=3600, stream=True)
+    last = ""
+    with r:
+        for line in r:
+            try:
+                st = json.loads(line).get("status", "")
+            except Exception:
+                continue
+            if st and st != last and not st.startswith("quantizing") and "copying" not in st:
+                log("  " + st[:120])
+            last = st
+            if st.startswith("error") or "error" in json.loads(line):
+                raise RuntimeError(f"ollama create {name}: {line.decode(errors='replace')[:200]}")
+    if last != "success":
+        raise RuntimeError(f"ollama create {name} ended with status {last!r}")
     return name
 
 
-def ollama_chat(model, prompt, num_predict=160, host="http://localhost:11434"):
-    body = json.dumps({"model": model, "stream": False, "options": {"temperature": 0, "num_predict": num_predict},
-                       "messages": [{"role": "user", "content": prompt}]}).encode()
-    req = urllib.request.Request(f"{host}/api/chat", data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=600) as r:
-        return json.loads(r.read())["message"]["content"]
+def ollama_chat(model, prompt, num_predict=160):
+    out = api_post("/api/chat", {"model": model, "stream": False, "options": {"temperature": 0, "num_predict": num_predict},
+                                 "messages": [{"role": "user", "content": prompt}]}, timeout=600)
+    return out["message"]["content"]
 
 
 def ab_test(base_name, abl_name, harmful, normal, log=print):
@@ -94,5 +158,16 @@ def ab_test(base_name, abl_name, harmful, normal, log=print):
 
 
 def template_ok(name):
-    r = subprocess.run([ollama_exe(), "show", name, "--template"], capture_output=True, text=True, encoding="utf-8", errors="replace")
-    return "<|user|>" in r.stdout and "<|assistant|>" in r.stdout
+    try:
+        tpl = api_post("/api/show", {"model": name}, timeout=30).get("template", "")
+    except Exception:
+        return False
+    return "<|user|>" in tpl and "<|assistant|>" in tpl
+
+
+def unload_all(log=print):
+    try:
+        for m in api_get("/api/ps")["models"]:
+            api_post("/api/generate", {"model": m["name"], "keep_alive": 0}, timeout=30)
+    except Exception:
+        pass
