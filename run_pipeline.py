@@ -9,6 +9,7 @@ Usage (from the project folder, with the .venv python):
     .\.venv\Scripts\python.exe run_pipeline.py setup       # section 1: torch CUDA, packages, llama.cpp, SBOM
     .\.venv\Scripts\python.exe run_pipeline.py main        # sections 2, 3 (without the DPO audit), 4 and 7
     .\.venv\Scripts\python.exe run_pipeline.py validate --run-dir runs/abliterate_<ts>   # 4.8 only, into that run folder
+    .\.venv\Scripts\python.exe run_pipeline.py apply --run-dir runs/abliterate_<ts>      # 4.6-4.8 with the layer in abliteration_settings.json
     .\.venv\Scripts\python.exe run_pipeline.py ollama      # section 7 only (re-uses data/harmful_test.jsonl)
     .\.venv\Scripts\python.exe run_pipeline.py --cells 20,22,24,26,30   # any cells by index
 Sections 5 (benchmarks) and 6 (DPO) are not part of any stage.
@@ -35,6 +36,7 @@ STAGES = {
     "ollama": HELPERS + [115, 118, 120, 123, 126],
 }
 STAGES["validate"] = HELPERS + [62, 64, 67, 90]
+STAGES["apply"] = HELPERS + [62, 64, 67, 85, 88, 90]      # re-apply a (new) chosen layer from a finished scan
 STAGES["main"] = STAGES["data"] + STAGES["abl"][len(HELPERS):] + STAGES["ollama"][len(HELPERS):]
 
 HF_SNAPSHOT = os.path.expandvars(r"%USERPROFILE%\.cache\huggingface\hub\models--THUDM--glm-edge-4b-chat\snapshots")
@@ -75,6 +77,22 @@ def before(idx, ns):
             plt.savefig(path, dpi=110, bbox_inches="tight"); plt.close("all")
             print(f"[runner] chart saved: {path}")
         plt.show = _show
+    if idx == 85 and "scan" not in ns and RUN_DIR:   # apply stage: restore measure/scan state from the run folder
+        import torch
+        ns["refusal_dirs"] = torch.load(os.path.join(RUN_DIR, "refusal_dirs.pt"))
+        ns["scan"] = json.load(open(os.path.join(RUN_DIR, "scan_results.json"), encoding="utf-8"))
+        bl = json.load(open(os.path.join(RUN_DIR, "baseline.json"), encoding="utf-8"))
+        ns["baseline"], ns["n_base"] = bl["baseline"], bl["n_base"]
+        ns["scan_by_layer"] = {s_["layer"]: s_ for s_ in ns["scan"]}
+        ns["RECOMMENDED"] = min(ns["scan"], key=lambda x: (x["refusals"], x["cjk_ratio"], x["layer"]))["layer"]
+        ns["SETTINGS_FILE"] = "abliteration_settings.json"
+        def load_saved_layer():
+            try:
+                return int(json.load(open("abliteration_settings.json", encoding="utf-8"))["layer_to_abliterate"])
+            except Exception:
+                return None
+        ns["load_saved_layer"] = load_saved_layer
+        print(f"[runner] 4.6: scan state restored from {RUN_DIR}; layer from abliteration_settings.json = {load_saved_layer()}")
     if idx == 120:   # 7.3: remove the two old Ollama models if they are the same blob (the earlier mix-up)
         ollama = ns["find_exe"]("ollama", [r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe"])
         if ollama:
@@ -100,8 +118,12 @@ RUN_DIR = None   # --run-dir: reuse an existing runs/abliterate_* folder (valida
 
 def after(idx, ns):
     if idx == 62 and RUN_DIR:
+        fresh = ns["A"].run_dir                      # 4.0 already created a new folder + run.log
         ns["A"].run_dir = RUN_DIR
-        ns["setup_logging"](RUN_DIR, ns["A"].debug)
+        ns["setup_logging"](RUN_DIR, ns["A"].debug)  # closes the handler on the fresh folder
+        if os.path.isdir(fresh) and os.listdir(fresh) == ["run.log"]:
+            import shutil
+            shutil.rmtree(fresh, ignore_errors=True)
         print(f"[runner] using existing run folder {RUN_DIR}")
     if idx == 64:   # record revision + SHA-256 like the download branch does
         A = ns["A"]; info = os.path.join(A.model, "local_copy.json")

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Abliteration Lab</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="tip" id="tip"></div>
+<div class="toast" id="toast"></div>
+<div class="shell">
+  <aside class="rail">
+    <div class="brand"><div class="logo"></div><div><b>Abliteration</b><small>GLM-Edge-4B · research console</small></div></div>
+    <nav class="nav" id="nav">
+      <button data-view="dash"><span class="ic">◈</span>Dashboard</button>
+      <button data-view="walk"><span class="ic">≋</span>Walkthrough</button>
+      <button data-view="lab"><span class="ic">⌁</span>Lab</button>
+      <button data-view="chat"><span class="ic">⇄</span>A/B chat</button>
+    </nav>
+    <div class="spacer"></div>
+    <div class="sysbox">
+      <div class="row"><span><span class="dot" id="dotPipe"></span> pipeline</span><span id="sysPipe" class="mono">idle</span></div>
+      <div class="row"><span><span class="dot" id="dotLab"></span> lab model</span><span id="sysLab" class="mono">—</span></div>
+      <div class="row"><span><span class="dot" id="dotOll"></span> ollama</span><span id="sysOll" class="mono">—</span></div>
+      <div><div class="row"><span id="gpuName">GPU</span><span id="gpuVal" class="mono">—</span></div><div class="meter"><i id="gpuBar"></i></div></div>
+      <div class="row"><span>disk free</span><span id="diskVal" class="mono">—</span></div>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="topbar">
+      <div><h1 id="title">Dashboard</h1><div class="sub" id="subtitle"></div></div>
+      <div class="runsel"><span>run</span><select id="runSel"></select></div>
+    </div>
+
+    <!-- =============================================== dashboard -->
+    <section class="view" id="v-dash">
+      <div class="card hero"><div class="inner">
+        <div class="text">
+          <h2>Find the refusal direction. Remove it. Watch what changes.</h2>
+          <p>Every prompt flows through 40 layers. Harmful requests push the residual stream along one direction; abliteration projects that direction out of the weights. This console drives the notebook pipeline, replays a run layer by layer, and lets you probe the live model.</p>
+          <div class="stats" id="heroStats"></div>
+        </div>
+        <div class="stream" id="stream"></div>
+      </div></div>
+
+      <div class="grid3">
+        <div class="card">
+          <h3>Pipeline <small>runs the notebook's own cells via run_pipeline.py</small></h3>
+          <div class="stagegrid" id="stages"></div>
+          <div class="row">
+            <label class="small">for apply/validate: run <select id="pipeRun"></select></label>
+            <label class="small">layer <input type="number" id="pipeLayer" min="0" max="39" style="width:70px"></label>
+            <button class="btn primary" id="pipeStart">▶ Start</button>
+            <button class="btn danger" id="pipeStop" disabled>■ Stop</button>
+            <span class="small" id="pipeInfo"></span>
+          </div>
+          <div class="progress"><i id="pipeBar"></i></div>
+          <div class="console" id="console">— no output yet —</div>
+        </div>
+        <div>
+          <div class="card"><h3>Environment</h3><div class="checks" id="envChecks"></div></div>
+          <div class="card"><h3>Ollama</h3><div class="kv" id="ollInfo"></div><div class="row"><button class="btn sm" id="ollUnload">Unload models from VRAM</button></div></div>
+        </div>
+      </div>
+      <div class="card"><h3>Runs <small>runs/abliterate_*</small></h3><table id="runsTable"></table></div>
+    </section>
+
+    <!-- =============================================== walkthrough -->
+    <section class="view" id="v-walk">
+      <div class="steps" id="steps"></div>
+      <div id="walkBody"></div>
+    </section>
+
+    <!-- =============================================== lab -->
+    <section class="view" id="v-lab">
+      <div class="card">
+        <h3>Resident model <small>TransformerLens bridge, bf16, ~9 GB VRAM</small></h3>
+        <p class="sub">Loads the untouched base model once, plus the candidate directions of the selected run. Ollama's models are unloaded first to make room. Pipeline stages that need the GPU unload it again.</p>
+        <div class="row"><button class="btn primary" id="labLoad">Load model</button><button class="btn" id="labUnload">Unload</button><span class="small" id="labInfo"></span></div>
+      </div>
+      <div class="card">
+        <h3>Refusal meter <small>how strongly does each layer's refusal direction light up for this prompt?</small></h3>
+        <p class="sub">The last-token activation is projected onto every layer's own direction and scaled between the harmless mean (0) and the harmful mean (1) measured in the run. Values near 1 mean "this looks like a request I would refuse" at that layer.</p>
+        <div id="probePresets"></div>
+        <textarea id="probePrompt" rows="2" placeholder="Type any prompt…"></textarea>
+        <div class="row"><button class="btn primary" id="probeBtn">Probe</button><span class="small" id="probeInfo"></span></div>
+        <div id="probeOut"></div>
+      </div>
+      <div class="card">
+        <h3>Try a layer live <small>temporary hooks, no weight change</small></h3>
+        <p class="sub">Pick any layer's candidate direction and remove it from every layer while the model answers. The untouched answer is generated once and cached. 64 tokens, batch of up to 8 prompts, ~15 s.</p>
+        <div class="row"><label>layer <input type="range" id="tryLayer" min="0" max="39" value="17"> <b class="mono" id="tryLayerVal">17</b></label>
+          <label class="small">max tokens <input type="number" id="tryTokens" value="64" min="16" max="200" style="width:70px"></label></div>
+        <textarea id="tryPrompts" rows="4"></textarea>
+        <div class="row"><button class="btn primary" id="tryBtn">Generate both</button><span class="small" id="tryInfo"></span></div>
+        <div id="tryOut"></div>
+      </div>
+    </section>
+
+    <!-- =============================================== chat -->
+    <section class="view" id="v-chat">
+      <div class="card">
+        <h3>Side by side in Ollama <small>glm-edge-base vs glm-edge-abl, temperature 0</small></h3>
+        <div class="row"><span id="chatStatus" class="small">…</span></div>
+        <div id="chatPresets"></div>
+        <textarea id="chatPrompt" rows="3" placeholder="Ask both models…"></textarea>
+        <div class="row"><button class="btn primary" id="chatSend">Send to both</button><button class="btn" id="chatStop" disabled>Stop</button><label class="small">max tokens <input type="number" id="chatTokens" value="300" min="32" max="1024" style="width:80px"></label></div>
+        <div class="pair">
+          <div class="ans" id="chatBase"><div class="h"><span>glm-edge-base · original</span><span id="chatBaseBadge"></span></div><div class="t"></div></div>
+          <div class="ans" id="chatAbl"><div class="h"><span>glm-edge-abl · abliterated</span><span id="chatAblBadge"></span></div><div class="t"></div></div>
+        </div>
+      </div>
+      <div class="card" id="chatHistory"><h3>Earlier exchanges</h3><div id="chatHistBody" class="small">none yet</div></div>
+      <div class="card" id="chatRecorded"></div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
