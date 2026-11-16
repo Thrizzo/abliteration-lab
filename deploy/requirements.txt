@@ -1,15 +1,16 @@
-# main environment of the container (/opt/venv): pipeline + app. torch comes from the cu128 index (see Dockerfile).
-torch>=2.8
-transformers>=4.57
-datasets>=3.0
-accelerate>=1.0
-safetensors>=0.5
-huggingface_hub>=0.30
-sentencepiece
-protobuf
-tiktoken
-numpy
-fastapi>=0.115
-uvicorn[standard]>=0.30
-pydantic>=2
-matplotlib
+# main environment of the container (/opt/venv), pinned to the versions validated on 2026-11-16.
+# torch comes from the cu128 index (Dockerfile ARG TORCH_INDEX); bump deliberately and re-run the pipeline test.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
+transformers==5.23.0
+datasets==5.2.0
+accelerate==1.15.0
+safetensors==0.8.0
+huggingface_hub>=1.0,<3
+sentencepiece==0.2.3
+protobuf==7.36.2
+tiktoken==0.14.0
+numpy==2.5.5
+fastapi==0.163.1
+uvicorn[standard]==0.54.0
+pydantic==2.14.3

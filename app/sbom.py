@@ -194,8 +194,13 @@ class SbomJob:
             ok = ollama >= MIN_OLLAMA
             extra.append({"type": "application", "name": "ollama", "version": ".".join(map(str, ollama)), "purl": f"pkg:github/ollama/ollama@v{'.'.join(map(str, ollama))}"})
             notes.append(f"Ollama {'.'.join(map(str, ollama))}: {'OK' if ok else 'UPDATE NEEDED (>= 0.17.6)'}")
-        if os.path.isdir(os.path.join(PL.llama_cpp_dir(self.project), ".git")):
-            rev = subprocess.run(["git", "-C", PL.llama_cpp_dir(self.project), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        lc = PL.llama_cpp_dir(self.project)
+        rev = None
+        if os.path.isfile(os.path.join(lc, "REV")):
+            rev = open(os.path.join(lc, "REV"), encoding="utf-8").read().strip()
+        elif os.path.isdir(os.path.join(lc, ".git")):
+            rev = subprocess.run(["git", "-C", lc, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        if rev:
             extra.append({"type": "library", "name": "llama.cpp", "version": rev[:12], "purl": f"pkg:github/ggml-org/llama.cpp@{rev}"})
             notes.append(f"llama.cpp {rev[:12]} (Python converter only; it does not parse untrusted GGUF)")
         cv = PL.driver_cuda_version()

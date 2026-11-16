@@ -28,26 +28,35 @@ GLM-5.x transfer notes.
 
 ## Run it in Docker (Linux, Docker Desktop, Rancher Desktop)
 
+Published image: `ghcr.io/thrizzo/abliteration-lab:latest` (built by `.github/workflows/docker-image.yml`); `docker compose pull app`
+skips the local build. For Rancher Desktop with the containerd backend: `docker save ghcr.io/thrizzo/abliteration-lab:latest | nerdctl load`.
+
 The image holds the pipeline, the app and the GGUF converter environment; models and runs live on a volume at `/workspace`.
 Ollama runs as its own container and the app talks to it over the API (`OLLAMA_HOST`), so no Ollama CLI is needed in the image.
 The host needs an NVIDIA driver and the NVIDIA container toolkit (Docker Desktop on Windows: WSL2 + a current driver, nothing else).
 
 ```bash
 cp deploy/.env.example deploy/.env         # set WORKSPACE and CADDY_HASH (docker run --rm caddy:2 caddy hash-password --plaintext 'secret')
-docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+mkdir -p workspace                          # or whatever WORKSPACE points to
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env up -d --build
 ```
 
-Open http://localhost:8080 (Caddy, basic auth). Headless pipeline runs use the same image:
+Open http://localhost:8080 (Caddy, basic auth; `BIND_ADDR=127.0.0.1` by default, use an SSH tunnel or VPN from other machines, or set up TLS
+in the Caddyfile before opening it to a network). Leave the `docker-compose.gpu.yml` file out on hosts without GPU passthrough
+(Rancher Desktop on Windows): the UI, datasets, SBOM and Compare work, measure/scan do not. Headless pipeline runs use the same image:
 
 ```bash
-docker compose -f deploy/docker-compose.yml --env-file deploy/.env run --rm app --model THUDM/glm-edge-4b-chat
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env run --rm app --model THUDM/glm-edge-4b-chat
 ```
+
+The container starts as root only to hand the mounted workspace to its unprivileged user (uid 1000) and drops privileges at once;
+on Kubernetes the pod runs as uid 1000 with `fsGroup: 1000` instead.
 
 Environment knobs (all optional): `ABL_PROJECT` (workspace, default `/workspace`), `OLLAMA_HOST`, `ABL_HOST`/`ABL_PORT`, `ABL_GGUF_PY`, `ABL_LLAMA_CPP`, `HF_TOKEN`.
 The same variables let the plain Windows/Linux install point at other locations (`abliterate/platform.py`).
 
-**Rancher Desktop.** With the *moby* (dockerd) backend the compose file works as is (`docker compose`). With the *containerd* backend use
-`nerdctl compose -f deploy/docker-compose.yml up -d --build`. GPU passthrough into Rancher Desktop containers on Windows is not supported by
+**Rancher Desktop.** With the *moby* (dockerd) backend the compose files work as is (`docker compose`). With the *containerd* backend use
+`nerdctl compose -f deploy/docker-compose.yml up -d --build` (or `nerdctl load` the published image). GPU passthrough into Rancher Desktop containers on Windows is not supported by
 Rancher Desktop itself (it is on Docker Desktop); on a Linux host install the NVIDIA container toolkit and it works with either backend.
 
 **Rancher / Kubernetes.** `deploy/k8s/abliteration.yaml` is a single-pod deployment (app + Ollama sharing the workspace), a PVC for the
@@ -69,7 +78,9 @@ Security: the app has no login of its own and can run subprocesses, edit dataset
 
 Artifacts per run (`runs/abliterate_<ts>/`): `run.json`, `events.jsonl`, `arch.json`, `layer_analysis.json`, `baseline.json`,
 `scan_results.json`, `apply.json`, `generations.json`, `validation.json`, `ollama_ab.json`, `refusal_dirs.pt`, `means.pt`.
-Models: `models/<slug>/` (base copy), `out/<slug>-abliterated/`, `gguf/<slug>-{base,abl}-f16.gguf`, Ollama `<slug>-base` / `<slug>-abl`.
+Models: `models/<slug>/` (base copy), `out/<slug>-abliterated/`, `gguf/<slug>-{base,abl}-<type>.gguf`, Ollama `<slug>-base` / `<slug>-abl`.
+`--quantize q8_0` (default), `f16` or `bf16` are written directly by the llama.cpp converter and imported as is; other quant types
+(`q4_K_M` …) need Ollama's create-time quantization of an f16 file, which Ollama dropped in 0.40, so prefer the direct types.
 
 ## What transfers to GLM-5.2 / 5.3
 

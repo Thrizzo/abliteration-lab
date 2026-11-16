@@ -5,6 +5,7 @@ import http.client
 import json
 import os
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -28,7 +29,10 @@ def check_model_folder(path):
     return not risky and not auto_map, risky, auto_map
 
 
-def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=False):
+CONVERTER_TYPES = ("f16", "bf16", "q8_0")     # what convert_hf_to_gguf.py can write directly; k-quants need llama-quantize
+
+
+def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=False, outtype="f16"):
     py, conv = P.gguf_python(project), os.path.join(P.llama_cpp_dir(project), "convert_hf_to_gguf.py")
     if not (os.path.isfile(py) and os.path.isfile(conv)):
         raise RuntimeError(f"converter environment missing ({py} / {conv}): run notebook cell 1.5, run_pipeline.py setup, or set ABL_GGUF_PY / ABL_LLAMA_CPP")
@@ -40,7 +44,7 @@ def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=Fa
         raise RuntimeError(f"{folder} contains code files {risky} / auto_map {auto_map}; pass --allow-code to convert anyway")
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
     env = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-    r = subprocess.run([py, conv, folder, "--outtype", "f16", "--outfile", outfile], capture_output=True, text=True,
+    r = subprocess.run([py, conv, folder, "--outtype", outtype, "--outfile", outfile], capture_output=True, text=True,
                        encoding="utf-8", errors="replace", env=env)
     tail = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-6:]
     for line in tail:
@@ -114,14 +118,23 @@ def upload_blob(path, log=print):
     return digest
 
 
-def ollama_create(name, gguf, chat_template_text, quantize="q8_0", log=print):
-    """Creates a model from a GGUF through the API: upload the file as a blob, then /api/create with template + stops."""
+def ollama_create(name, gguf, chat_template_text, quantize=None, log=print):
+    """Creates a model from a GGUF through the API: upload the file as a blob, then /api/create with template + stops.
+    `quantize` asks Ollama to quantize at create time; newer Ollama versions (>= 0.40) refuse that for GGUF imports,
+    so the pipeline converts to the target type with llama.cpp instead and passes quantize=None."""
     digest = upload_blob(gguf, log)
     body = {"model": name, "files": {os.path.basename(gguf): digest}, "template": template_for(chat_template_text),
             "parameters": {"stop": STOPS, "temperature": 0}, "stream": True}
     if quantize:
         body["quantize"] = quantize
-    r = api_post("/api/create", body, timeout=3600, stream=True)
+    try:
+        r = api_post("/api/create", body, timeout=3600, stream=True)
+    except urllib.error.HTTPError as e:
+        msg = e.read()[:300].decode(errors="replace")
+        if quantize and e.code == 400 and "quantiz" in msg:
+            raise RuntimeError(f"this Ollama ({api_get('/api/version').get('version')}) does not quantize GGUF imports; "
+                               f"convert with --quantize q8_0|f16|bf16 (done by llama.cpp) instead: {msg}")
+        raise RuntimeError(f"ollama create {name}: HTTP {e.code} {msg}")
     last = ""
     with r:
         for line in r:

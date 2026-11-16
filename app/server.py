@@ -51,6 +51,15 @@ PRESETS = [
     {"repo": "zai-org/GLM-5.3", "family": "GLM-5.3 MoE + DSA", "size": "744B", "local_ok": False, "note": "same architecture as 5.2"},
 ]
 
+RUN_ID = re.compile(r"\d{8}_\d{6}")
+
+
+def run_dir_of(run_id):
+    if not run_id or not RUN_ID.fullmatch(run_id):
+        raise HTTPException(400, "bad run_id")
+    return os.path.join("runs", f"abliterate_{run_id}")
+
+
 app = FastAPI(title="Abliteration Lab")
 lab = Lab(PROJECT)
 datasets = Datasets(os.path.join(PROJECT, "data"))
@@ -72,7 +81,7 @@ class Pipeline:
     def running(self):
         return bool(self.proc) and self.proc.poll() is None
 
-    def start(self, cmd, engine, stage, run_dir=None):
+    def start(self, cmd, engine, stage, run_dir=None, env_extra=None):
         if self.running():
             raise HTTPException(409, f"'{self.stage}' is still running")
         if stage not in ("download", "ollama", "deploy"):          # GPU stages: free the VRAM first
@@ -86,7 +95,7 @@ class Pipeline:
         os.makedirs(os.path.join(PROJECT, "runs"), exist_ok=True)
         self.log_path = os.path.join(PROJECT, "runs", f"app_{engine}_{stage}_{datetime.now():%Y%m%d_%H%M%S}.log")
         env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", "MPLBACKEND": "Agg", "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-               "PYTHONPATH": CODE + os.pathsep + os.environ.get("PYTHONPATH", "")}
+               "PYTHONPATH": CODE + os.pathsep + os.environ.get("PYTHONPATH", ""), **(env_extra or {})}
         self.lines, self.events, self.stage, self.engine, self.started, self.exit_code, self.run_dir = [], [], stage, engine, time.time(), None, run_dir
         self.proc = subprocess.Popen(cmd, cwd=PROJECT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, encoding="utf-8", errors="replace", bufsize=1)
@@ -254,9 +263,7 @@ class Download(BaseModel):
 @app.post("/api/models/download")
 def models_download(b: Download):
     cmd = [PY, "-u", "-m", "abliterate", "--model", b.repo, "--stage", "download"]
-    if b.hf_token:
-        cmd += ["--hf-token", b.hf_token]
-    return pipeline.start(cmd, "abliterate", "download")
+    return pipeline.start(cmd, "abliterate", "download", env_extra={"HF_TOKEN": b.hf_token} if b.hf_token else None)   # token via env, never argv
 
 
 # ------------------------------------------------------------------------- API: runs
@@ -265,9 +272,14 @@ def runs():
     return rundata.list_runs(PROJECT)
 
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
 @app.get("/api/runs/{rid}")
 def run(rid):
-    d = os.path.join(PROJECT, "runs", f"abliterate_{rid}")
+    d = os.path.join(PROJECT, run_dir_of(rid))
     if not os.path.isdir(d):
         raise HTTPException(404, "run not found")
     return rundata.collect(PROJECT, d)
@@ -275,7 +287,7 @@ def run(rid):
 
 @app.get("/api/runs/{rid}/events")
 def run_events(rid):
-    p = os.path.join(PROJECT, "runs", f"abliterate_{rid}", "events.jsonl")
+    p = os.path.join(PROJECT, run_dir_of(rid), "events.jsonl")
     if not os.path.isfile(p):
         return {"events": []}
     evs = []
@@ -295,14 +307,14 @@ class Choice(BaseModel):
 
 @app.post("/api/runs/{rid}/choose")
 def choose(rid, c: Choice):
-    return save_layer(c.layer, os.path.join("runs", f"abliterate_{rid}"))
+    return save_layer(c.layer, run_dir_of(rid))
 
 
 @app.get("/api/runs/{rid}/file/{name}")
 def run_file(rid, name):
     if not re.fullmatch(r"[\w.\-]+\.(png|json|log|jsonl)", name):
         raise HTTPException(400, "bad name")
-    path = os.path.join(PROJECT, "runs", f"abliterate_{rid}", name)
+    path = os.path.join(PROJECT, run_dir_of(rid), name)
     if not os.path.isfile(path):
         raise HTTPException(404)
     return FileResponse(path)
@@ -332,7 +344,10 @@ class Start(BaseModel):
 
 @app.post("/api/pipeline/start")
 def pipeline_start(s: Start):
-    run_dir = os.path.join("runs", f"abliterate_{s.run_id}") if s.run_id else None
+    run_dir = run_dir_of(s.run_id) if s.run_id else None
+    for name, val in (("layer_range", s.layer_range), ("quantize", s.quantize), ("dtype", s.dtype), ("device_map", s.device_map), ("model", s.model or "")):
+        if not re.fullmatch(r"[\w.\-/:]*", val):
+            raise HTTPException(400, f"bad {name}")
     if s.engine == "notebook":
         if os.name != "nt" or os.environ.get("ABL_NOTEBOOK_ENGINE") == "0":
             raise HTTPException(400, "the notebook engine (run_pipeline.py / TransformerLens) is Windows-only; use engine=abliterate")
@@ -406,7 +421,7 @@ async def lab_load(b: LabLoad):
                 ollama_post("/api/generate", {"model": m["name"], "keep_alive": 0}, timeout=20)
         except Exception:
             pass
-    return await run_in_threadpool(lab.load, os.path.join("runs", f"abliterate_{b.run_id}"))
+    return await run_in_threadpool(lab.load, run_dir_of(b.run_id))
 
 
 @app.post("/api/lab/unload")
@@ -414,8 +429,11 @@ def lab_unload():
     return lab.unload()
 
 
+from pydantic import Field  # noqa: E402
+
+
 class Probe(BaseModel):
-    prompt: str
+    prompt: str = Field(max_length=20000)
 
 
 @app.post("/api/lab/probe")
@@ -428,7 +446,7 @@ async def lab_probe(p: Probe):
 
 class Try(BaseModel):
     layer: int
-    prompts: list[str]
+    prompts: list[str] = Field(max_length=16)
     max_new_tokens: int = 64
 
 
@@ -450,8 +468,8 @@ def ollama_tags():
 
 
 class ChatReq(BaseModel):
-    model: str
-    prompt: str
+    model: str = Field(max_length=200)
+    prompt: str = Field(max_length=20000)
     num_predict: int = 300
 
 
@@ -469,7 +487,7 @@ def ollama_chat_proxy(c: ChatReq):
     def gen():
         with upstream:
             while True:
-                chunk = upstream.read(4096)
+                chunk = upstream.read1(4096)     # whatever is available: tokens stream as they arrive
                 if not chunk:
                     break
                 yield chunk
@@ -580,6 +598,17 @@ def sbom_file(name: str):
     if not os.path.isfile(path):
         raise HTTPException(404)
     return FileResponse(path, media_type="application/json", filename=name)
+
+
+@app.on_event("shutdown")
+def _shutdown():
+    """docker stop / pod termination: end the pipeline child cleanly instead of leaving it to SIGKILL."""
+    if pipeline.running():
+        pipeline.proc.terminate()
+        try:
+            pipeline.proc.wait(timeout=30)
+        except Exception:
+            pipeline.proc.kill()
 
 
 # ------------------------------------------------------------------------- static UI

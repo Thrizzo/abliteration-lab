@@ -1,24 +1,26 @@
-# Abliteration Lab: app + Ollama + Caddy (basic auth). Works with Docker Desktop and Rancher Desktop (moby backend);
-# with the containerd backend use `nerdctl compose`. Needs the NVIDIA container toolkit on the host.
-#   cp deploy/.env.example deploy/.env   # set WORKSPACE, CADDY_USER, CADDY_HASH
-#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d --build
+# Abliteration Lab: app + Ollama + Caddy (basic auth).
+#   cp deploy/.env.example deploy/.env             # set WORKSPACE and CADDY_HASH
+#   mkdir -p <WORKSPACE>
+#   GPU host (Docker Desktop, Linux + NVIDIA container toolkit):
+#     docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env up -d --build
+#   CPU-only (e.g. Rancher Desktop on Windows): leave the gpu file out; measure/scan will not run but the UI, datasets, SBOM and
+#   Compare (with models already in Ollama) work.
+#   Rancher Desktop containerd backend: nerdctl compose with the same files.
 services:
   app:
     build: { context: .., dockerfile: deploy/Dockerfile }
-    image: abliteration-lab:latest
+    image: ghcr.io/thrizzo/abliteration-lab:latest   # `docker compose pull app` to use the published image instead of building
+    init: true
+    stop_grace_period: 60s
     environment:
       OLLAMA_HOST: http://ollama:11434
       ABL_HOST: 0.0.0.0
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - ${WORKSPACE:-./workspace}:/workspace
-    deploy:
-      resources:
-        reservations:
-          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
     depends_on: [ollama]
     restart: unless-stopped
-    # the app is only reachable through caddy; uncomment to expose it directly on the host (no auth!)
+    # the app is only reachable through caddy; uncomment to expose it directly on this machine (no auth!)
     # ports: ["127.0.0.1:8787:8787"]
 
   ollama:
@@ -26,17 +28,17 @@ services:
     environment:
       OLLAMA_KEEP_ALIVE: 5m
     volumes:
-      - ollama:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices: [{ driver: nvidia, count: all, capabilities: [gpu] }]
+      - ${OLLAMA_STORE:-ollama}:/root/.ollama    # a bare name = named volume; a path = bind mount
     restart: unless-stopped
 
   caddy:
     image: caddy:2
     ports:
-      - "${BIND_ADDR:-0.0.0.0}:${HTTP_PORT:-8080}:8080"
+      - "${BIND_ADDR:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+      # for TLS with a public hostname also publish 80/443 and put the hostname into the Caddyfile:
+      # - "80:80"
+      # - "443:443"
+      # - "443:443/udp"
     environment:
       CADDY_USER: ${CADDY_USER:-admin}
       CADDY_HASH: "${CADDY_HASH:?CADDY_HASH is empty - see deploy/.env.example}"

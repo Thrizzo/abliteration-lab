@@ -228,11 +228,15 @@ def step_verify_and_validate(run, args, model_dir, out_dir, direction, layer, pr
 def step_deploy(run, args, project, model_dir, out_dir, slug, prompts):
     from . import deploy as DP
     gguf_dir = os.path.join(project, "gguf")
-    base_g, abl_g = os.path.join(gguf_dir, f"{slug}-base-f16.gguf"), os.path.join(gguf_dir, f"{slug}-abl-f16.gguf")
-    run.event("gguf", "start")
-    DP.convert_gguf(project, out_dir, abl_g, run.log, allow_code=args.trust_remote_code)
+    # the converter writes the target type directly when it can (f16 / bf16 / q8_0); other quant types need Ollama's create-time
+    # quantization of an f16 file, which only older Ollama versions (< 0.40) support
+    direct = args.quantize in DP.CONVERTER_TYPES
+    outtype = args.quantize if direct else "f16"
+    base_g, abl_g = os.path.join(gguf_dir, f"{slug}-base-{outtype}.gguf"), os.path.join(gguf_dir, f"{slug}-abl-{outtype}.gguf")
+    run.event("gguf", "start", outtype=outtype)
+    DP.convert_gguf(project, out_dir, abl_g, run.log, allow_code=args.trust_remote_code, outtype=outtype)
     run.event("gguf", "progress", which="abl")
-    DP.convert_gguf(project, model_dir, base_g, run.log, allow_code=args.trust_remote_code)
+    DP.convert_gguf(project, model_dir, base_g, run.log, allow_code=args.trust_remote_code, outtype=outtype)
     run.event("gguf", "done", base=base_g, abl=abl_g)
     tpl = ""
     for fn in ("chat_template.jinja", "tokenizer_config.json"):
@@ -243,7 +247,7 @@ def step_deploy(run, args, project, model_dir, out_dir, slug, prompts):
     run.event("ollama", "start", names=names, host=DP.P.ollama_host())
     for tag, gguf in (("base", base_g), ("abl", abl_g)):
         DP.write_modelfile(os.path.join(gguf_dir, f"Modelfile-{slug}-{tag}"), gguf, tpl)   # for manual `ollama create`
-        DP.ollama_create(names[tag], gguf, tpl, args.quantize, run.log)                  # over the API (works across containers)
+        DP.ollama_create(names[tag], gguf, tpl, None if direct else args.quantize, run.log)   # over the API (works across containers)
         run.event("ollama", "progress", created=names[tag])
     run.update_meta(ollama=names, gguf={"base": base_g, "abl": abl_g})
     ok = {n: DP.template_ok(n) for n in names.values()}
@@ -294,7 +298,10 @@ def main(argv=None):
         run = Run(project, os.path.join("runs", "abliterate_" + datetime.now().strftime("%Y%m%d_%H%M%S")))
         model_repo = args.model
     slug = slug_of(model_repo)
-    run.update_meta(model_repo=model_repo, slug=slug, status="running", stage=args.stage, args=vars(args), started=run.meta.get("started") or datetime.now().isoformat(timespec="seconds"))
+    if not args.hf_token and os.environ.get("HF_TOKEN"):
+        args.hf_token = os.environ["HF_TOKEN"]
+    safe_args = {k: v for k, v in vars(args).items() if k != "hf_token"}
+    run.update_meta(model_repo=model_repo, slug=slug, status="running", stage=args.stage, args=safe_args, started=run.meta.get("started") or datetime.now().isoformat(timespec="seconds"))
     run.log(f"run {run.run_dir}: model {model_repo} stage {args.stage}")
     try:
         model_dir = step_download(run, model_repo, os.path.join(project, "models"), args.hf_token)

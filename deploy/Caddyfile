@@ -1,7 +1,11 @@
-# Basic auth in front of the app. For TLS, replace ":8080" with your hostname and Caddy fetches a certificate.
+# Basic auth in front of the app. For TLS: replace ":8080" with your public hostname AND publish 80/443 in
+# docker-compose.yml (Caddy then fetches a certificate; caddy_data keeps it), or add `tls internal` for a self-signed one.
 :8080 {
     basic_auth {
         {$CADDY_USER} {$CADDY_HASH}
+    }
+    request_body {
+        max_size 4MB
     }
     reverse_proxy app:8787 {
         flush_interval -1

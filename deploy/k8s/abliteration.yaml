@@ -1,14 +1,33 @@
-# Abliteration Lab on Kubernetes (Rancher / RKE2 / k3s / Rancher Desktop).
+# Abliteration Lab on Kubernetes (Rancher / RKE2 / k3s).
 #   kubectl apply -f deploy/k8s/abliteration.yaml
-# Prerequisites on the cluster:
-#   - the NVIDIA device plugin (nvidia.com/gpu resources). With ONE GPU per node, enable time-slicing in the
-#     device plugin so the app and Ollama containers can both request a share; otherwise give the node 2 GPUs.
-#   - a StorageClass for the workspace PVC (hundreds of GB for large models).
-#   - an ingress controller; the basic-auth secret below is for ingress-nginx (`htpasswd -c auth admin`).
-# The image must be pushed to a registry the cluster can pull from (see README): kubectl set image ... or edit below.
+#
+# Prerequisites on the cluster
+#   - NVIDIA device plugin or GPU Operator (nvidia.com/gpu resources). The app and the Ollama container each request one
+#     GPU. On a node with ONE GPU enable time-slicing so both get a share, e.g. with GPU Operator:
+#       kubectl -n gpu-operator create configmap time-slicing-config --from-literal=any='version: v1
+#       sharing: {timeSlicing: {resources: [{name: nvidia.com/gpu, replicas: 2}]}}'
+#       kubectl -n gpu-operator patch clusterpolicy cluster-policy --type merge \
+#         -p '{"spec":{"devicePlugin":{"config":{"name":"time-slicing-config","default":"any"}}}}'
+#     Otherwise schedule on a node with 2+ GPUs.
+#   - the `nvidia` RuntimeClass (created by GPU Operator; defined below for hand-installed toolkits, harmless if it exists).
+#   - a StorageClass for the workspace PVC (hundreds of GB for large models). Memory limits below are sized for the
+#     4B-9B models; GLM-4.5-Air needs ~250 GB RAM for the converter, GLM-5.x a dedicated node (see README).
+#   - an ingress controller. RKE2 ships ingress-nginx (used below). k3s / Rancher Desktop ship Traefik instead:
+#     check `kubectl get ingressclass`; for Traefik replace the Ingress with
+#       apiVersion: traefik.io/v1alpha1, kind: Middleware, metadata {name: basic-auth}, spec {basicAuth: {secret: basic-auth}}
+#     and an Ingress with ingressClassName traefik and the annotation
+#       traefik.ingress.kubernetes.io/router.middlewares: abliteration-basic-auth@kubernetescrd
+#   - secrets:  htpasswd -c auth admin && kubectl -n abliteration create secret generic basic-auth --from-file=auth
+#               kubectl -n abliteration create secret generic hf --from-literal=token=hf_xxxxxxxx   (optional, gated repos)
+#   - the image in a registry the cluster can pull from (ghcr.io/thrizzo/abliteration-lab, built by the GitHub workflow).
 apiVersion: v1
 kind: Namespace
 metadata: { name: abliteration }
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata: { name: nvidia }
+handler: nvidia
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -34,31 +53,40 @@ spec:
   template:
     metadata: { labels: { app: abliteration } }
     spec:
-      runtimeClassName: nvidia          # remove if the device plugin is installed without a runtime class
+      runtimeClassName: nvidia
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch     # no recursive chown of hundreds of GB on every start
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: app
-          image: abliteration-lab:latest   # e.g. registry.example.com/abliteration-lab:1.0
+          image: ghcr.io/thrizzo/abliteration-lab:latest
           imagePullPolicy: IfNotPresent
           env:
             - { name: OLLAMA_HOST, value: "http://127.0.0.1:11434" }   # ollama runs in the same pod
-            - { name: ABL_HOST, value: "0.0.0.0" }
+            - { name: ABL_HOST, value: "0.0.0.0" }                        # pod-internal; only the Service/Ingress reach it
             - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf, key: token, optional: true } } }
           ports: [{ containerPort: 8787, name: http }]
           volumeMounts: [{ name: workspace, mountPath: /workspace }]
           resources:
-            limits: { nvidia.com/gpu: 1, memory: 48Gi }
-            requests: { cpu: "2", memory: 16Gi }
-          readinessProbe: { httpGet: { path: /api/env, port: 8787 }, initialDelaySeconds: 15, periodSeconds: 20 }
+            requests: { cpu: "4", memory: 48Gi, ephemeral-storage: 20Gi, nvidia.com/gpu: 1 }
+            limits: { memory: 48Gi, ephemeral-storage: 20Gi, nvidia.com/gpu: 1 }
+          startupProbe: { httpGet: { path: /healthz, port: 8787 }, periodSeconds: 5, failureThreshold: 60 }
+          readinessProbe: { httpGet: { path: /healthz, port: 8787 }, periodSeconds: 20, timeoutSeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: 8787 }, periodSeconds: 60, timeoutSeconds: 5 }
         - name: ollama
           image: ollama/ollama:latest
           env:
             - { name: OLLAMA_KEEP_ALIVE, value: "5m" }
-            - { name: OLLAMA_HOST, value: "0.0.0.0:11434" }
-          ports: [{ containerPort: 11434, name: ollama }]
-          volumeMounts: [{ name: ollama, mountPath: /root/.ollama }]
+            - { name: OLLAMA_HOST, value: "127.0.0.1:11434" }            # loopback only: the API has no auth
+          volumeMounts: [{ name: ollama, mountPath: /.ollama }]
           resources:
-            limits: { nvidia.com/gpu: 1 }        # second GPU, or a time-sliced share of the first
-            requests: { cpu: "1", memory: 8Gi }
+            requests: { cpu: "1", memory: 8Gi, nvidia.com/gpu: 1 }
+            limits: { memory: 16Gi, nvidia.com/gpu: 1 }                  # second GPU, or a time-sliced share of the first
       volumes:
         - { name: workspace, persistentVolumeClaim: { claimName: workspace } }
         - { name: ollama, persistentVolumeClaim: { claimName: ollama } }
@@ -70,7 +98,19 @@ spec:
   selector: { app: abliteration }
   ports: [{ port: 80, targetPort: 8787, name: http }]
 ---
-# basic auth for ingress-nginx:  htpasswd -c auth admin && kubectl -n abliteration create secret generic basic-auth --from-file=auth
+# only the ingress controller may reach the pod (adjust the namespace selector to where your controller runs)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: abliteration-ingress-only, namespace: abliteration }
+spec:
+  podSelector: { matchLabels: { app: abliteration } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress-nginx } }
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+      ports: [{ port: 8787 }]
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -81,11 +121,14 @@ metadata:
     nginx.ingress.kubernetes.io/auth-secret: basic-auth
     nginx.ingress.kubernetes.io/auth-realm: "Abliteration Lab"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: "4m"
 spec:
   ingressClassName: nginx
   rules:
-    - host: abliteration.example.com      # change
+    - host: abliteration.example.com      # change; add a tls: section for HTTPS (cert-manager or a Secret)
       http:
         paths:
           - path: /

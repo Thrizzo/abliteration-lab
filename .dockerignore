@@ -1,15 +1,19 @@
-# applied when the build context is the project root (see compose: context ..)
-.venv
-.venv-gguf
-llama.cpp
-models
-out
-gguf
-runs
-data
-sbom
-*.gguf
-glm-edge-4b-chat-abliterated*
-.claude
+# build context = project root (compose: context ..). Patterns are recursive on purpose.
+.git
+**/.venv
+**/.venv-gguf
+**/llama.cpp
+**/workspace
+**/models
+**/out
+**/gguf
+**/runs
+**/data
+**/sbom
+**/*.gguf
+**/*.safetensors
+**/__pycache__
+**/.claude
+deploy/.env
 gui/data.json
-__pycache__
+glm-edge-4b-chat-abliterated*
