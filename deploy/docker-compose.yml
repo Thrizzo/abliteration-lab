@@ -17,7 +17,7 @@ services:
       ABL_HOST: 0.0.0.0
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
-      - ${WORKSPACE:-./workspace}:/workspace
+      - ${WORKSPACE:-../workspace}:/workspace     # relative to this file's folder; set an absolute path in .env to be safe
     depends_on: [ollama]
     restart: unless-stopped
     # the app is only reachable through caddy; uncomment to expose it directly on this machine (no auth!)

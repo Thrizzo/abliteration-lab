@@ -37,14 +37,29 @@ def ensure_local(data_dir, log=print):
     missing = [(r, s, f) for r, s, f in SOURCES if not os.path.isfile(os.path.join(data_dir, f))]
     if not missing:
         return
+    import hashlib
+    from datetime import datetime
     from datasets import load_dataset
+    from huggingface_hub import HfApi
+    manifest_p = os.path.join(data_dir, "manifest.json")
+    manifest = json.load(open(manifest_p, encoding="utf-8")) if os.path.isfile(manifest_p) else {}
     for repo, split, fname in missing:
-        ds = load_dataset(repo, split=split)
+        rev = HfApi().dataset_info(repo).sha                     # pinned revision, like notebook cell 3.8a
+        ds = load_dataset(repo, split=split, revision=rev)
         col = "text" if "text" in ds.column_names else ds.column_names[0]
-        with open(os.path.join(data_dir, fname), "w", encoding="utf-8", newline="\n") as f:
+        path = os.path.join(data_dir, fname)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
             for i, r in enumerate(ds):
                 f.write(json.dumps({"id": f"{fname[:-6]}-{i}", "prompt": r[col]}, ensure_ascii=False) + "\n")
-        log(f"data: {fname} exported from {repo} [{split}] ({len(ds)} rows)")
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for b in iter(lambda: f.read(1 << 20), b""):
+                h.update(b)
+        manifest[fname] = {"repo": repo, "split": split, "revision": rev, "rows": len(ds), "sha256": h.hexdigest(),
+                           "exported": datetime.now().isoformat(timespec="seconds")}
+        log(f"data: {fname} exported from {repo}@{rev[:8]} [{split}] ({len(ds)} rows)")
+    with open(manifest_p, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
 
 
 def load_prompts(data_dir, n_train, n_test):
