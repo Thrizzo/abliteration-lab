@@ -98,7 +98,7 @@ If `pull app` fails with `unauthorized`, the package on GHCR is private. Its vis
 making the repository public does not make an already published package public. The owner can open it up once on the
 package's page under *Package settings* → *Danger Zone* → *Change visibility*. Otherwise log in first with a personal access
 token (classic) that has the `read:packages` scope: `docker login ghcr.io -u <github user>` and paste the token at the
-password prompt (piping it in with `echo` leaves it in the shell history). Or skip `pull app` and build locally as above.
+password prompt (piping a literal token in with `echo` can leave it in the shell history). Or skip `pull app` and build locally as above.
 
 Open **http://localhost:8080** and log in with the user and password from `.env`. The first run of a model downloads it from
 Hugging Face into `workspace/models/`.
