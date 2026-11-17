@@ -92,10 +92,15 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --e
 
 `pull app` fetches `ghcr.io/thrizzo/abliteration-lab`; without it, `up -d` builds the image locally from `deploy/Dockerfile`
 (about 15 minutes, the torch CUDA wheels alone are several GB), and `up -d --build` forces a rebuild. `ollama/ollama` and
-`caddy` are pulled either way. While the repository is private its package is private too:
-`echo <token with read:packages> | docker login ghcr.io -u <user> --password-stdin` first, or make the package public under the
-repository's *Packages* settings. Open
-**http://localhost:8080** and log in with the user and password from `.env`. The first run of a model downloads it from
+`caddy` are pulled either way.
+
+If `pull app` fails with `unauthorized`, the package on GHCR is private. Its visibility is separate from the repository's:
+making the repository public does not make an already published package public. The owner can open it up once on the
+package's page under *Package settings* → *Danger Zone* → *Change visibility*. Otherwise log in first with a personal access
+token (classic) that has the `read:packages` scope: `docker login ghcr.io -u <github user>` and paste the token at the
+password prompt (piping it in with `echo` leaves it in the shell history). Or skip `pull app` and build locally as above.
+
+Open **http://localhost:8080** and log in with the user and password from `.env`. The first run of a model downloads it from
 Hugging Face into `workspace/models/`.
 
 What the stack does:
