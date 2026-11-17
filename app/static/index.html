@@ -52,7 +52,7 @@
         <span class="small" id="runInfo"></span>
       </div>
       <details><summary>Advanced</summary><div class="row">
-        <label class="small">device <select id="optDevice"><option value="cuda">cuda (one GPU)</option><option value="auto">auto (multi-GPU / CPU offload)</option></select></label>
+        <label class="small">device <select id="optDevice"><option value="cuda">cuda (one GPU)</option><option value="auto">auto (multi-GPU / CPU offload)</option><option value="cpu">cpu (no GPU, slow)</option></select></label>
         <label class="small"><input type="checkbox" id="optVerify" checked> reload and validate after the edit</label>
         <label class="small">prompts per group <input type="number" id="optTrain" value="256" min="16" max="2048" style="width:80px"></label>
         <label class="small">test prompts <input type="number" id="optTest" value="16" min="4" max="64" style="width:70px"></label>

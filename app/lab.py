@@ -32,7 +32,7 @@ class Lab:
         import torch
         st = {"loaded": self.hm is not None, "run_dir": self.run_dir, "model_dir": self.model_dir,
               "n_layers": self.hm.n_layers if self.hm else None, "d_model": self.hm.d_model if self.hm else None,
-              "busy": self.busy, "loaded_at": self.loaded_at}
+              "busy": self.busy, "loaded_at": self.loaded_at, "device": str(self.hm.device) if self.hm else None}
         if torch.cuda.is_available():
             free, total = torch.cuda.mem_get_info()
             st["vram_free_gb"], st["vram_total_gb"] = round(free / 1e9, 1), round(total / 1e9, 1)
@@ -49,8 +49,10 @@ class Lab:
                 model_dir = meta.get("model_dir") or os.path.join(self.project, "models", "glm-edge-4b-chat")
                 if self.hm is None or self.model_dir != model_dir:
                     self.hm = None; gc.collect(); torch.cuda.empty_cache()
-                    trc = bool((meta.get("args") or {}).get("trust_remote_code"))
-                    m, tok = load_model(model_dir, "bfloat16", "cuda", trc)
+                    args = meta.get("args") or {}
+                    # the run's own device map (cuda / cpu / auto); 'cuda' falls back to the CPU when no GPU is visible,
+                    # and dtype auto picks bf16 on a GPU, float32 on the CPU
+                    m, tok = load_model(model_dir, "auto", args.get("device_map") or "cuda", bool(args.get("trust_remote_code")))
                     self.hm = HookedModel(m, tok)
                     self.model_dir, self.loaded_at = model_dir, time.strftime("%H:%M:%S")
                 dirs = torch.load(os.path.join(rd, "refusal_dirs.pt"))

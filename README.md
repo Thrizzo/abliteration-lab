@@ -45,7 +45,7 @@ algebra, and the same procedure transfers unchanged from a 1.5B dense model to a
 
 | Path | What it is |
 |---|---|
-| `abliterate/` | The pipeline for every GLM family: `arch.py` detects the block structure and which tensors write into the residual stream (post-norm blocks, MoE experts, FP8 block scales), `hooks.py` measures and ablates with plain PyTorch hooks (works with `device_map=auto`), `edit.py` edits safetensors shard by shard without loading the model, `validate.py` runs the six checks, `deploy.py` converts to GGUF and imports into Ollama over its HTTP API, `pipeline.py` is the CLI and writes `events.jsonl` for the app. |
+| `abliterate/` | The pipeline for every GLM family: `arch.py` detects the block structure and which tensors write into the residual stream (post-norm blocks, MoE experts, FP8 block scales), `hooks.py` measures and ablates with plain PyTorch hooks (works with `device_map=auto` and on the CPU), `edit.py` edits safetensors shard by shard without loading the model, `validate.py` runs the six checks, `deploy.py` converts to GGUF and imports into Ollama over its HTTP API, `pipeline.py` is the CLI and writes `events.jsonl` for the app. |
 | `app/` | **Abliteration Lab**, a local web app (FastAPI, vanilla JS). One flow: **Model → Abliterate → Compare**, plus header panels for the **datasets** (view, search, edit, remove rows with an audit trail), the **SBOM** (CycloneDX of both Python environments, advisories, the project's own modules, Ollama, llama.cpp, driver, models, datasets) and the process **log**. |
 | `deploy/` | `Dockerfile`, `docker-compose.yml` (+ `docker-compose.gpu.yml`), `Caddyfile` (basic auth), `.env.example`, `k8s/abliteration.yaml`. |
 | `.github/workflows/docker-image.yml` | Builds and publishes `ghcr.io/thrizzo/abliteration-lab`. |
@@ -58,16 +58,19 @@ through the norm weight), GLM-4.1V / 4.5V / 4.6V text decoders, GLM-4.5 / 4.6 Mo
 legacy ChatGLM checkpoints behind `--trust-remote-code`. Checkpoints may be bf16, fp16/fp32 or FP8 block-scaled.
 
 Verified end to end on an RTX 5080 (16 GB): GLM-Edge-4B (layer 16, 15/16 → 1/16 refusals, validation PASS, Ollama A/B
-9/10 → 0/10) and GLM-Edge-1.5B (layer 12, PASS, 6/10 → 0/10), natively and inside the Docker stack. The sharded edit was
-also tested on a synthetic checkpoint with per-expert, fused-expert, FP8 and post-norm tensors. GLM-5.x has not been run on
-real weights (no hardware here); its tensor layout was read from the model repository.
+9/10 → 0/10) and GLM-Edge-1.5B (layer 12, PASS, 6/10 → 0/10), natively and inside the Docker stack. Without a GPU the
+1.5B run gives the same result on the CPU (float32, layer 12, 9/16 → 0/16 refusals, validation PASS); the GGUF / Ollama
+stage was not part of that CPU run. The sharded edit was also tested on a synthetic checkpoint with per-expert,
+fused-expert, FP8 and post-norm tensors. GLM-5.x has not been run on real weights (no hardware here); its tensor layout was
+read from the model repository.
 
 ---
 
 ## 3. Deploy with Docker (recommended)
 
 **Requirements.** Docker Desktop (Windows/macOS) or Docker Engine on Linux; for GPU use an NVIDIA driver and, on Linux, the
-NVIDIA Container Toolkit (Docker Desktop on Windows needs only WSL2 and a current driver). About 20 GB of disk for the image
+NVIDIA Container Toolkit (Docker Desktop on Windows needs only WSL2 and a current driver). No GPU, or a runtime that cannot
+hand it to containers: the stack runs on the CPU, see [Without a GPU](#without-a-gpu). About 20 GB of disk for the image
 and pulls, plus the models: roughly 25 GB per 4B model (base copy, edited copy, two GGUFs), hundreds of GB for the large ones.
 
 ```bash
@@ -145,9 +148,34 @@ The image is a plain OCI image.
 - *moby (dockerd) backend*: the commands above work unchanged.
 - *containerd backend*: `nerdctl compose -f deploy/docker-compose.yml up -d` (and `nerdctl load -i abliteration-lab-image.tar`
   for the exported image).
-- On **Windows** Rancher Desktop does not pass the GPU into containers, so leave `docker-compose.gpu.yml` out: the UI,
-  datasets, SBOM and Compare (with models already in Ollama) work; measure and scan need a GPU and the app shows a warning.
-  On a Linux host with the NVIDIA Container Toolkit the GPU works with either backend.
+- On **Windows** Rancher Desktop does not pass the GPU into containers, whatever driver the host has: leave
+  `docker-compose.gpu.yml` out and the whole pipeline runs on the CPU (next section). On a Linux host with the NVIDIA
+  Container Toolkit the GPU works with either backend.
+
+### Without a GPU
+
+Start the stack without the GPU file; nothing else changes:
+
+```bash
+docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+```
+
+When no CUDA GPU is visible the pipeline and the lab load the model onto the CPU instead of failing with *Found no NVIDIA
+driver on your system*: `--device-map cuda` falls back to `cpu`, and `--dtype auto` becomes float32 (bf16 on processors with
+AVX512-BF16 / AMX, where it is the faster of the two). The app says so in a banner and preselects `cpu` under *Advanced*;
+Ollama runs the Compare stage on the CPU as well. The method and the checks are the same, it just takes longer and the
+model has to fit into RAM:
+
+| | GLM-Edge-1.5B | GLM-Edge-4B |
+| --- | --- | --- |
+| RAM while loaded, float32 | 7 GB (measured) | about 18 GB (estimated) |
+| full run with the default settings, 4 cores without AVX-512, no Ollama stage | 35 min (measured) | roughly 2 hours (estimated) |
+
+To shorten a CPU run lower *test prompts*, *max new tokens* or narrow the *layer range* (`--n-test 8 --max-new-tokens 32
+--layer-range 0.3-0.7`): the scan generates `layers × test prompts × tokens` and is most of the run time. If a run stops
+without an error message (exit code 137) the container ran out of memory. Docker Desktop and Rancher Desktop on Windows
+run inside WSL 2, which gets half of the host's RAM by default: raise it with `memory=24GB` under `[wsl2]` in
+`%UserProfile%\.wslconfig`, then `wsl --shutdown` and start the container runtime again.
 
 ### Kubernetes (Rancher, RKE2, k3s)
 
@@ -214,12 +242,13 @@ python -m abliterate --model THUDM/glm-edge-4b-chat                       # ever
 python -m abliterate --model THUDM/glm-edge-4b-chat --pause-at-choice     # stop after the scan
 python -m abliterate --run-dir runs/abliterate_<ts> --stage continue --layer 17
 python -m abliterate --model zai-org/GLM-5.2 --device-map auto --skip-verify --no-ollama
+python -m abliterate --model THUDM/glm-edge-1.5b-chat --device-map cpu    # no GPU (also the fallback when none is visible)
 python -m abliterate --help
 ```
 
-Options: `--n-train 256 --n-test 16 --batch 16 --gen-batch 4 --max-new-tokens 64 --layer-range 0.2-0.8 --dtype bfloat16
---device-map cuda|auto --quantize q8_0|f16|bf16 --trust-remote-code --hf-token`. Stages: `all`, `download`, `measure`, `scan`,
-`continue`, `apply`, `validate`, `deploy`.
+Options: `--n-train 256 --n-test 16 --batch 16 --gen-batch 4 --max-new-tokens 64 --layer-range 0.2-0.8
+--dtype auto|bfloat16|float32 --device-map cuda|cpu|auto --quantize q8_0|f16|bf16 --trust-remote-code --hf-token`. Stages:
+`all`, `download`, `measure`, `scan`, `continue`, `apply`, `validate`, `deploy`.
 
 ---
 

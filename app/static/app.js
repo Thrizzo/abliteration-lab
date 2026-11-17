@@ -93,10 +93,12 @@ async function loadEnv(){
   try{ S.env=await api('/env'); }catch(e){ return; }
   const e=S.env, g=e.gpu;
   if(g){ $('#gpuVal').textContent=`${g.vram_used_gb}/${g.vram_total_gb} GB`; $('#dotGpu').className='dot '+(g.vram_used_gb/g.vram_total_gb>0.5?'busy':'on'); }
+  else if(e.cuda===false){ $('#gpuVal').textContent='cpu'; $('#dotGpu').className='dot'; }
   $('#dotOll').className='dot '+(e.ollama.reachable?'on':'bad');
-  if(e.cuda===false && !document.querySelector('#cudaWarn')){ const w=document.createElement('div'); w.id='cudaWarn'; w.className='narr'; w.style.borderLeftColor='var(--critical)'; w.innerHTML='<b style="color:var(--critical)">No CUDA GPU is visible to the app.</b> In Docker start the stack with the NVIDIA runtime (<span class="mono">--gpus all</span> / compose device reservation); measure, scan and the lab will fail without it.'; $('#s-abl').insertBefore(w, $('#s-abl').firstChild.nextSibling); }
-  const chk=[['python + torch'+(e.torch?' '+e.torch:''),e.venv],['CUDA visible',e.cuda!==false],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable],[`disk free ${e.disk_free_gb} GB`, e.disk_free_gb>30]];
-  $('#envChecks').innerHTML=chk.map(([l,ok])=>`<div class="check"><span class="dot ${ok?'on':'bad'}"></span>${l}</div>`).join('');
+  if(e.cuda===false && !document.querySelector('#cudaWarn')){ const w=document.createElement('div'); w.id='cudaWarn'; w.className='narr'; w.style.borderLeftColor='var(--warn)'; const f32=e.dtype!=='bfloat16'; w.innerHTML='<b style="color:var(--warn)">No CUDA GPU is visible to the app: it runs on the CPU.</b> Everything works, but measure, scan and the lab take much longer, and the model has to fit into RAM in '+(f32?'float32':'bf16 (this processor has a fast bf16 path)')+': about '+(f32?'7 GB for GLM-Edge-1.5B and 18 GB for the 4B':'6 GB for GLM-Edge-1.5B and 11 GB for the 4B')+'. The Advanced options shorten a CPU run: fewer test prompts, fewer new tokens, a narrower layer range. To use a GPU instead, start the stack with the NVIDIA runtime (<span class="mono">docker-compose.gpu.yml</span> / <span class="mono">--gpus all</span>).'; $('#s-abl').insertBefore(w, $('#s-abl').firstChild.nextSibling); }
+  if(e.cuda===false && !S.cpuDefault){ S.cpuDefault=true; if($('#optDevice').value==='cuda') $('#optDevice').value='cpu'; }
+  const chk=[['python + torch'+(e.torch?' '+e.torch:''),e.venv],[e.cuda===false?'no CUDA GPU: running on the CPU':'CUDA visible',e.cuda!==false,e.cuda===false?'warn':null],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable],[`disk free ${e.disk_free_gb} GB`, e.disk_free_gb>30]];
+  $('#envChecks').innerHTML=chk.map(([l,ok,cls])=>`<div class="check"><span class="dot ${cls||(ok?'on':'bad')}"></span>${l}</div>`).join('');
   $('#ollInfo').innerHTML = e.ollama.reachable ? `<b>models</b><span class="mono">${e.ollama.models.filter(m=>/glm/i.test(m)).join(', ')||'none'}</span><b>in VRAM</b><span class="mono">${e.ollama.loaded.map(m=>`${m.name} (${m.vram_gb} GB)`).join(', ')||'none'}</span>` : `<b>status</b><span>not reachable - start Ollama</span>`;
   updateHeader();
 }
@@ -123,7 +125,9 @@ async function selectModel(e, silent){
   const farNote = (p&&!p.local_ok) ? '<div class="narr small">This model does not fit a single 16 GB GPU in bf16. Measure and scan would need <b>device auto</b> (multi-GPU or CPU offload, slow); the weight edit itself streams shard by shard and works anywhere with the disk space.</div>' : '';
   const notLocal = a ? '' : '<p class="sub">'+esc(p?.size||'')+'. '+esc(p?.note||'')+' Not on disk yet: it is downloaded when you press Run (safetensors only).</p>'+farNote;
   d.innerHTML='<h3>'+esc(e.repo)+' <small>'+esc(a?.family||p?.family||'')+'</small></h3>'+statsHtml+notLocal;
-  if(a){ $('#optDevice').value = a.fits_16gb_bf16===false ? 'auto' : 'cuda'; $('#optRemote').checked=!!a.needs_remote_code; } else if(p&&!p.local_ok) $('#optDevice').value='auto';
+  if(S.env?.cuda===false) $('#optDevice').value='cpu';            // no GPU: everything on the CPU
+  else if(a) $('#optDevice').value = a.fits_16gb_bf16===false ? 'auto' : 'cuda'; else if(p&&!p.local_ok) $('#optDevice').value='auto';
+  if(a) $('#optRemote').checked=!!a.needs_remote_code;
   await loadRuns(); updateHeader();
   if(!silent) go('abl');
 }
@@ -342,9 +346,10 @@ function appendLog(lines){ const c=$('#console'); if(c.textContent.startsWith('�
 
 // ------------------------------------------------------------------ lab
 async function labStatus(){ try{ S.lab=await api('/lab/status'); }catch(e){ return; } const l=S.lab;
-  $('#labInfo').innerHTML = l.loaded ? `resident since ${l.loaded_at} · <span class="mono">${esc((l.model_dir||'').split(/[\\/]/).pop())}</span> · VRAM free ${l.vram_free_gb}/${l.vram_total_gb} GB` : `not loaded · VRAM free ${l.vram_free_gb??'?'} GB`;
+  const mem = l.vram_total_gb!=null ? ` · VRAM free ${l.vram_free_gb}/${l.vram_total_gb} GB` : (S.env?.cuda===false ? ' · on the CPU' : '');
+  $('#labInfo').innerHTML = l.loaded ? `resident since ${l.loaded_at} · <span class="mono">${esc((l.model_dir||'').split(/[\\/]/).pop())}</span>${mem}` : `not loaded${mem}`;
   $('#labLoad').disabled=!!l.busy; $('#probeBtn').disabled=$('#tryBtn').disabled=!l.loaded||!!l.busy; }
-$('#labLoad').onclick=async()=>{ if(!S.runId) return toast('no run for this model yet', true); if(!S.run?.measure) return toast('this run has no measured directions yet', true); $('#labInfo').textContent='loading (~30 s)…'; $('#labLoad').disabled=true; try{ await api('/lab/load', {run_id:S.runId}); toast('model resident'); }catch(e){ toast(e.message, true); } labStatus(); loadEnv(); };
+$('#labLoad').onclick=async()=>{ if(!S.runId) return toast('no run for this model yet', true); if(!S.run?.measure) return toast('this run has no measured directions yet', true); $('#labInfo').textContent=S.env?.cuda===false?'loading on the CPU (a minute or two)…':'loading (~30 s)…'; $('#labLoad').disabled=true; try{ await api('/lab/load', {run_id:S.runId}); toast('model resident'); }catch(e){ toast(e.message, true); } labStatus(); loadEnv(); };
 $('#labUnload').onclick=async()=>{ await api('/lab/unload', {}); labStatus(); loadEnv(); };
 $('#probeBtn').onclick=async()=>{ const prompt=$('#probePrompt').value.trim(); if(!prompt) return; $('#probeInfo').textContent='probing…'; $('#probeBtn').disabled=true;
   try{ const r=await api('/lab/probe', {prompt}); const NL=r.layers.length, sc=S.run?.measure?.scan_range||[0,NL-1], score=r.layers.map(x=>x.score);
