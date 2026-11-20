@@ -44,6 +44,7 @@ button,input,textarea,select{font:inherit;color:inherit}
 .dot.on{background:var(--accent);box-shadow:0 0 8px var(--accent)}
 .dot.busy{background:var(--warn);box-shadow:0 0 8px var(--warn);animation:pulse 1s infinite}
 .dot.bad{background:var(--critical)}
+.dot.warn{background:var(--warn)}
 @keyframes pulse{50%{opacity:.4}}
 
 .main{overflow:auto;padding:22px 30px 60px}

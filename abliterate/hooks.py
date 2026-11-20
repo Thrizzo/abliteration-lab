@@ -1,7 +1,10 @@
 """Measuring and ablating the residual stream with plain PyTorch hooks on a Hugging Face model.
-No TransformerLens: works with device_map="auto" sharding, MoE blocks and multimodal text decoders."""
+No TransformerLens: works with device_map="auto" sharding, MoE blocks and multimodal text decoders, and on the CPU."""
 import contextlib
 import gc
+import glob
+import json
+import os
 import time
 
 import torch
@@ -44,7 +47,7 @@ class HookedModel:
         def make_hook(li):
             def hook(mod, args, kwargs):
                 hs, _ = _hs_from_args(args, kwargs)
-                captured[li] = hs[:, -1, :].detach().float().cpu()
+                captured[li] = hs[:, -1, :].detach().to("cpu", torch.float32, copy=True)   # a copy also on the CPU, where .float().cpu() is a view
             return hook
 
         handles = [l.register_forward_pre_hook(make_hook(i), with_kwargs=True) for i, l in enumerate(self.layers)]
@@ -78,7 +81,7 @@ class HookedModel:
         def make_hook(li):
             def hook(mod, args, kwargs):
                 hs, _ = _hs_from_args(args, kwargs)
-                captured[li] = hs[0].detach().float().cpu()
+                captured[li] = hs[0].detach().to("cpu", torch.float32, copy=True)
             return hook
 
         handles = [l.register_forward_pre_hook(make_hook(i), with_kwargs=True) for i, l in enumerate(self.layers)]
@@ -155,13 +158,56 @@ class HookedModel:
         out = []
         for i in range(0, len(prompts), batch_size):
             ids, mask = self.encode(prompts[i:i + batch_size])
-            out.append(self.model(input_ids=ids, attention_mask=mask, use_cache=False).logits[:, -1, :].float().cpu())
+            out.append(self.model(input_ids=ids, attention_mask=mask, use_cache=False).logits[:, -1, :].to("cpu", torch.float32, copy=True))
         return torch.cat(out)
 
 
-def load_model(model_dir, dtype="bfloat16", device_map="cuda", trust_remote_code=False, log=print):
-    """AutoModelForCausalLM + tokenizer with left padding. device_map='auto' shards over all GPUs (+ CPU offload)."""
+def cpu_bf16_fast():
+    """True on processors with AVX512-BF16 / AMX: there bf16 is faster than float32 and needs half the RAM.
+    Everywhere else bf16 matmuls take a generic path that is several times slower than float32."""
+    try:
+        return bool(torch.ops.mkldnn._is_mkldnn_bf16_supported())
+    except Exception:
+        return False
+
+
+def resolve_device(device_map="cuda", dtype="auto", log=print):
+    """What the model is really loaded on: (device_map, dtype name).
+    'cuda' without a visible CUDA GPU becomes 'cpu'. dtype 'auto' is bfloat16 on a GPU; on the CPU it is float32 unless the
+    processor has a fast bf16 path. An explicit dtype is kept as given."""
+    has_cuda = torch.cuda.is_available()
+    if device_map == "cuda" and not has_cuda:
+        log("no CUDA GPU is visible to this process: running on the CPU instead (works, but measure and scan take much longer)")
+        device_map = "cpu"
+    on_cpu = device_map == "cpu" or (device_map == "auto" and not has_cuda)
+    if dtype == "auto":
+        dtype = "bfloat16" if not on_cpu or cpu_bf16_fast() else "float32"
+    return device_map, dtype
+
+
+def _ram_check(model_dir, dtype, log):
+    """CPU runs die without a message when the model does not fit (the kernel kills the process, exit code 137): say so first."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as f:
+            avail = next(int(line.split()[1]) for line in f if line.startswith("MemAvailable:")) / 1e6      # kB -> GB
+        cfg = json.load(open(os.path.join(model_dir, "config.json"), encoding="utf-8"))
+        src = getattr(torch, str(cfg.get("dtype") or cfg.get("torch_dtype") or "bfloat16"), torch.bfloat16).itemsize
+        on_disk = sum(os.path.getsize(p) for p in glob.glob(os.path.join(model_dir, "*.safetensors"))) / 1e9
+    except Exception:
+        return                                                    # no /proc (Windows, macOS) or an unusual folder: nothing to say
+    need = on_disk * getattr(torch, dtype).itemsize / src
+    if need > 0.9 * avail:
+        log(f"WARNING: the model needs about {need:.0f} GB of RAM in {dtype} but only {avail:.0f} GB are free. If the run stops without "
+            f"an error (exit code 137) it ran out of memory: give the container / WSL VM more RAM or use a smaller model")
+
+
+def load_model(model_dir, dtype="auto", device_map="cuda", trust_remote_code=False, log=print):
+    """AutoModelForCausalLM + tokenizer with left padding. device_map='auto' shards over all GPUs (+ CPU offload);
+    'cuda' falls back to 'cpu' when no GPU is visible (see resolve_device)."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
+    device_map, dtype = resolve_device(device_map, dtype, log)
+    if device_map == "cpu" or not torch.cuda.is_available():
+        _ram_check(model_dir, dtype, log)
     tok = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=trust_remote_code)
     tok.padding_side = "left"
     if tok.pad_token is None:

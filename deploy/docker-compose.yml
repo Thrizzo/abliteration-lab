@@ -3,8 +3,8 @@
 #   mkdir -p <WORKSPACE>
 #   GPU host (Docker Desktop, Linux + NVIDIA container toolkit):
 #     docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env up -d --build
-#   CPU-only (e.g. Rancher Desktop on Windows): leave the gpu file out; measure/scan will not run but the UI, datasets, SBOM and
-#   Compare (with models already in Ollama) work.
+#   No GPU (e.g. Rancher Desktop on Windows, which cannot pass it into containers): leave the gpu file out. The pipeline then
+#   runs on the CPU: same method, slower, and the model has to fit into RAM (README, "Without a GPU").
 #   Rancher Desktop containerd backend: nerdctl compose with the same files.
 services:
   app:

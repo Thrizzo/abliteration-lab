@@ -6,6 +6,7 @@ validation.json, means.pt, refusal_dirs.pt) plus run.json and events.jsonl (one 
     python -m abliterate --model THUDM/glm-edge-4b-chat --pause-at-choice          # stops after the scan
     python -m abliterate --run-dir runs/abliterate_<ts> --stage continue --layer 17   # resumes with that layer
     python -m abliterate --model zai-org/GLM-5.2 --device-map auto --skip-verify --no-ollama
+    python -m abliterate --model THUDM/glm-edge-1.5b-chat --device-map cpu          # no GPU: everything on the CPU, slower
 """
 import argparse
 import gc
@@ -188,14 +189,15 @@ def step_apply(run, args, model_dir, out_dir, dirs, layer, info):
 def step_verify_and_validate(run, args, model_dir, out_dir, direction, layer, prompts, baseline, scan, info):
     """Reloads base and edited model from disk (one at a time), behaviour + weight checks."""
     import torch
-    from .hooks import HookedModel, load_model
+    from .hooks import HookedModel, load_model, resolve_device
     from .edit import expected_targets
     from .validate import behaviour_checks, compare_weights, weight_checks
     harmful_test, harmless_test = prompts[1], prompts[3]
+    device_map, dtype = resolve_device(args.device_map, args.dtype, run.log)
     results = {}
     for tag, folder in (("base", model_dir), ("abl", out_dir)):
         run.event("validate", "progress", stage=f"loading {tag}")
-        m, tok = load_model(folder, args.dtype, args.device_map, args.trust_remote_code, run.log)
+        m, tok = load_model(folder, dtype, device_map, args.trust_remote_code, run.log)
         hm = HookedModel(m, tok, run.log)
         results[tag] = {"harmful": hm.generate(harmful_test, args.max_new_tokens, args.gen_batch),
                         "harmless": hm.generate(harmless_test, args.max_new_tokens, args.gen_batch),
@@ -277,7 +279,8 @@ def main(argv=None):
     ap.add_argument("--n-train", type=int, default=256); ap.add_argument("--n-test", type=int, default=16)
     ap.add_argument("--batch", type=int, default=16); ap.add_argument("--gen-batch", type=int, default=4)
     ap.add_argument("--max-new-tokens", type=int, default=64); ap.add_argument("--layer-range", default="0.2-0.8")
-    ap.add_argument("--dtype", default="bfloat16"); ap.add_argument("--device-map", default="cuda", help="cuda | auto (multi-GPU / offload)")
+    ap.add_argument("--dtype", default="auto", help="auto (bfloat16 on a GPU; on the CPU float32, or bfloat16 where the processor has AVX512-BF16 / AMX) | bfloat16 | float32")
+    ap.add_argument("--device-map", default="cuda", help="cuda (falls back to cpu when no GPU is visible) | cpu | auto (multi-GPU / offload)")
     ap.add_argument("--trust-remote-code", action="store_true"); ap.add_argument("--hf-token")
     ap.add_argument("--skip-verify", action="store_true", help="no reload/generation after the edit (huge models)")
     ap.add_argument("--no-ollama", action="store_true"); ap.add_argument("--quantize", default="q8_0")
@@ -316,11 +319,13 @@ def main(argv=None):
         import torch
         dirs = la = scan = baseline = None
         if args.stage in ("all", "measure", "scan"):
-            from .hooks import HookedModel, load_model
-            run.event("load", "start", model_dir=model_dir, dtype=args.dtype, device_map=args.device_map)
-            m, tok = load_model(model_dir, args.dtype, args.device_map, args.trust_remote_code, run.log)
+            from .hooks import HookedModel, load_model, resolve_device
+            device_map, dtype = resolve_device(args.device_map, args.dtype, run.log)      # e.g. cuda -> cpu and auto -> float32 without a GPU
+            run.update_meta(device={"device_map": device_map, "dtype": dtype})
+            run.event("load", "start", model_dir=model_dir, dtype=dtype, device_map=device_map)
+            m, tok = load_model(model_dir, dtype, device_map, args.trust_remote_code, run.log)
             hm = HookedModel(m, tok, run.log)
-            run.event("load", "done", n_layers=hm.n_layers, d_model=hm.d_model)
+            run.event("load", "done", n_layers=hm.n_layers, d_model=hm.d_model, dtype=dtype, device_map=device_map)
             dirs, la = step_measure(run, hm, args, prompts)
             if args.stage == "measure":
                 run.update_meta(status="done"); return
