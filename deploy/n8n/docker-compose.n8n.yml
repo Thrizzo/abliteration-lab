@@ -1,0 +1,39 @@
+# n8n for the Abliteration Lab, as an overlay on the main stack so it shares the network with Ollama.
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env up -d
+#   # with GPU, add -f deploy/docker-compose.gpu.yml as usual
+#
+# n8n then reaches the abliterated and guard models at http://ollama:11434 (set that as the Base URL in the
+# n8n "Ollama" credential). It is bound to localhost only, like Caddy. Import the workflow from
+# deploy/n8n/workflows/pentest-copilot.json (Workflows -> ... -> Import from File).
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.48.7   # pin; bump deliberately and re-import if node versions change
+    restart: unless-stopped
+    environment:
+      # --- reach the models in the Ollama container (same compose network) ---
+      OLLAMA_HOST: http://ollama:11434
+      # --- lab scope, read by the workflow's Code nodes via $env ---
+      LAB_ALLOWLIST: ${LAB_ALLOWLIST:-10.10.10.0/24,192.168.56.0/24,127.0.0.1}
+      LAB_AUTORUN_READONLY: ${LAB_AUTORUN_READONLY:-true}   # true: read-only recon that cleared every gate runs without a prompt; writes/exploits still wait for a human
+      LAB_RUNNER_URL: ${LAB_RUNNER_URL:-}          # your own executor endpoint; empty = nothing to run against
+      # --- local, single-user, http-on-loopback settings ---
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}   # approval resume links point here
+      N8N_SECURE_COOKIE: "false"                   # allow the cookie over plain http on localhost
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in deploy/.env (any long random string; keeps saved credentials readable across restarts)}
+      GENERIC_TIMEZONE: ${TZ:-UTC}
+      N8N_PERSONALIZATION_ENABLED: "false"
+    ports:
+      - "${N8N_BIND_ADDR:-127.0.0.1}:${N8N_PORT:-5678}:5678"   # localhost only; reach it over SSH tunnel / VPN
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - ollama
+
+volumes:
+  n8n_data: {}
