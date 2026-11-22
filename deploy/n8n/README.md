@@ -47,55 +47,65 @@ So the buffer in this workflow is **layered**, and the judge model is only one l
    presence of a nice model downstream.
 3. **Its output is data, not instructions.** A Code node parses the proposal into `{command, target, rationale}`. Nothing
    downstream feeds that free text back into a model *that holds tools*.
-4. **Policy gate — deterministic.** `policy.js` checks that *every* host the command touches is in scope (catches a
-   command whose declared target is fine but which quietly curls out to the internet) and blocks a denylist of
+4. **Policy gate — deterministic (the boundary).** `policy.js` checks that *every* host the command touches is in scope
+   (catches a command whose declared target is fine but which quietly curls out to the internet) and blocks a denylist of
    destructive / exfil / pivot / anti-forensic patterns.
-5. **Judge — a regular model that authorizes, and only authorizes.** The tool-capable local model (e.g. qwen3 / llama3.1)
+5. **Guard screen — Granite Guardian, a fixed-template classifier.** An injection-resistant Yes/No screen on the vetted
+   command; a `Yes`/`UNSAFE` routes to *Blocked*. It held the gate-C injection at 12/16 where a chat judge hit 0/16. It is
+   a screen, not the boundary — a miss just falls through to the judge and the deterministic gates. Needs a guard model
+   pulled; delete the two guard nodes to skip it.
+6. **Judge — a regular model that authorizes, and only authorizes.** The tool-capable local model (e.g. qwen3 / llama3.1)
    is shown the vetted command and answers `AUTHORIZE` or `REJECT`. A Code node reads **only** that verdict (strict first
    word; anything ambiguous fails to "not authorized") and re-runs the deterministic policy one last time. The command that
    will run is always `policy.command` — the one the gate approved — so the judge can veto but can never substitute or widen.
    An out-of-scope command with the judge shouting AUTHORIZE is still blocked by the policy re-check.
-6. **Auto-run split (deterministic) + human approval.** A command that cleared every gate above is classified read-only or
-   not by `classifyReadOnly()` — **code, not a model, and fail-safe** (an unknown binary, a pipe into an exploit, a
-   `curl -X POST`, `nmap --script=vuln`, an `nc` listener all fall through to "not read-only"). Confidently read-only recon
-   (`nmap -sV`, `gobuster`, `curl` GET, …) runs without a prompt when `LAB_AUTORUN_READONLY=true`; anything that writes or
-   exploits takes the other branch to a **Wait** node that pauses for a person. Wire its resume URL to Telegram/email/Slack.
-7. **Execution is disabled on import.** The final HTTP node is `disabled: true` and points at `LAB_RUNNER_URL`, which you
-   supply. Importing the workflow cannot run a command against anything, auto-run or not.
+7. **Auto-run tiers (deterministic) + human approval.** A command that cleared every gate above is classified by code,
+   fail-safe:
+   - **passive** (`LAB_AUTORUN_READONLY=true`, default): read-only recon — `nmap -sV`, `gobuster`, `curl` GET, `nmap --script=safe|default`, … auto-runs.
+   - **active-recon** (`LAB_AUTORUN_ACTIVE_RECON=true`, **opt-in, off by default**): also auto-runs safe-category NSE
+     (`--script=discovery|version|safe|default`, never `vuln`/`exploit`/`brute`/`intrusive`) and `sqlmap` in
+     enumerate-only mode (`--dbs/--tables/--columns/--banner/…`, never `--dump`/`--os-shell`/`--passwords`/a shell or file flag).
+   - **everything else** — unknown binaries, writes, exploits, chained commands — takes the other branch to a **Wait** node
+     that pauses for a person. Wire its resume URL to Telegram/email/Slack.
+8. **Execution is disabled on import.** The final HTTP node is `disabled: true` and points at `LAB_RUNNER_URL`, which you
+   supply. Importing the workflow cannot run a command against anything, any tier.
 
 ```
-task+target ─▶ ① scope gate ─▶ ② abliterated SUGGESTS ─▶ ③ parse ─▶ ④ policy gate ─▶ ⑤ judge AUTHORIZE? ─▶ ⑥ read-only? ─┬─yes─▶ ⑦ run vetted cmd
-                  (code)         (ABLITERATED, no tools)   (data)    (code: the real     (REGULAR model;     (code)        └─no──▶ human ─▶ ⑦ run
-                                                                      boundary)           veto-only)                                 (you)
-     every ✗ branch (out of scope / policy / judge reject) ──────────────────────────────────────────────────────▶ Blocked (with reasons)
+task+target ─▶ scope gate ─▶ abliterated SUGGESTS ─▶ parse ─▶ policy gate ─▶ guard screen ─▶ judge AUTHORIZE? ─▶ auto-run tier? ─┬─yes─▶ run vetted cmd
+                 (code)        (ABLITERATED, no tools)  (data)   (code: the      (Granite        (REGULAR model;    (code)         └─no─▶ human ─▶ run
+                                                                  boundary)       Guardian)       veto-only)                                (you)
+     every ✗ branch (out of scope / policy / guard / judge reject) ───────────────────────────────────────────────────────▶ Blocked (with reasons)
 ```
-The runner always executes `policy.command` (step ④'s approved command), never text the judge produced.
+The runner always executes `policy.command` (the policy-gate-approved command), never text the judge produced.
 
 ## Files
 
 | File | What it is |
 | --- | --- |
 | `docker-compose.n8n.yml` | Adds n8n to the lab stack, on the same network as Ollama, localhost-bound. |
-| `workflows/pentest-copilot.json` | The importable workflow above (25 nodes). Imports clean on n8n 2.48.x. |
-| `policy.js` | The deterministic scope + denylist + read-only policy — the security boundary. Embedded in the Code nodes; standalone so it is testable. |
-| `policy.test.js` | `node deploy/n8n/policy.test.js` — 31 unit tests (CIDR scope, out-of-scope exfil, denylist, read-only classification). |
+| `workflows/pentest-copilot.json` | The importable workflow above (31 nodes). Imports clean on n8n 2.48.x. |
+| `policy.js` | The deterministic scope + denylist + auto-run-tier policy — the security boundary. Embedded in the Code nodes; standalone so it is testable. |
+| `policy.test.js` | `node deploy/n8n/policy.test.js` — 48 unit tests (CIDR scope, out-of-scope exfil, denylist, passive + active-recon tier classification). |
 
 ## Setup
 
-1. **Models in Ollama.** The Compare stage of the lab already imports `…-base` and `…-abl`. For the **judge**, pull a
-   general, tool-capable instruct model into the same Ollama:
+1. **Models in Ollama.** The Compare stage of the lab already imports `…-base` and `…-abl`. Pull the **judge** (a general,
+   tool-capable instruct model) and the **guard** (a Granite Guardian classifier) into the same Ollama:
    ```bash
-   docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec ollama ollama pull qwen3:8b   # or llama3.1:8b
+   docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec ollama ollama pull qwen3:8b          # judge; or llama3.1:8b
+   docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec ollama ollama pull <granite-guardian> # guard; `ollama list` for the tag
    ```
-   Set the two **Ollama Chat Model** nodes: *Ollama: abliterated model* to your `<model>-abl` tag
-   (`glm-edge-1.5b-chat-abl:latest` is the default), and *Ollama: judge model (regular)* to the instruct tag (`qwen3:8b`
-   default). Match them to `ollama list`.
+   Set the three **Ollama Chat Model** nodes to match `ollama list`: *abliterated model* → your `<model>-abl` tag
+   (`glm-edge-1.5b-chat-abl:latest` default), *judge model (regular)* → the instruct tag (`qwen3:8b` default),
+   *guard model (Granite Guardian)* → the guard tag. Don't want the guard screen? Delete the *Guard screen* and
+   *Ollama: guard model* nodes and connect *Policy passed?* → *Judge: authorize?* directly.
 
 2. **Secrets / scope** in `deploy/.env`:
    ```
    N8N_ENCRYPTION_KEY=<any long random string>
    LAB_ALLOWLIST=10.10.10.0/24,192.168.56.0/24,127.0.0.1
-   LAB_AUTORUN_READONLY=true    # read-only recon auto-runs; set to false to gate everything behind a human
+   LAB_AUTORUN_READONLY=true        # passive recon auto-runs; false gates everything behind a human
+   LAB_AUTORUN_ACTIVE_RECON=false   # opt-in: also auto-run safe NSE + sqlmap enumerate-only
    # LAB_RUNNER_URL=http://your-lab-runner:8080/run   # leave unset until you have an executor
    ```
 
@@ -114,21 +124,16 @@ The runner always executes `policy.command` (step ④'s approved command), never
 6. **Approval + execution.** Point the *Human approval* Wait node's resume URL at Telegram/email, and only then enable the
    *Execute* node and set `LAB_RUNNER_URL` to your own command runner (an SSH/HTTP shim you control, on the lab network).
 
-7. **Optional — add an injection screen.** For extra injection resistance, insert a purpose-built guard classifier (IBM
-   Granite Guardian: `ollama list` for the exact tag) as a Basic LLM Chain **between *Policy passed?* and *Judge:
-   authorize?***, emitting SAFE/UNSAFE on the vetted command, and route UNSAFE to *Blocked*. In the measurements above it
-   held the injection at 12/16 where a plain chat judge collapsed to 0/16. It is a screen, not a replacement for the
-   deterministic gate.
-
 ## What this does and does not give you
 
 - It **prevents the abliterated model from executing anything** — the strongest and simplest property, from giving it no
   tools and gating execution behind deterministic checks + a human.
 - The deterministic gates are the real enforcement; they cannot be social-engineered.
-- **Auto-run is read-only only, and decided by code.** The read-only classifier is fail-safe: it auto-runs only a tight
-  allowlist of passive recon tools and sends everything else — unknown tools, writes, exploits, chained commands — to a
-  human. It is not a model and cannot be argued with. Even so, auto-run still happens only *after* the scope gate, the
-  policy gate, and the judge's AUTHORIZE all pass. Set `LAB_AUTORUN_READONLY=false` to gate everything behind a human.
+- **Auto-run is decided by code and fail-safe, in two tiers.** Passive recon (default) and the opt-in active-recon tier
+  (safe NSE + sqlmap enumerate-only) auto-run; everything else — unknown tools, writes, exploits, chained commands,
+  `--script=vuln`, `sqlmap --dump`/`--os-shell` — goes to a human. The classifier is not a model and cannot be argued with.
+  Even so, auto-run happens only *after* the scope gate, the policy gate, the guard screen, and the judge's AUTHORIZE all
+  pass. `LAB_AUTORUN_READONLY=false` gates everything; `LAB_AUTORUN_ACTIVE_RECON=true` widens the auto tier.
 - The judge model **authorizes, it does not enforce.** It can veto a command or wave it through, but the runner only ever
   executes the policy-vetted command, so a flipped judge cannot widen scope — it can only reject a good command. Do not
   remove the human approval for anything with side effects.
@@ -137,14 +142,16 @@ The runner always executes `policy.command` (step ④'s approved command), never
 
 ## Verified here
 
-- `policy.js`: 31 unit tests pass (`node deploy/n8n/policy.test.js`), covering CIDR scope, out-of-scope exfil, the
-  denylist, and the read-only classifier (dual-use cases — `curl -X POST`, `sqlmap`, `nmap --script`, `nc` listener,
-  chained exploit, unknown binary — all correctly gate rather than auto-run).
-- `workflows/pentest-copilot.json`: imports successfully into n8n 2.48.7 (`n8n import:workflow`); AI model wiring and
-  branch connections (abliterated → policy → judge → auto-run split) verified after the round-trip.
+- `policy.js`: 48 unit tests pass (`node deploy/n8n/policy.test.js`), covering CIDR scope, out-of-scope exfil, the
+  denylist, the passive read-only classifier and the active-recon tier. Dual-use cases all gate correctly: `curl -X POST`,
+  `nc` listener, chained exploit, unknown binary, `nmap --script=vuln` (and `--script=default,vuln` — a `vuln` hidden behind
+  a `default` prefix must not auto-run), `sqlmap --dump`/`--os-shell`/`--passwords`, and a bare `sqlmap` with no enum flag.
+- `workflows/pentest-copilot.json`: imports successfully into n8n 2.48.7 (`n8n import:workflow`); the model wiring and every
+  branch (scope → abliterated → policy → guard → judge → auto-run tier) verified after the round-trip.
 - The authorize-then-execute decision logic was simulated against `policy.js`: AUTHORIZE runs the vetted command, REJECT
   blocks, an out-of-scope command with the judge saying AUTHORIZE is still blocked by the policy re-check, mutating commands
-  never auto-run, and a malformed/injected judge verdict fails to "not authorized".
+  never auto-run, a malformed/injected judge verdict fails to "not authorized", and the active tier auto-runs safe NSE +
+  sqlmap-enumerate only when `LAB_AUTORUN_ACTIVE_RECON=true` and never overrides scope.
 - The injection-flip numbers above are measured, not illustrative.
 - **Not run here:** the live Ollama calls and end-to-end execution (this environment has no running Ollama/Docker
   daemon). The workflow is validated structurally; the model-dependent steps you run on your stack.

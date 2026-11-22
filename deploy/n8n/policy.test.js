@@ -1,5 +1,5 @@
 /* Unit tests for the scope/command policy. Run: node deploy/n8n/policy.test.js  (no deps, exit 1 on failure) */
-const { decide, classifyReadOnly, targetInScope, extractTargets, inCidr } = require('./policy');
+const { decide, classifyReadOnly, classifyActiveRecon, targetInScope, extractTargets, inCidr } = require('./policy');
 
 let failed = 0;
 function ok(name, cond) {
@@ -82,6 +82,43 @@ ok('autoRun off => even recon requires approval', (() => {
 ok('out-of-scope recon never auto-runs', (() => {
   const d = decide({ command: 'nmap -sV 8.8.8.8', target: '8.8.8.8' }, { ...cfg, autoRunReadOnly: true });
   return d.allowed === false && d.autoRun === false;
+})());
+
+// ---- active-recon tier (opt-in): safe NSE + sqlmap enumerate-only ----
+ok('nmap safe-category NSE is active-recon', classifyActiveRecon('nmap --script=default,discovery 10.10.10.5').ok === true);
+ok('nmap version+safe NSE is active-recon', classifyActiveRecon('nmap --script safe -sV 10.10.10.5').ok === true);
+ok('nmap --script=vuln is NOT active-recon', classifyActiveRecon('nmap --script=vuln 10.10.10.5').ok === false);
+ok('nmap --script=exploit is NOT active-recon', classifyActiveRecon('nmap --script=exploit 10.10.10.5').ok === false);
+ok('nmap named script (unvetted) is NOT active-recon', classifyActiveRecon('nmap --script=http-shellshock 10.10.10.5').ok === false);
+ok('sqlmap --dbs --tables is active-recon', classifyActiveRecon('sqlmap -u http://10.10.10.5/?id=1 --dbs --tables --batch').ok === true);
+ok('sqlmap --dump is NOT active-recon', classifyActiveRecon('sqlmap -u http://10.10.10.5/?id=1 --dump').ok === false);
+ok('sqlmap --os-shell is NOT active-recon', classifyActiveRecon('sqlmap -u http://10.10.10.5/?id=1 --os-shell').ok === false);
+ok('sqlmap --passwords is NOT active-recon', classifyActiveRecon('sqlmap -u http://10.10.10.5/?id=1 --passwords').ok === false);
+ok('bare sqlmap (no enum flag) is NOT active-recon', classifyActiveRecon('sqlmap -u http://10.10.10.5/?id=1 --batch').ok === false);
+ok('chained command is NOT active-recon', classifyActiveRecon('nmap --script=safe 10.10.10.5 && rm x').ok === false);
+
+// decide() with the active tier enabled
+ok('discovery NSE auto-runs only when active tier enabled', (() => {
+  const off = decide({ command: 'nmap --script=discovery 10.10.10.5', target: '10.10.10.5' }, { ...cfg, autoRunReadOnly: true });
+  const on = decide({ command: 'nmap --script=discovery 10.10.10.5', target: '10.10.10.5' }, { ...cfg, autoRunReadOnly: true, autoRunActiveRecon: true });
+  return off.autoRun === false && on.autoRun === true && on.tier === 'active_recon';
+})());
+ok('nmap --script=default,vuln must NOT be passive (regression)', (() => {
+  const d = decide({ command: 'nmap --script=default,vuln 10.10.10.5', target: '10.10.10.5' }, { ...cfg, autoRunReadOnly: true });
+  return d.readOnly === false && d.autoRun === false; // vuln hidden behind a default prefix must not auto-run
+})());
+ok('--script=default,vuln not active-recon either', classifyActiveRecon('nmap --script=default,vuln 10.10.10.5').ok === false);
+ok('sqlmap enum auto-runs in active tier, stays in scope', (() => {
+  const on = decide({ command: 'sqlmap -u http://10.10.10.5/?id=1 --dbs --batch', target: '10.10.10.5' }, { ...cfg, autoRunActiveRecon: true });
+  return on.allowed === true && on.autoRun === true && on.tier === 'active_recon';
+})());
+ok('active tier does not override scope', (() => {
+  const d = decide({ command: 'nmap --script=default 8.8.8.8', target: '8.8.8.8' }, { ...cfg, autoRunActiveRecon: true });
+  return d.allowed === false && d.autoRun === false;
+})());
+ok('passive recon still passive even with active tier on', (() => {
+  const d = decide({ command: 'nmap -sV 10.10.10.5', target: '10.10.10.5' }, { ...cfg, autoRunReadOnly: true, autoRunActiveRecon: true });
+  return d.autoRun === true && d.tier === 'passive';
 })());
 
 console.log(failed ? `\n${failed} test(s) FAILED` : '\nall policy tests passed');

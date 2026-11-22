@@ -90,16 +90,21 @@ const FILTER_TOOLS = new Set([
 ]);
 // patterns that make a command mutating/active even if its tool is in READONLY_TOOLS
 const MUTATING_PATTERNS = [
-  /\bnmap\b[^|;&]*--script(?!=?(safe|default)\b)/i, // nmap NSE other than safe/default
   /\b(curl|wget)\b[^|;&]*(-d\b|--data|-F\b|--form|-T\b|--upload-file|-X\s*(POST|PUT|DELETE|PATCH)|--request\s*(POST|PUT|DELETE|PATCH))/i,
   /\bsmbclient\b[^|;&]*-c\b[^|;&]*\b(put|mkdir|rmdir|del|rename|rm)\b/i,
   /\bnc\b(?![^|;&]*-z)[^|;&]*-[a-z]*l/i, // netcat listener (-l) that isn't a -z port check
 ];
+const PASSIVE_NSE = new Set(['safe', 'default']); // the only NSE categories cheap enough for the passive tier
 
 function classifyReadOnly(command) {
   const cmd = String(command || '').trim();
   if (!cmd) return { readOnly: false, reason: 'empty command' };
   if (MUTATING_PATTERNS.some((rx) => rx.test(cmd))) return { readOnly: false, reason: 'command performs a write/active operation' };
+  // nmap NSE is passive only if EVERY script in the list is safe/default (a lone "default" prefix must not smuggle in vuln)
+  const scriptVal = (cmd.match(/--script[=\s]+("?)([^"\s]+)\1/i) || [])[2];
+  if (scriptVal && !scriptVal.split(',').map((s) => s.trim().toLowerCase()).every((s) => PASSIVE_NSE.has(s))) {
+    return { readOnly: false, reason: 'nmap NSE beyond safe/default (active-recon tier or human)' };
+  }
   // split into segments across ; && || and pipes; every segment must be a known read-only tool or local filter
   const segments = cmd.split(/\||;|&&|\|\||&/).map((s) => s.trim()).filter(Boolean);
   for (const seg of segments) {
@@ -113,6 +118,38 @@ function classifyReadOnly(command) {
     }
   }
   return { readOnly: true, reason: 'passive recon (read-only tools only)' };
+}
+
+// ---- active-recon tier (opt-in) --------------------------------------------------------------
+// A middle tier between passive recon and "needs a human": active but non-destructive scanning that
+// a pentester runs constantly — safe-category nmap NSE and sqlmap in enumerate-only mode. Off unless
+// LAB_AUTORUN_ACTIVE_RECON=true. Still fail-safe: anything outside these exact shapes returns false.
+const SAFE_NSE = new Set(['safe', 'default', 'discovery', 'version', 'banner']);
+const DANGER_NSE = /\b(vuln|exploit|brute|dos|intrusive|malware|fuzzer|external|backdoor)\b/i;
+const SQLMAP_ENUM = /--(banner|current-user|current-db|hostname|is-dba|users|dbs|tables|columns|schema|count)\b|(^|\s)-b(\s|$)/i;
+const SQLMAP_DANGER = /--(os-shell|os-pwn|os-cmd|sql-shell|sql-query|file-write|file-dest|file-read|reg-add|reg-del|reg-write|dump|dump-all|passwords|eval|udf-inject|priv-esc|crawl)\b/i;
+
+function nmapSafeScripts(cmd) {
+  const m = cmd.match(/--script[=\s]+("?)([^"\s]+)\1/i);
+  if (!m) return false;                       // no --script => not this tier (plain nmap is passive tier)
+  if (DANGER_NSE.test(m[2])) return false;
+  return m[2].split(',').map((s) => s.trim().toLowerCase()).every((s) => SAFE_NSE.has(s));
+}
+
+function sqlmapEnumOnly(cmd) {
+  if (!/\bsqlmap\b/i.test(cmd)) return false;
+  if (SQLMAP_DANGER.test(cmd)) return false;  // any shell/file/registry/dump flag => needs a human
+  return SQLMAP_ENUM.test(cmd);               // must actually be an enumeration run, not a blind inject
+}
+
+function classifyActiveRecon(command) {
+  const cmd = String(command || '').trim();
+  if (!cmd) return { ok: false, reason: 'empty command' };
+  if (/\||;|&&|&/.test(cmd)) return { ok: false, reason: 'chained/piped commands are not eligible for the active tier' };
+  if (DEFAULT_DENY.some((rx) => rx.test(cmd))) return { ok: false, reason: 'denied pattern' };
+  if (nmapSafeScripts(cmd)) return { ok: true, reason: 'nmap NSE, safe categories only' };
+  if (sqlmapEnumOnly(cmd)) return { ok: true, reason: 'sqlmap enumerate-only' };
+  return { ok: false, reason: 'not an allowed active-recon shape' };
 }
 
 // ---- the gate --------------------------------------------------------------------------------
@@ -146,13 +183,21 @@ function decide(proposal, config) {
 
   const allowed = reasons.length === 0;
   const ro = classifyReadOnly(command);
-  // auto-run only a command that passed every check AND is confidently read-only; everything else gates
-  const autoRun = allowed && ro.readOnly && config.autoRunReadOnly === true;
+  const ar = classifyActiveRecon(command);
+  // auto-run a command that passed every check AND is in an enabled auto-run tier; everything else gates.
+  // passive tier (LAB_AUTORUN_READONLY) and the opt-in active-recon tier (LAB_AUTORUN_ACTIVE_RECON) are independent.
+  const passiveAuto = config.autoRunReadOnly === true && ro.readOnly;
+  const activeAuto = config.autoRunActiveRecon === true && ar.ok;
+  const autoRun = allowed && (passiveAuto || activeAuto);
+  const tier = !autoRun ? null : (passiveAuto ? 'passive' : 'active_recon');
   return {
     allowed,
     readOnly: ro.readOnly,
     readOnlyReason: ro.reason,
+    activeRecon: ar.ok,
+    activeReconReason: ar.reason,
     autoRun,
+    tier,
     requiresApproval: allowed && !autoRun,
     reasons,
     command,
@@ -163,5 +208,5 @@ function decide(proposal, config) {
 
 // exported for the unit test; harmless inside an n8n Code node
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { decide, classifyReadOnly, targetInScope, extractTargets, inCidr, ipToInt, DEFAULT_DENY };
+  module.exports = { decide, classifyReadOnly, classifyActiveRecon, targetInScope, extractTargets, inCidr, ipToInt, DEFAULT_DENY };
 }

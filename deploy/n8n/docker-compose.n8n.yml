@@ -15,7 +15,8 @@ services:
       OLLAMA_HOST: http://ollama:11434
       # --- lab scope, read by the workflow's Code nodes via $env ---
       LAB_ALLOWLIST: ${LAB_ALLOWLIST:-10.10.10.0/24,192.168.56.0/24,127.0.0.1}
-      LAB_AUTORUN_READONLY: ${LAB_AUTORUN_READONLY:-true}   # true: read-only recon that cleared every gate runs without a prompt; writes/exploits still wait for a human
+      LAB_AUTORUN_READONLY: ${LAB_AUTORUN_READONLY:-true}        # passive recon that cleared every gate runs without a prompt
+      LAB_AUTORUN_ACTIVE_RECON: ${LAB_AUTORUN_ACTIVE_RECON:-false}  # opt-in: also auto-run safe-category nmap NSE + sqlmap enumerate-only
       LAB_RUNNER_URL: ${LAB_RUNNER_URL:-}          # your own executor endpoint; empty = nothing to run against
       # --- local, single-user, http-on-loopback settings ---
       N8N_HOST: ${N8N_HOST:-localhost}
