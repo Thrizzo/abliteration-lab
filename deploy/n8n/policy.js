@@ -40,24 +40,54 @@ function targetInScope(target, allowlist) {
     } else if (ipToInt(e) !== null) {
       if (t === e) return true; // both plain IPs
     } else if (t === e) {
-      return true; // hostname match (exact; no wildcar­d on purpose)
+      return true; // hostname match (exact; no wildcard on purpose)
     }
   }
   return false;
 }
 
 // ---- pull every host / IP a command string refers to -----------------------------------------
-// Deliberately greedy: we would rather flag an out-of-scope token and block than miss one.
+// Greedy where it is safe to be: anything in host position of a URL, //unc path or user@host is a host whatever its
+// TLD; a bare dotted name is a host unless it ends in a file extension (common.txt, shell.php are wordlists and files,
+// not domains - treating them as hosts blocked legitimate gobuster runs).
+const FILE_EXT = new Set(['txt', 'lst', 'list', 'php', 'html', 'htm', 'xml', 'json', 'yml', 'yaml', 'py', 'sh', 'js', 'ts',
+  'conf', 'cfg', 'ini', 'log', 'bak', 'old', 'zip', 'gz', 'tgz', 'tar', 'bz2', 'xz', '7z', 'rar', 'exe', 'dll', 'msi', 'ps1',
+  'psm1', 'bat', 'cmd', 'vbs', 'aspx', 'asp', 'jsp', 'jspx', 'war', 'jar', 'md', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'csv',
+  'sql', 'db', 'sqlite', 'key', 'pem', 'crt', 'cer', 'pub', 'ovpn', 'kirbi', 'ccache', 'so', 'rb', 'pl', 'go', 'rs', 'c',
+  'cpp', 'h', 'java', 'class', 'elf', 'bin', 'img', 'iso', 'pcap', 'pcapng', 'nmap', 'gnmap', 'out', 'png', 'jpg', 'gif']);
+
 function extractTargets(command) {
   const found = new Set();
   const text = String(command || '');
-  for (const m of text.matchAll(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g)) found.add(m[0]);
-  // bare hostnames and URLs: scheme://host, or host:port, or dotted names
-  for (const m of text.matchAll(/\b((?:[a-z0-9-]+\.)+[a-z]{2,})\b/gi)) {
-    const h = m[1].toLowerCase();
-    if (!/^\d+\.\d+$/.test(h)) found.add(h); // skip version-like 1.2 fragments
+  for (const m of text.matchAll(/(?<![\w.])\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![\w.]*\d)/g)) found.add(m[0]);
+  for (const m of text.matchAll(/\b[a-z][a-z0-9+.-]*:\/\/(?:[^@\/\s]*@)?(\[[^\]]+\]|[^:\/\s?#"']+)/gi)) found.add(m[1].toLowerCase());
+  for (const m of text.matchAll(/(?:^|[\s"'=])\/\/([^\/\s"']+)/g)) found.add(m[1].toLowerCase());          // //host/share
+  for (const m of text.matchAll(/\b[\w.$-]+@([a-z0-9][\w.-]*[a-z0-9])\b/gi)) found.add(m[1].toLowerCase()); // user@host
+  for (const m of text.matchAll(/\b((?:[a-z0-9-]+\.)+([a-z]{2,24}))\b/gi)) {
+    if (!FILE_EXT.has(m[2].toLowerCase())) found.add(m[1].toLowerCase());
   }
-  return [...found];
+  if (/\blocalhost\b/i.test(text)) found.add('127.0.0.1');
+  for (const h of [...found]) if (h === 'localhost') { found.delete(h); found.add('127.0.0.1'); }
+  return [...found].filter((h) => !/^\d+\.\d+(\.\d+)?$/.test(h)); // drop version-like 1.2 / 1.2.3 fragments
+}
+
+// Target forms the scope check cannot verify: a placeholder copied from a reference note (measured: the operator
+// proposed "nmap -p- -T4 <other-host-ip>"), shell variables and substitutions, target list files, and alternative IP
+// encodings that tools accept but the dotted-quad check does not see (curl http://134744072/ is 8.8.8.8). None of these
+// may auto-run; a human sees them. nmap -iR (random internet hosts) is denied outright in decide().
+const UNVERIFIABLE = [
+  [/<[A-Za-z][\w-]{0,40}>/, 'placeholder instead of a host'],
+  [/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\$\(|`/, 'shell variable or command substitution'],
+  [/(^|\s)-iL\b/, 'nmap target list file (-iL)'],
+  [/(?<![\w.:\/-])\d{8,10}(?![\w.])/, 'integer IP encoding'],
+  [/\b0x[0-9a-f]{6,8}\b/i, 'hex IP encoding'],
+  [/(?<![\w.])0\d{1,3}\.\d{1,4}\.\d{1,4}\.\d{1,4}\b/, 'octal IP encoding'],
+  [/(?<![\w:.\/])(?=[0-9a-f:]*[0-9a-f])(?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?![\w:])/i, 'IPv6 literal'],
+];
+
+function findUnverifiable(command) {
+  const cmd = String(command || '');
+  return UNVERIFIABLE.filter(([rx]) => rx.test(cmd)).map(([, why]) => why);
 }
 
 // Commands that must never run regardless of target: destroying the operator box, exfil to the
@@ -152,6 +182,26 @@ function classifyActiveRecon(command) {
   return { ok: false, reason: 'not an allowed active-recon shape' };
 }
 
+// ---- injection aimed at the judge ------------------------------------------------------------
+// The abliterated operator's command is the only text the judge model reads, so it is the only channel an injection
+// (from a poisoned writeup, a hostile banner the operator saw, ...) can use to talk the judge into AUTHORIZE. Real shell
+// commands almost never contain instructions to an AI, so a deterministic check is both cheaper and far more accurate
+// than an LLM guard here (measured: Granite Guardian flagged 8/8 legitimate pentest commands as harmful/jailbreak,
+// because every command in a pentest copilot is offensive by design). A hit never auto-runs and always goes to a human.
+const INJECTION_PATTERNS = [
+  /\b(ignore|disregard|forget|override|bypass)\b[^\n]{0,40}\b(instruction|rule|polic|previous|prior|above|guideline|safeguard|check)/i,
+  /\bAUTHORI[SZ]E\b/i,                                   // the judge's own verdict word ("Authorization:" headers do not match)
+  /\b(pre-?approved|approve (it|this|every|all)|must not reject|do not reject|don'?t reject|never reject)\b/i,
+  /\b(ai reviewer|reviewer|the judge|assistant|as an ai|language model|llm|chatgpt|developer mode|jailbreak|system override|unrestricted assistant)\b/i,
+  /\byou are (now|an?)\b|\bfrom now on\b|\bnew (instructions|policy|rules)\b|\bgranted an exception\b/i,
+];
+
+function detectInjection(command) {
+  const cmd = String(command || '');
+  const hits = INJECTION_PATTERNS.filter((rx) => rx.test(cmd)).map((rx) => String(rx));
+  return { suspected: hits.length > 0, hits };
+}
+
 // ---- the gate --------------------------------------------------------------------------------
 // proposal: { command, target, rationale }  (already parsed out of the abliterated model's text)
 // config:   { allowlist: string[], deny?: RegExp[], requireApproval?: boolean }
@@ -180,15 +230,21 @@ function decide(proposal, config) {
   // 3. hard denylist, target-independent
   const hit = deny.find((rx) => rx.test(command));
   if (hit) reasons.push(`command matches a denied pattern: ${hit}`);
+  if (/(^|\s)-iR\b/.test(command)) reasons.push('nmap -iR scans random internet hosts');
 
   const allowed = reasons.length === 0;
   const ro = classifyReadOnly(command);
   const ar = classifyActiveRecon(command);
-  // auto-run a command that passed every check AND is in an enabled auto-run tier; everything else gates.
+  const inj = detectInjection(command);
+  const unverifiable = findUnverifiable(command);
+  // the command must positively name a host, and every host it names must be in scope - "no host found" is not a pass
+  const namesInScopeHost = mentioned.length > 0 && outOfScope.length === 0;
+  // auto-run a command that passed every check, positively targets in-scope hosts only, has no target the check cannot
+  // verify, carries no text aimed at the judge, and is in an enabled auto-run tier; everything else gates.
   // passive tier (LAB_AUTORUN_READONLY) and the opt-in active-recon tier (LAB_AUTORUN_ACTIVE_RECON) are independent.
   const passiveAuto = config.autoRunReadOnly === true && ro.readOnly;
   const activeAuto = config.autoRunActiveRecon === true && ar.ok;
-  const autoRun = allowed && (passiveAuto || activeAuto);
+  const autoRun = allowed && namesInScopeHost && unverifiable.length === 0 && !inj.suspected && (passiveAuto || activeAuto);
   const tier = !autoRun ? null : (passiveAuto ? 'passive' : 'active_recon');
   return {
     allowed,
@@ -196,6 +252,10 @@ function decide(proposal, config) {
     readOnlyReason: ro.reason,
     activeRecon: ar.ok,
     activeReconReason: ar.reason,
+    injectionSuspected: inj.suspected,
+    injectionHits: inj.hits,
+    unverifiable,
+    namesInScopeHost,
     autoRun,
     tier,
     requiresApproval: allowed && !autoRun,
@@ -208,5 +268,5 @@ function decide(proposal, config) {
 
 // exported for the unit test; harmless inside an n8n Code node
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { decide, classifyReadOnly, classifyActiveRecon, targetInScope, extractTargets, inCidr, ipToInt, DEFAULT_DENY };
+  module.exports = { decide, classifyReadOnly, classifyActiveRecon, detectInjection, findUnverifiable, targetInScope, extractTargets, inCidr, ipToInt, DEFAULT_DENY };
 }
