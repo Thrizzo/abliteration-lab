@@ -37,7 +37,7 @@ const boolIf = (name, col, expr) => add({
     conditions: [{ id: 'c1', operator: { type: 'boolean', operation: 'true', singleValue: true }, leftValue: `={{ ${expr} }}`, rightValue: '' }] } },
 });
 const code = (name, col, js, row = 200) => add({ name, type: 'n8n-nodes-base.code', typeVersion: 2, position: [x(col), row], parameters: { jsCode: js } });
-const ollama = (name, col, model) => add({ name, type: '@n8n/n8n-nodes-langchain.lmChatOllama', typeVersion: 1, position: [x(col), 440], parameters: { model, options: { temperature: 0 } } });
+const ollama = (name, col, model, extra = {}) => add({ name, type: '@n8n/n8n-nodes-langchain.lmChatOllama', typeVersion: 1, position: [x(col), 440], parameters: { model, options: { temperature: 0, ...extra } } });
 const chain = (name, col, text, sys) => add({
   name, type: '@n8n/n8n-nodes-langchain.chainLlm', typeVersion: 1.6, position: [x(col), 200],
   parameters: { promptType: 'define', text, messages: { messageValues: [{ message: sys }] } },
@@ -134,7 +134,10 @@ boolIf('Policy passed?', 9, '$json.policy.allowed');
 conn('Policy gate', 'Policy passed?');
 
 // 5 judge (regular model) authorizes or rejects ----------------------------------------------
-ollama('Ollama: judge model (regular)', 10, 'qwen3:8b');
+// think: false. Ollama switches thinking ON for thinking-capable models (qwen3) when a request leaves it unset, so every
+// verdict would first generate a hidden reasoning trace: minutes per call on a CPU, and Qwen advises against greedy
+// decoding (temperature 0) in thinking mode. A one-word veto needs no trace; on non-thinking models the flag is a no-op.
+ollama('Ollama: judge model (regular)', 10, 'qwen3:8b', { think: false });
 chain('Judge: authorize?', 10,
   '={{ "TASK: " + $json.task + "\\nTARGET: " + $json.policy.target + "\\nPROPOSED COMMAND (already passed the scope + denylist gate):\\n" + $json.policy.command + "\\nread-only: " + $json.policy.readOnly + "  tier: " + ($json.policy.tier || "none") }}',
   C.judge_system);

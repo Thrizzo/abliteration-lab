@@ -76,7 +76,9 @@ instead of guessing a scope.
    - Text aimed at the judge never auto-runs.
    - It decides the auto-run tier.
 6. **Judge (regular model).** It sees the vetted command and answers `AUTHORIZE` or `REJECT`. Only a clean first word counts,
-   and the policy runs once more before anything executes.
+   and the policy runs once more before anything executes. It runs with thinking off (`think: false`). Ollama switches
+   thinking on for qwen3 when a request leaves it unset, so every verdict would first generate a hidden reasoning trace:
+   minutes per call on a CPU. On a model without thinking the flag does nothing.
 7. **Auto-run tiers (code, fail-safe).**
    - **Passive** (`LAB_AUTORUN_READONLY=true`): read-only recon.
    - **Active recon** (`LAB_AUTORUN_ACTIVE_RECON=true`, off by default): safe-category NSE and `sqlmap` enumerate-only.
@@ -132,7 +134,7 @@ instead of guessing a scope.
 
 ## Verified here, and how
 
-- **Unit tests:** `policy.test.js` (66), `workflow.test.js` (22), `python -m unittest discover -s copilot/tests -t .` (34,
+- **Unit tests:** `policy.test.js` (66), `workflow.test.js` (24), `python -m unittest discover -s copilot/tests -t .` (34,
   including checks that the JS and Python neutralizers and prompt renderings are identical).
 - **Live runs in real n8n 2.48.7** (`n8n execute`), with real models through transformers: the abliterated GLM-Edge-1.5B as
   operator, the base GLM-Edge-1.5B standing in for the judge, bge-small for embeddings. Ollama and Qdrant themselves are not
@@ -144,6 +146,7 @@ instead of guessing a scope.
     - out of scope (blocked, zero model calls);
     - RAG on (wrong-IP copy blocked; placeholder copy no longer auto-runs);
     - store down (copilot completes without references, status says so);
-    - full success path (suggest → policy → judge AUTHORIZE → auto-run → execute).
+    - full success path (suggest → policy → judge AUTHORIZE → auto-run → execute);
+    - the request n8n sends for the judge carries `"think": false`, and the operator's request has no `think` field.
   - **Not verified here:** real Ollama and real Qdrant servers, and a real lab runner. The stand-ins match the documented
     APIs, but run it once on your stack before relying on it.

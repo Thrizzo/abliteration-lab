@@ -82,5 +82,13 @@ for (const n of wf.nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   ok('ambiguous verdict -> not authorized', fuzzy.allowed === false);
 }
 
+// ---- model nodes: the judge runs without a thinking trace, the operator is left to the model's default ----
+{
+  const judge = node('Ollama: judge model (regular)').parameters.options;
+  const operator = node('Ollama: abliterated model').parameters.options;
+  ok('judge: think=false, temperature 0 (no minutes-long hidden trace on CPU)', judge.think === false && judge.temperature === 0, judge);
+  ok('operator: think not forced', !('think' in operator), operator);
+}
+
 console.log(failed ? `\n${failed} test(s) FAILED` : '\nall workflow tests passed');
 process.exit(failed ? 1 : 0);
