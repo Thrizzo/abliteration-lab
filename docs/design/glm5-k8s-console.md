@@ -267,6 +267,9 @@ sequenceDiagram
 3. Delete the pod with `gracePeriodSeconds: 0`. The kubelet's minimum grace period still applies: SIGTERM, then SIGKILL
    after at most about 2 s.
 
+Measured in CI (kind with Calico, dev overlay, done as the console's ServiceAccount): the model's container was gone from
+the node 0.4 s after Kill started, and nothing restarted it. Ollama exits on SIGTERM at once; vLLM may use the full 2 s.
+
 After a kill:
 - **Start:** an explicit button scales the model back to 1 and recreates the allow policy. GLM-5.3 takes minutes to load.
 
