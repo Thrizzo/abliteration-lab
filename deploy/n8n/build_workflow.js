@@ -43,13 +43,26 @@ const chain = (name, col, text, sys) => add({
   parameters: { promptType: 'define', text, messages: { messageValues: [{ message: sys }] } },
 });
 
-// 0 input ------------------------------------------------------------------------------------
-add({ name: 'Engagement task', type: 'n8n-nodes-base.manualTrigger', typeVersion: 1, position: [x(0), 200], parameters: {} });
+// 0 input: a web form (Task + Target) --------------------------------------------------------
+// Published: http://localhost:5678/form/pentest-copilot. In the editor, "Execute workflow" opens the same form as a test.
+// Two separate fields on purpose: the scope gate checks one exact target, never a target guessed out of free text.
+const FORM_PATH = 'pentest-copilot';
+add({ name: 'Copilot form', type: 'n8n-nodes-base.formTrigger', typeVersion: 2.6, position: [x(0), 200], webhookId: 'b7e4c0de-7f3a-4c1e-9a52-3c0f1e2d4a11',
+  parameters: {
+    formTitle: 'Pentest lab copilot',
+    formDescription: 'The abliterated model suggests one command for an in-scope lab target. The policy gate and a regular judge decide what happens to it. Nothing runs from this page.',
+    formFields: { values: [
+      { fieldLabel: 'Task', fieldName: 'task', fieldType: 'textarea', placeholder: 'Enumerate SMB on the box and suggest the next step.', requiredField: true },
+      { fieldLabel: 'Target', fieldName: 'target', fieldType: 'text', placeholder: '10.10.10.5 or box.htb (must be in LAB_ALLOWLIST)', requiredField: true },
+    ] },
+    responseMode: 'lastNode',   // n8n switches to its multi-page flow on its own, because Form pages follow
+    options: { path: FORM_PATH, buttonLabel: 'Ask the copilot', appendAttribution: false },
+  } });
 add({ name: 'Define task + target', type: 'n8n-nodes-base.set', typeVersion: 3.4, position: [x(1), 200],
   parameters: { assignments: { assignments: [
-    { id: 'a1', name: 'task', type: 'string', value: 'Enumerate services on the box and suggest the next step.' },
-    { id: 'a2', name: 'target', type: 'string', value: '10.10.10.5' } ] } } });
-conn('Engagement task', 'Define task + target');
+    { id: 'a1', name: 'task', type: 'string', value: '={{ String($json.task ?? "").trim() }}' },
+    { id: 'a2', name: 'target', type: 'string', value: '={{ String($json.target ?? "").trim() }}' } ] } } });
+conn('Copilot form', 'Define task + target');
 
 // 1 scope gate -------------------------------------------------------------------------------
 code('Scope gate', 2, `${POLICY}
@@ -159,33 +172,97 @@ conn('Judge: authorize?', 'Apply judge decision');
 boolIf('Authorized?', 12, '$json.allowed');
 conn('Apply judge decision', 'Authorized?');
 
-// 7 auto-run split + human approval + execute ------------------------------------------------
-boolIf('Auto-run (recon tier)?', 13, '$json.autoRun');
-conn('Authorized?', 'Auto-run (recon tier)?', 'main', 0);
-add({ name: 'Human approval', type: 'n8n-nodes-base.wait', typeVersion: 1.1, position: [x(14), 360], webhookId: 'pentest-approval', parameters: { resume: 'webhook', options: {} } });
+// 7 result page: what the form shows ---------------------------------------------------------
+// Everything from the form or a model is HTML-escaped here. n8n also sanitizes and sandboxes the page, but its sanitizer
+// keeps links, images and iframes, and it would strip a "<other-host-ip>" placeholder out of a command: the page must
+// show the exact command, and model text must never become markup. Blocked runs end on their own page; authorized runs
+// show theirs and then continue to the auto-run split, so a blocked item can never reach Human approval or Execute.
+const RESULT = `
+const j = $json, pol = j.policy || {}, prop = j.proposal || {};
+// n8n's completion page turns a literal backslash-n into a line break; doubling that backslash keeps it literal
+const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/\\\\(?=n)/g, '\\\\\\\\');
+const cut = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n) + ' ...' : s; };
+let rag = '';
+try { rag = String($('Build reference context').first().json.ragStatus || ''); } catch (e) { rag = ''; }   // not run when blocked by scope
+const reasons = [];
+let title, next;
+if (j.scopeOk === false) {
+  title = 'Blocked: target out of scope';
+  reasons.push(j.scopeReason || 'target not in LAB_ALLOWLIST');
+  next = 'No model was called. If the target belongs to your lab, add it to LAB_ALLOWLIST.';
+} else if (j.judgeVerdict === undefined && pol.allowed === false) {
+  title = 'Blocked by the policy gate';
+  reasons.push(...(pol.reasons || []));
+  next = 'Nothing runs, and the judge never saw it.';
+} else if (j.judgeVerdict !== undefined && j.allowed !== true) {
+  title = j.judgeAuthorized === false ? 'Blocked: the judge rejected it' : 'Blocked by the policy re-check';
+  reasons.push(...(j.reasons || []));
+  next = 'Nothing runs.';
+} else if (j.allowed !== true) {          // fail-safe: anything not explicitly allowed is never shown as authorized
+  title = 'Blocked';
+  reasons.push(...(pol.reasons || []), ...(j.reasons || []));
+  next = 'Nothing runs.';
+} else if (j.autoRun === true) {
+  title = 'Authorized: auto-run (' + (j.tier || 'recon') + ' tier)';
+  next = 'Handed to the Execute node. It stays disabled until you set LAB_RUNNER_URL and enable it, so nothing ran.';
+} else {
+  title = 'Authorized: waiting for your approval';
+  if (pol.injectionSuspected) reasons.push('text aimed at the judge: ' + (pol.injectionHits || []).join(', '));
+  if ((pol.unverifiable || []).length) reasons.push('target the gate cannot verify: ' + pol.unverifiable.join('; '));
+  if (pol.namesInScopeHost === false) reasons.push('the command names no in-scope host');
+  if (!pol.readOnly) reasons.push('not in an enabled auto-run tier' + (pol.readOnlyReason ? ': ' + pol.readOnlyReason : ''));
+  next = 'Parked at the Human approval node. Nothing runs until that run is resumed, and the Execute node is disabled.';
+}
+const cmd = pol.command || prop.command || '';
+const L = ['<b>Target:</b> <code>' + esc(cut(j.target, 200)) + '</code>'];
+if (j.task) L.push('<b>Task:</b> ' + esc(cut(j.task, 400)));
+if (cmd) L.push('<b>Suggested command:</b> <code>' + esc(cut(cmd, 800)) + '</code>');
+if (prop.rationale) L.push('<b>Operator rationale:</b> ' + esc(cut(prop.rationale, 400)));
+if (j.judgeVerdict !== undefined) L.push('<b>Judge:</b> ' + (esc(cut(j.judgeVerdict, 300)) || '(empty answer)'));
+if (reasons.length) L.push('<b>Reasons:</b>\\n' + reasons.slice(0, 8).map((r) => '- ' + esc(cut(r, 300))).join('\\n'));
+if (rag) L.push('<b>References:</b> ' + esc(rag));
+L.push('<b>Next:</b> ' + esc(next));
+return [{ json: { ...j, resultTitle: title, resultMessage: L.join('\\n\\n') } }];`;
+const resultPage = (name, col, row, webhookId) => add({ name, type: 'n8n-nodes-base.form', typeVersion: 2.5, position: [x(col), row], webhookId,
+  parameters: { operation: 'completion', respondWith: 'text', completionTitle: '={{ $json.resultTitle }}', completionMessage: '={{ $json.resultMessage }}', options: {} } });
+
+code('Result text (authorized)', 13, RESULT);
+resultPage('Result page: authorized', 14, 200, '5d2f9a64-1b7e-4f0c-8e3a-6a9b0c1d2e33');
+conn('Authorized?', 'Result text (authorized)', 'main', 0);
+conn('Result text (authorized)', 'Result page: authorized');
+
+// 8 auto-run split + human approval + execute ------------------------------------------------
+boolIf('Auto-run (recon tier)?', 15, '$json.autoRun');
+conn('Result page: authorized', 'Auto-run (recon tier)?');
+add({ name: 'Human approval', type: 'n8n-nodes-base.wait', typeVersion: 1.1, position: [x(16), 360], webhookId: 'pentest-approval', parameters: { resume: 'webhook', options: {} } });
 conn('Auto-run (recon tier)?', 'Human approval', 'main', 1);
-add({ name: 'Execute on lab target (DISABLED)', type: 'n8n-nodes-base.httpRequest', typeVersion: 4.2, position: [x(15), 200], disabled: true,
+add({ name: 'Execute on lab target (DISABLED)', type: 'n8n-nodes-base.httpRequest', typeVersion: 4.2, position: [x(17), 200], disabled: true,
   parameters: { method: 'POST', url: '={{ $env.LAB_RUNNER_URL }}', sendBody: true, specifyBody: 'json',
     jsonBody: '={{ { "command": $json.policy.command, "target": $json.policy.target, "autoRun": $json.autoRun, "tier": $json.tier } }}', options: {} } });
 conn('Auto-run (recon tier)?', 'Execute on lab target (DISABLED)', 'main', 0);
 conn('Human approval', 'Execute on lab target (DISABLED)');
 
-// blocked terminals ---------------------------------------------------------------------------
+// blocked terminals: each ends on the blocked result page ---------------------------------------
+code('Result text (blocked)', 13, RESULT, 640);
+resultPage('Result page: blocked', 14, 640, '9e1c7b20-4d5a-4a8f-b6c3-2f0e1d9a8b44');
+conn('Result text (blocked)', 'Result page: blocked');
 [['In scope?', 'out of scope', 3], ['Policy passed?', 'policy', 9], ['Authorized?', 'judge rejected', 12]].forEach(([src, label, col]) => {
   const name = `Blocked (${label})`;
   add({ name, type: 'n8n-nodes-base.noOp', typeVersion: 1, position: [x(col), 640] });
   conn(src, name, 'main', 1);
+  conn(name, 'Result text (blocked)');
 });
 
 // sticky notes --------------------------------------------------------------------------------
 const notes = [
-  [x(0) - 20, 40, 360, 120, '#2E86DE', '1 - Input\nTask + one target. Swap the Manual Trigger for a Chat/Form/Webhook trigger for real use.'],
+  [x(0) - 20, 40, 360, 120, '#2E86DE', '1 - Input (web form)\nTask + one Target. Once published: http://localhost:5678/form/' + FORM_PATH + '. In the editor, Execute workflow opens a test form.'],
   [x(2) - 20, 40, 220, 120, '#10AC84', '2 - Scope gate (code)\nTarget must be in LAB_ALLOWLIST before the abliterated model runs.'],
   [x(4) - 20, 40, 460, 120, '#2E86DE', '2b - Retrieval (RAG)\nTop-4 chunks from past writeups (Qdrant, collection writeups) as bounded background for the operator only; their addresses are neutralized. Empty/unreachable store -> runs without references.'],
   [x(6) - 20, 40, 220, 120, '#8854D0', '3 - Abliterated\nSUGGESTS ONLY. No tools; can never run a command.'],
   [x(8) - 20, 560, 300, 170, '#10AC84', '4 - Policy gate (code)\nThe real boundary: scope + denylist, auto-run tier (passive / active-recon), targets it cannot verify (placeholders, $VARS, -iL, integer/hex IPs, IPv6) and text aimed at the judge ("ignore your instructions", "AUTHORIZE"...): those never auto-run and go to a human.'],
   [x(10) - 20, 40, 260, 170, '#EE5253', '5 - Judge (regular model)\nAUTHORIZE or REJECT the vetted command. Veto-only: the runner always executes policy.command, so a judge talked into AUTHORIZE (measured: it happens) cannot widen scope, and a command carrying injection text goes to a human anyway.'],
-  [x(13) - 20, -70, 480, 150, '#F79F1F', '6 - Auto-run + Execute\nRecon that cleared every gate auto-runs (LAB_AUTORUN_READONLY; add LAB_AUTORUN_ACTIVE_RECON for safe NSE + sqlmap-enumerate). Else -> Human approval (Wait). Execute DISABLED on import: set LAB_RUNNER_URL and enable it.'],
+  [x(13) - 20, 380, 440, 170, '#2E86DE', '6 - Result page (form)\nShows the suggestion, the policy decision, the judge verdict and the next step. Form and model text are HTML-escaped; n8n also sanitizes the page. Blocked runs end here; authorized runs continue to the auto-run split.'],
+  [x(15) - 20, -70, 480, 150, '#F79F1F', '7 - Auto-run + Execute\nRecon that cleared every gate auto-runs (LAB_AUTORUN_READONLY; add LAB_AUTORUN_ACTIVE_RECON for safe NSE + sqlmap-enumerate). Else -> Human approval (Wait). Execute DISABLED on import: set LAB_RUNNER_URL and enable it.'],
 ];
 notes.forEach(([px, py, w, h, color, content], i) => add({ name: `note${i}`, type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [px, py], parameters: { width: w, height: h, color, content } }));
 

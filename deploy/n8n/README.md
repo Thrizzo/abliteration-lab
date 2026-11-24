@@ -11,11 +11,14 @@ execution that has to be reliable is **deterministic code**, because every model
 talked into a wrong answer. That is measured below, not assumed.
 
 ```
-task+target ─▶ scope gate ─▶ retrieve writeups ─▶ abliterated SUGGESTS ─▶ parse ─▶ policy gate ─▶ judge AUTHORIZE? ─▶ auto-run tier? ─┬─yes─▶ run vetted cmd
-                 (code)       (Qdrant, RAG;         (ABLITERATED,          (data)   (code: the      (REGULAR model,     (code)         └─no─▶ human ─▶ run
-                              addresses masked)      no tools)                       boundary)       veto-only)                                 (you)
-     every ✗ branch (out of scope / policy / judge reject) ─────────────────────────────────────────────────────────────────▶ Blocked (with reasons)
+form: task+target ─▶ scope gate ─▶ retrieve writeups ─▶ abliterated SUGGESTS ─▶ parse ─▶ policy gate ─▶ judge AUTHORIZE? ─▶ result page ─▶ auto-run tier? ─┬─yes─▶ run vetted cmd
+                       (code)       (Qdrant, RAG;         (ABLITERATED,          (data)   (code: the      (REGULAR model,                    (code)         └─no─▶ human ─▶ run
+                                    addresses masked)      no tools)                       boundary)       veto-only)                                                (you)
+           every ✗ branch (out of scope / policy / judge reject) ─────────────────────────────────────────────────────────▶ result page: Blocked (with reasons), end
 ```
+
+You use it through a **web form** (Task + Target). Every run ends on a result page that shows the suggestion, the
+decisions and the next step.
 
 ## What was measured, and what it changed
 
@@ -59,40 +62,50 @@ instead of guessing a scope.
 
 ## The layers
 
-1. **Scope gate (code).** The target must be in `LAB_ALLOWLIST` *before any model is called*. An out-of-scope run makes
+1. **Form (input).** Two required fields, *Task* and *Target*, at `http://localhost:5678/form/pentest-copilot` once the
+   workflow is published. The editor's *Execute workflow* opens the same form as a test. The target is its own field on
+   purpose: the scope gate checks one exact target and never has to pick one out of free text.
+2. **Scope gate (code).** The target must be in `LAB_ALLOWLIST` *before any model is called*. An out-of-scope run makes
    zero model or vector-store calls (verified live).
-2. **Retrieval (RAG).** Top-4 chunks of your writeups from Qdrant (`copilot.ingest` fills it). They are bounded to 3.5k
+3. **Retrieval (RAG).** Top-4 chunks of your writeups from Qdrant (`copilot.ingest` fills it). They are bounded to 3.5k
    characters, labelled with their source, and addresses are masked. They go to the operator only and are dropped right
    after it, so they never reach the judge. An empty or unreachable store means the copilot runs without references and
    says so in `ragStatus`.
-3. **Abliterated operator.** A Basic LLM Chain with **no tools**, answering one line of JSON
+4. **Abliterated operator.** A Basic LLM Chain with **no tools**, answering one line of JSON
    `{command, target, rationale}`.
-4. **Parse.** The model output is data. The JSON object is extracted, with a fenced block as fallback.
-5. **Policy gate (`policy.js`): the boundary.**
+5. **Parse.** The model output is data. The JSON object is extracted, with a fenced block as fallback.
+6. **Policy gate (`policy.js`): the boundary.**
    - Every host the command names must be in scope. Hosts are read from URLs, `//unc` paths, `user@host`, bare names
      (not file names like `common.txt`) and `localhost`.
    - A denylist blocks destructive, exfil, pivot and anti-forensic patterns, and `nmap -iR`.
    - Commands it cannot verify never auto-run: placeholders, `$VAR`/`$(…)`, `-iL` files, integer/hex/octal IPs, IPv6.
    - Text aimed at the judge never auto-runs.
    - It decides the auto-run tier.
-6. **Judge (regular model).** It sees the vetted command and answers `AUTHORIZE` or `REJECT`. Only a clean first word counts,
+7. **Judge (regular model).** It sees the vetted command and answers `AUTHORIZE` or `REJECT`. Only a clean first word counts,
    and the policy runs once more before anything executes. It runs with thinking off (`think: false`). Ollama switches
    thinking on for qwen3 when a request leaves it unset, so every verdict would first generate a hidden reasoning trace:
    minutes per call on a CPU. On a model without thinking the flag does nothing.
-7. **Auto-run tiers (code, fail-safe).**
+8. **Result page (form).**
+   - **Content:** target, task, suggested command, operator rationale, judge verdict, reasons and the next step.
+   - **Escaping:** form and model text are HTML-escaped before n8n renders the page. n8n's own sanitizer keeps links,
+     images and iframes, and it would strip a `<other-host-ip>` placeholder out of a command, so the page could show a
+     different command from the one that was decided on.
+   - **Flow:** blocked runs end on their page. Authorized runs show theirs and then continue to the auto-run split.
+     `workflow.test.js` checks the graph: no blocked run can reach approval or execution.
+9. **Auto-run tiers (code, fail-safe).**
    - **Passive** (`LAB_AUTORUN_READONLY=true`): read-only recon.
    - **Active recon** (`LAB_AUTORUN_ACTIVE_RECON=true`, off by default): safe-category NSE and `sqlmap` enumerate-only.
    - **Everything else** goes to the **Human approval** Wait node.
-8. **Execute** is `disabled` on import and posts to your own `LAB_RUNNER_URL`.
+10. **Execute** is `disabled` on import and posts to your own `LAB_RUNNER_URL`.
 
 ## Files
 
 | File | What it is |
 | --- | --- |
-| `workflows/pentest-copilot.json` | The importable workflow (29 nodes). **Generated**, do not hand-edit. |
+| `workflows/pentest-copilot.json` | The importable workflow (34 nodes). **Generated**, do not hand-edit. |
 | `build_workflow.js` | Generator: embeds `policy.js` into the Code nodes and reads the prompts from `copilot/operator_contract.json`. Every Code node is parsed at build time; `--check` fails if the JSON is stale. |
 | `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 66 tests. |
-| `workflow.test.js` | Runs each Code node's actual code with mocked n8n globals (neutralizer, `$env` fail-closed, parse, veto-only judge, store-down detection). |
+| `workflow.test.js` | Runs each Code node's actual code with mocked n8n globals (neutralizer, `$env` fail-closed, parse, veto-only judge, store-down detection, result-page escaping). Also checks the graph: blocked runs never reach approval or execution. |
 | `docker-compose.n8n.yml` | n8n + Qdrant overlay on the lab stack. n8n listens on localhost only; Qdrant has no published port. |
 | `../../copilot/` | Ingestion, scrubbing, QLoRA pairs, trainer and eval ([copilot/README.md](../../copilot/README.md)). |
 
@@ -127,14 +140,18 @@ instead of guessing a scope.
    - **Ollama**: Base URL `http://ollama:11434`
    - **Qdrant**: URL `http://qdrant:6333`, no API key
 6. **Import** `workflows/pentest-copilot.json` and pick the credentials in the 3 Ollama nodes and the Qdrant node. Set the
-   model names to what `ollama list` shows. To keep PWK material out of retrieval, add the filter
-   `{"must_not":[{"key":"metadata.source","match":{"value":"pwk"}}]}` under the Qdrant node's *Search Filter*.
-7. **Approval and execution.** Point the *Human approval* resume URL at Telegram, email or Slack. Only then enable *Execute*
+   model names to what `ollama list` shows, then **Publish** the workflow. To keep PWK material out of retrieval, add the
+   filter `{"must_not":[{"key":"metadata.source","match":{"value":"pwk"}}]}` under the Qdrant node's *Search Filter*.
+7. **Use it:** open http://localhost:5678/form/pentest-copilot, enter a task and one target from `LAB_ALLOWLIST`, and click
+   *Ask the copilot*. The result page appears when the judge is done.
+   - **No login:** the form has none of its own. n8n listens on localhost only, so that is fine on a single-user machine;
+     otherwise set the Form Trigger's *Authentication* to Basic Auth.
+8. **Approval and execution.** Point the *Human approval* resume URL at Telegram, email or Slack. Only then enable *Execute*
    and set `LAB_RUNNER_URL` to a command runner you control on the lab network.
 
 ## Verified here, and how
 
-- **Unit tests:** `policy.test.js` (66), `workflow.test.js` (24), `python -m unittest discover -s copilot/tests -t .` (34,
+- **Unit tests:** `policy.test.js` (66), `workflow.test.js` (46), `python -m unittest discover -s copilot/tests -t .` (34,
   including checks that the JS and Python neutralizers and prompt renderings are identical).
 - **Live runs in real n8n 2.48.7** (`n8n execute`), with real models through transformers: the abliterated GLM-Edge-1.5B as
   operator, the base GLM-Edge-1.5B standing in for the judge, bge-small for embeddings. Ollama and Qdrant themselves are not
@@ -148,5 +165,16 @@ instead of guessing a scope.
     - store down (copilot completes without references, status says so);
     - full success path (suggest → policy → judge AUTHORIZE → auto-run → execute);
     - the request n8n sends for the judge carries `"think": false`, and the operator's request has no `think` field.
+  - **The form**, published in `n8n start` and driven over HTTP the way n8n's form page does it (submit, poll the run
+    status, load the result page, send its resume POST), against the API stand-in:
+
+    | Case | Result page | Run ends | Model calls |
+    | --- | --- | --- | --- |
+    | read-only command, judge authorizes | *Authorized: auto-run (passive tier)* | success (Execute disabled) | 2 |
+    | target out of scope | *Blocked: target out of scope* | success | 0 |
+    | `rm -rf /` proposed | *Blocked by the policy gate* | success | 1, the judge is never asked |
+    | judge says REJECT | *Blocked: the judge rejected it* | success | 2 |
+    | `hydra` proposed, judge authorizes | *Authorized: waiting for your approval* | waiting at Human approval | 2 |
+    | `<script>`, a placeholder and a literal `\n` in the command | shown escaped and exactly as proposed | waiting | 2 |
   - **Not verified here:** real Ollama and real Qdrant servers, and a real lab runner. The stand-ins match the documented
     APIs, but run it once on your stack before relying on it.

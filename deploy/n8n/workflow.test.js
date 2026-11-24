@@ -90,5 +90,62 @@ for (const n of wf.nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   ok('operator: think not forced', !('think' in operator), operator);
 }
 
+// ---- web form: two required fields that land in task / target ----
+{
+  const form = node('Copilot form');
+  const fields = form.parameters.formFields.values;
+  const f = (name) => fields.find((v) => v.fieldName === name);
+  ok('form: Task and Target are required fields named task / target', f('task')?.requiredField === true && f('target')?.requiredField === true, fields);
+  ok('form: published at /form/pentest-copilot', form.parameters.options.path === 'pentest-copilot');
+  const set = node('Define task + target').parameters.assignments.assignments;
+  ok('form input is trimmed into task / target', set.some((a) => a.name === 'task' && a.value.includes('$json.task')) && set.some((a) => a.name === 'target' && a.value.includes('$json.target')), set);
+  ok('no manual trigger left (one way in)', !wf.nodes.some((n) => n.type === 'n8n-nodes-base.manualTrigger'));
+}
+
+// ---- graph: a blocked run can never reach approval or execution ----
+{
+  const kids = (n) => ((wf.connections[n] || {}).main || []).flat().map((c) => c.node);
+  const reach = (from) => { const seen = new Set(); const stack = [from]; while (stack.length) { const n = stack.pop(); for (const k of kids(n)) if (!seen.has(k)) { seen.add(k); stack.push(k); } } return seen; };
+  const danger = ['Auto-run (recon tier)?', 'Human approval', 'Execute on lab target (DISABLED)'];
+  for (const b of ['Blocked (out of scope)', 'Blocked (policy)', 'Blocked (judge rejected)']) {
+    const r = reach(b);
+    ok(`${b} ends on the blocked page, never reaches approval/execute`, r.has('Result page: blocked') && danger.every((d) => !r.has(d)), [...r]);
+  }
+  // the only way into the authorized page is the true branch of Authorized?
+  const into = (target) => Object.entries(wf.connections).flatMap(([src, c]) => (c.main || []).flatMap((outs, i) => outs.filter((o) => o.node === target).map(() => `${src}#${i}`)));
+  ok('authorized page is fed only by Authorized? (true)', JSON.stringify(into('Result text (authorized)')) === JSON.stringify(['Authorized?#0']), into('Result text (authorized)'));
+  ok('auto-run split is fed only by the authorized page', JSON.stringify(into('Auto-run (recon tier)?')) === JSON.stringify(['Result page: authorized#0']), into('Auto-run (recon tier)?'));
+}
+
+// ---- result page text: right verdict per path; form and model text escaped, command shown exactly ----
+{
+  const scopeBase = { task: 'Enumerate SMB', target: '10.10.11.42', allowlist: ['10.10.11.0/24'], scopeOk: true };
+  const page = (name, json, nodesOut = {}) => run(name, { json, nodesOut })[0].json;
+  const out = page('Result text (blocked)', { task: 'x', target: '8.8.8.8', allowlist: [], scopeOk: false, scopeReason: 'target "8.8.8.8" not in allowlist' });
+  ok('page: out of scope', out.resultTitle === 'Blocked: target out of scope' && out.resultMessage.includes('not in allowlist') && !out.resultMessage.includes('References'), out);
+
+  const evil = 'rm -rf / ; nmap -sV <other-host-ip> <script>alert(1)</script> && printf "a\\nb"';
+  const pg = run('Policy gate', { json: { ...scopeBase, proposal: { command: evil, target: '10.10.11.42', rationale: '<img src=x onerror=alert(1)>' } }, env: { LAB_AUTORUN_READONLY: 'true' } })[0].json;
+  const pol = page('Result text (blocked)', pg, { 'Build reference context': { ragStatus: 'no matches' } });
+  ok('page: policy block', pol.resultTitle === 'Blocked by the policy gate', pol.resultTitle);
+  ok('page: no model markup survives (script / img escaped)', !/<script|<img/i.test(pol.resultMessage) && pol.resultMessage.includes('&lt;script&gt;') && pol.resultMessage.includes('&lt;img src=x'), pol.resultMessage);
+  ok('page: placeholder shown, not stripped', pol.resultMessage.includes('&lt;other-host-ip&gt;'));
+  ok('page: literal backslash-n kept (doubled for n8n)', pol.resultMessage.includes('printf &quot;a\\\\nb&quot;'), pol.resultMessage);
+  ok('page: retrieval status shown when retrieval ran', pol.resultMessage.includes('<b>References:</b> no matches'));
+
+  const ok1 = run('Policy gate', { json: { ...scopeBase, proposal: { command: 'nmap -sV 10.10.11.42', target: '10.10.11.42', rationale: 'versions' } }, env: { LAB_AUTORUN_READONLY: 'true' } })[0].json;
+  const judged = (text, cmdPg = ok1) => run('Apply judge decision', { json: { text }, nodesOut: { 'Policy gate': cmdPg }, env: { LAB_AUTORUN_READONLY: 'true' } })[0].json;
+  const rej = page('Result text (blocked)', judged('REJECT\nnoisy'));
+  ok('page: judge rejected', rej.resultTitle === 'Blocked: the judge rejected it' && rej.resultMessage.includes('judge rejected: REJECT'), rej.resultTitle);
+  const auto = page('Result text (authorized)', judged('AUTHORIZE\nfine'));
+  ok('page: authorized auto-run names the tier and that nothing ran', auto.resultTitle === 'Authorized: auto-run (passive tier)' && auto.resultMessage.includes('nothing ran'), auto.resultTitle);
+  const hy = run('Policy gate', { json: { ...scopeBase, proposal: { command: 'hydra -l admin -P rockyou.txt ssh://10.10.11.42', target: '10.10.11.42', rationale: 'weak creds' } }, env: { LAB_AUTORUN_READONLY: 'true' } })[0].json;
+  const appr = page('Result text (authorized)', judged('AUTHORIZE', hy));
+  ok('page: authorized but not auto-run -> waiting for approval, with the reason', appr.resultTitle === 'Authorized: waiting for your approval' && appr.resultMessage.includes('not in an enabled auto-run tier'), appr);
+  ok('page: carries the item through (Auto-run? still reads autoRun)', auto.autoRun === true && appr.autoRun === false && auto.policy && auto.policy.command === 'nmap -sV 10.10.11.42');
+  const odd = page('Result text (authorized)', { ...ok1 });   // allowed by policy but never judged: must not read as authorized
+  ok('page: an item that was not explicitly allowed is never titled authorized', odd.resultTitle === 'Blocked', odd.resultTitle);
+}
+
 console.log(failed ? `\n${failed} test(s) FAILED` : '\nall workflow tests passed');
 process.exit(failed ? 1 : 0);

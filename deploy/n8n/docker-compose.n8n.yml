@@ -5,7 +5,8 @@
 #
 # n8n reaches the models at http://ollama:11434 and the writeup store at http://qdrant:6333 (use those as the Base URL /
 # Qdrant URL in its credentials). n8n is bound to localhost only, like Caddy; Qdrant is not published at all.
-# Import the workflow from deploy/n8n/workflows/pentest-copilot.json (Workflows -> ... -> Import from File).
+# Import the workflow from deploy/n8n/workflows/pentest-copilot.json (Workflows -> ... -> Import from File) and Publish it;
+# then use the copilot at http://localhost:5678/form/pentest-copilot (Task + Target -> result page).
 # Fill the writeup store with:
 #   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
 #     run --rm app python -m copilot.ingest --src /workspace/writeups
