@@ -1,7 +1,8 @@
 """abliterate.deploy without llama.cpp or Ollama (stdlib only; a fake converter stands in for llama.cpp):
 - the GGUF converter (llama.cpp pins transformers 4.x) reads model folders whose tokenizer transformers v5 saved,
-  and the folder is never changed;
-- the Ollama template is chosen from the chat template alone.
+  and gets GLM-Edge's real context length; the folder itself is never changed;
+- the Ollama template is chosen from the chat template alone;
+- Ollama's error text reaches the exception.
 
     python -m unittest discover -s abliterate/tests -t .
 """
@@ -10,7 +11,10 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
+import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
 from abliterate import deploy as DP
@@ -31,14 +35,19 @@ import json, os, sys
 src, out = sys.argv[1], sys.argv[sys.argv.index("--outfile") + 1]
 cfg = json.load(open(os.path.join(src, "tokenizer_config.json"), encoding="utf-8"))
 weights = open(os.path.join(src, "model.safetensors"), "rb").read().decode()
-json.dump({"src": src, "tokenizer_class": cfg.get("tokenizer_class"), "weights": weights}, open(out, "w"))
+model_cfg = json.load(open(os.path.join(src, "config.json"), encoding="utf-8"))
+json.dump({"src": src, "tokenizer_class": cfg.get("tokenizer_class"), "weights": weights,
+           "seq_length": model_cfg.get("seq_length")}, open(out, "w"))
 '''
+# GLM-Edge 1.5B's config.json (the parts that matter here)
+GLM_EDGE_CONFIG = {"architectures": ["GlmForCausalLM"], "model_type": "glm", "hidden_size": 2048,
+                   "max_position_embeddings": 8192}
 
 
-def make_model(root, name, tokenizer_config):
+def make_model(root, name, tokenizer_config, config=None):
     d = os.path.join(root, name)
     os.makedirs(os.path.join(d, "original"))
-    for fn, text in (("config.json", '{"model_type": "glm"}'), ("model.safetensors", "WEIGHTS"),
+    for fn, text in (("config.json", json.dumps(config or {"model_type": "glm"})), ("model.safetensors", "WEIGHTS"),
                      ("tokenizer.json", "{}"), ("tokenizer_config.json", json.dumps(tokenizer_config))):
         with open(os.path.join(d, fn), "w", encoding="utf-8") as f:
             f.write(text)
@@ -76,6 +85,16 @@ class V4TokenizerConfig(unittest.TestCase):
         self.assertEqual(json.dumps(V5, sort_keys=True), before)
 
 
+class GlmContextLength(unittest.TestCase):
+    def test_glm_edge_gets_its_trained_context(self):
+        self.assertEqual(DP.glm_context_config(GLM_EDGE_CONFIG)["seq_length"], 8192)
+
+    def test_no_change_when_seq_length_is_set_or_for_other_architectures(self):
+        self.assertIsNone(DP.glm_context_config({**GLM_EDGE_CONFIG, "seq_length": 4096}))
+        self.assertIsNone(DP.glm_context_config({**GLM_EDGE_CONFIG, "architectures": ["Glm4ForCausalLM"]}))
+        self.assertIsNone(DP.glm_context_config({"architectures": ["GlmForCausalLM"], "hidden_size": 64}))
+
+
 class ConverterView(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -100,6 +119,17 @@ class ConverterView(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(view, "original")))   # only top-level files
         self.assertEqual(os.listdir(self.work), [])                # the view is removed afterwards
         self.assertEqual(digest(model), before)                    # and the model folder never changed
+
+    def test_glm_config_alone_gets_a_view_with_only_config_fixed(self):
+        model = make_model(self.root, "glm-edge", V4, GLM_EDGE_CONFIG)
+        before = digest(model)
+        with DP.converter_view(model, self.work, lambda m: None) as view:
+            self.assertNotEqual(view, model)
+            with open(os.path.join(view, "config.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["seq_length"], 8192)
+            self.assertTrue(os.path.samefile(os.path.join(view, "tokenizer_config.json"),
+                                             os.path.join(model, "tokenizer_config.json")))
+        self.assertEqual(digest(model), before)
 
     def test_view_is_removed_when_the_converter_fails(self):
         model = make_model(self.root, "tiny-glm", V5)
@@ -137,7 +167,7 @@ class ConvertGguf(unittest.TestCase):
             os.makedirs(llama)
             with open(os.path.join(llama, "convert_hf_to_gguf.py"), "w", encoding="utf-8") as f:
                 f.write(FAKE_CONVERTER)
-            model = make_model(root, "tiny-glm", V5)
+            model = make_model(root, "tiny-glm", V5, GLM_EDGE_CONFIG)
             before = digest(model)
             out = os.path.join(root, "gguf", "tiny-abl-q8_0.gguf")
             with mock.patch.dict(os.environ, {"ABL_GGUF_PY": sys.executable, "ABL_LLAMA_CPP": llama}):
@@ -145,6 +175,7 @@ class ConvertGguf(unittest.TestCase):
             with open(out, encoding="utf-8") as f:
                 seen = json.load(f)
             self.assertEqual(seen["tokenizer_class"], "PreTrainedTokenizerFast")
+            self.assertEqual(seen["seq_length"], 8192)
             self.assertEqual(seen["weights"], "WEIGHTS")
             self.assertEqual(os.path.basename(seen["src"]), "tiny-glm")
             self.assertEqual(sorted(os.listdir(os.path.dirname(out))), ["tiny-abl-q8_0.gguf"])
@@ -188,6 +219,29 @@ class ChatTemplate(unittest.TestCase):
         self.assertEqual(DP.chat_template_text(self.folder({})), "")
         self.assertEqual(DP.chat_template_text(self.folder({"tokenizer_config.json": "not json"})), "")
         self.assertEqual(DP.chat_template_text(None), "")
+
+
+class OllamaErrors(unittest.TestCase):
+    def test_http_error_carries_ollamas_reason(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = b'{"error":"model runner has unexpectedly stopped"}'
+                self.send_response(500); self.send_header("Content-Length", str(len(body))); self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        with mock.patch.dict(os.environ, {"OLLAMA_HOST": f"http://127.0.0.1:{srv.server_port}"}):
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                DP.api_post("/api/chat", {"model": "m"})
+        self.assertEqual(cm.exception.code, 500)
+        self.assertIn("model runner has unexpectedly stopped", str(cm.exception))
+        self.assertIn(b"unexpectedly stopped", cm.exception.read())     # callers can still read the body
 
 
 if __name__ == "__main__":

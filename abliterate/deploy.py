@@ -3,6 +3,7 @@ another container: the GGUF is uploaded as a blob, no CLI needed), A/B test over
 import contextlib
 import hashlib
 import http.client
+import io
 import json
 import os
 import shutil
@@ -64,18 +65,44 @@ def _link(src, dst):
             shutil.copyfile(src, dst)
 
 
+def glm_context_config(cfg):
+    """config.json with seq_length for an HF-format GLM (GlmForCausalLM: GLM-Edge, GLM-4-9B-hf), or None. The converter
+    writes seq_length as the model's context length and falls back to the hidden size without it: 2048 for GLM-Edge 1.5B,
+    whose trained context is 8192. Ollama caps the context at that value."""
+    if "GlmForCausalLM" in (cfg.get("architectures") or []) and "seq_length" not in cfg and cfg.get("max_position_embeddings"):
+        return {**cfg, "seq_length": cfg["max_position_embeddings"]}
+    return None
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def converter_fixes(folder):
+    """{file name: content} the converter should read instead of the folder's own file, and why."""
+    fixes, why = {}, []
+    tok = _read_json(os.path.join(folder, "tokenizer_config.json"))
+    if tok is not None and (v4 := v4_tokenizer_config(tok)) is not None:
+        fixes["tokenizer_config.json"] = v4
+        why.append("tokenizer saved by transformers v5")
+    cfg = _read_json(os.path.join(folder, "config.json"))
+    if cfg is not None and (fixed := glm_context_config(cfg)) is not None:
+        fixes["config.json"] = fixed
+        why.append(f"context length {fixed['seq_length']} from max_position_embeddings")
+    return fixes, why
+
+
 @contextlib.contextmanager
 def converter_view(folder, workdir, log=print):
-    """The model folder as the converter can read it. If transformers v5 saved its tokenizer, the converter gets a
-    temporary view in workdir: links to the folder's files, plus tokenizer_config.json in the 4.x format. The folder
-    itself is never changed."""
-    try:
-        with open(os.path.join(folder, "tokenizer_config.json"), encoding="utf-8") as f:
-            cfg = json.load(f)
-        v4 = v4_tokenizer_config(cfg) if isinstance(cfg, dict) else None
-    except (OSError, ValueError):
-        v4 = None
-    if v4 is None:
+    """The model folder as the converter reads it correctly. If it needs fixes (converter_fixes), the converter gets a
+    temporary view in workdir: links to the folder's files, plus the fixed files. The folder itself is never changed."""
+    fixes, why = converter_fixes(folder)
+    if not fixes:
         yield folder
         return
     parent = tempfile.mkdtemp(prefix=".convert-", dir=workdir)
@@ -84,11 +111,12 @@ def converter_view(folder, workdir, log=print):
         os.makedirs(view)
         for fn in os.listdir(folder):
             src = os.path.join(folder, fn)
-            if fn != "tokenizer_config.json" and os.path.isfile(src):
+            if fn not in fixes and os.path.isfile(src):
                 _link(src, os.path.join(view, fn))
-        with open(os.path.join(view, "tokenizer_config.json"), "w", encoding="utf-8") as f:
-            json.dump(v4, f, ensure_ascii=False, indent=2)
-        log("gguf: tokenizer saved by transformers v5 - the converter reads a 4.x copy of tokenizer_config.json")
+        for fn, content in fixes.items():
+            with open(os.path.join(view, fn), "w", encoding="utf-8") as f:
+                json.dump(content, f, ensure_ascii=False, indent=2)
+        log(f"gguf: the converter reads adjusted copies of {', '.join(sorted(fixes))} ({'; '.join(why)})")
         yield view
     finally:
         shutil.rmtree(parent, ignore_errors=True)
@@ -162,7 +190,13 @@ def api_get(path, timeout=10):
 
 def api_post(path, body, timeout=600, stream=False):
     req = urllib.request.Request(_url(path), data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-    r = urllib.request.urlopen(req, timeout=timeout)
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        # keep Ollama's reason ({"error": ...}) in the message; callers still get an HTTPError whose body they can read
+        detail = e.read()[:500]
+        raise urllib.error.HTTPError(e.url, e.code, f"{e.reason}: {detail.decode(errors='replace').strip()}", e.headers,
+                                     io.BytesIO(detail)) from None
     if stream:
         return r
     with r:
