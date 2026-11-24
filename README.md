@@ -184,6 +184,10 @@ run inside WSL 2, which gets half of the host's RAM by default: raise it with `m
 
 ### Kubernetes (Rancher, RKE2, k3s)
 
+**The full lab** (console with login, n8n copilot, Qdrant, judge model, and a vLLM server for the abliterated GLM-5.x
+with Kill / Isolate) has its own Kustomize manifests: [deploy/k8s/README.md](deploy/k8s/README.md), overlays `dev`
+(no GPU), `onprem` and `cloud`. The single-pod manifest below runs only the abliteration app.
+
 `deploy/k8s/abliteration.yaml` deploys one pod with the app and Ollama as two containers, each with its own
 PersistentVolumeClaim (`workspace` 200 Gi for the app, `ollama` 100 Gi for Ollama's store; GGUFs reach Ollama over its API on
 127.0.0.1 inside the pod, not through a shared volume), a Service, a NetworkPolicy and an ingress-nginx Ingress with basic auth.

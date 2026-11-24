@@ -1,6 +1,7 @@
 # Design: GLM-5.3 on Kubernetes, from abliteration to the copilot
 
-Status: **proposal**, nothing below is built yet. Section 10 is the build order.
+Status: phases 0 and 1 are built (`deploy/k8s/`, tested on kind with Calico in CI); the rest is the plan. Section 10 is
+the build order.
 
 ## 1. What this adds
 
@@ -20,7 +21,7 @@ of the pentest copilot (`deploy/n8n/`). One web console drives all of it:
 | --- | --- | --- |
 | Where GLM-5.3 runs | On-prem **and** cloud | One Kustomize base with `onprem` and `cloud` overlays |
 | Copilot engine | **n8n** stays | The console starts n8n runs and polls their progress: a stage-level feed, no token streaming for copilot runs |
-| Login | **Basic auth**, one shared account | The audit log records sessions and source IPs, not people |
+| Login | **Basic auth**, one shared account, in a Caddy sidecar | Works behind any ingress controller; the audit log records sessions and source IPs, not people |
 | Kill switch | **Kill** and **Isolate** buttons | No automatic kill, no tripwires |
 
 ### Out of scope
@@ -60,20 +61,18 @@ From `README.md` §6 and the model catalogue in `app/server.py`:
 ```mermaid
 flowchart TB
   user([Browser]) -->|"HTTPS + basic auth"| ing[Ingress]
-  subgraph control ["namespace: control"]
+  subgraph control ["namespace: lab-control"]
     console["Console (the lab app)"]
     n8n["n8n (copilot engine)"]
     qdrant[("Qdrant")]
     ollama["Ollama (judge + embeddings)"]
   end
-  subgraph model ["namespace: model"]
+  subgraph model ["namespace: lab-model"]
     vllm["glm-serve (vLLM, 8 GPUs)"]
-  end
-  subgraph jobs ["namespace: jobs"]
-    dl[download]
-    ms["measure + scan (8 GPUs)"]
-    ed["edit (CPU)"]
-    ev["evaluate (8 GPUs)"]
+    dl["download Job"]
+    ms["measure + scan Job (8 GPUs)"]
+    ed["edit Job (CPU)"]
+    ev["evaluate Job (8 GPUs)"]
   end
   k8s{{"Kubernetes API"}}
   models[("PVC models")]
@@ -93,11 +92,14 @@ flowchart TB
   dl -->|"the only egress"| hf
 ```
 
-- **`control`:** the console, n8n, Qdrant, and Ollama for the judge and the embeddings. The Ingress with basic auth points
-  here.
-- **`model`:** only vLLM serving the promoted abliterated model. Nothing else lives here, because the kill switch's
-  permissions cover the whole namespace.
-- **`jobs`:** the download, measure, edit and evaluate Jobs.
+- **`lab-control`:** the console, n8n, Qdrant, and Ollama for the judge and the embeddings.
+  - **Login:** a Caddy sidecar in the console pod (basic auth). The app itself listens on 127.0.0.1 only, so the Ingress
+    carries no auth annotations and any ingress controller works.
+- **`lab-model`:** vLLM serving the promoted abliterated model, and the abliteration Jobs.
+  - **Why the Jobs live here:** they read and write the same weights as the server, and a PersistentVolumeClaim belongs to
+    one namespace. Separate namespaces would need storage-specific static volumes.
+  - **Consequence for the kill switch:** its permissions cover the whole namespace, so a mistaken pod delete can abort a
+    Job too, and nothing else may run here.
 - **Storage:**
   - PVC `models`: base, candidates, promoted, previous;
   - PVC `workspace`: runs, datasets, uploads, audit log.
@@ -149,7 +151,7 @@ flowchart LR
 - **Promote:** points the `glm-serve` ConfigMap at the run's checkpoint and restarts the Deployment. The copilot uses the
   new model from the next request. The previous version stays on disk, and **Rollback** is the same step in reverse.
 - **Operator node:** today the n8n operator node talks to Ollama. `build_workflow.js --operator openai` will generate n8n's
-  OpenAI Chat Model node instead, with the credential's *Base URL* set to `http://glm-serve.model.svc:8000/v1` (n8n 2.48's
+  OpenAI Chat Model node instead, with the credential's *Base URL* set to `http://glm-serve.lab-model.svc:8000/v1` (n8n 2.48's
   OpenAI credential has that field). GLM-5.x reasons before it answers, so vLLM runs with its GLM reasoning parser and n8n
   receives only the answer.
 
@@ -233,7 +235,7 @@ sequenceDiagram
 Kubernetes network policies only ever **allow**. A "deny everything" policy added next to an existing allow policy changes
 nothing, because traffic is allowed as soon as any policy allows it. So isolation works by **removing the allow**:
 
-- **Always in `model`:** `default-deny`, which selects every pod and allows nothing in or out.
+- **Always in `lab-model`:** `default-deny`, which selects every pod and allows nothing in or out.
 - **The one opening:** `glm-serve-allow`, which allows traffic in on port 8000 from n8n and the console. Nothing is allowed
   out, so vLLM runs with `HF_HUB_OFFLINE=1`.
 
@@ -268,13 +270,13 @@ sequenceDiagram
 After a kill:
 - **Start:** an explicit button scales the model back to 1 and recreates the allow policy. GLM-5.3 takes minutes to load.
 
-**Permissions** for the console's ServiceAccount, in `model` only:
+**Permissions** for the console's ServiceAccount, in `lab-model` only:
 
 | Resource | Verbs | Limited to |
 | --- | --- | --- |
 | `deployments/scale` | get, patch | `glm-serve` |
 | `deployments` | get, watch | `glm-serve` |
-| `pods` | get, list, watch, delete | the namespace; pods can't be limited by name, so `model` holds nothing else |
+| `pods` | get, list, watch, delete | the namespace; pods can't be limited by name, so `lab-model` holds only the model server and its Jobs |
 | `networkpolicies` | get, delete | `glm-serve-allow` |
 | `networkpolicies` | create | the namespace; Kubernetes can't limit create by name |
 
@@ -283,9 +285,9 @@ No `pods/exec`, nothing cluster-wide. The kill path depends only on the API serv
 **Fallback** when the console itself is down:
 
 ```bash
-kubectl -n model delete networkpolicy glm-serve-allow
-kubectl -n model scale deploy/glm-serve --replicas=0
-kubectl -n model delete pod -l app=glm-serve --grace-period=0 --force
+kubectl -n lab-model delete networkpolicy glm-serve-allow
+kubectl -n lab-model scale deploy/glm-serve --replicas=0
+kubectl -n lab-model delete pod -l app=glm-serve --grace-period=0 --force
 ```
 
 ## 9. Security
@@ -312,8 +314,8 @@ kubectl -n model delete pod -l app=glm-serve --grace-period=0 --force
 
 | Phase | Delivers | Verified by |
 | --- | --- | --- |
-| 0 | `dev` overlay: the whole stack with a small model (GLM-Edge on CPU, or GLM-4.5-Air on 4×H100) | kind with Calico in CI, then your cluster |
-| 1 | Kustomize base, `onprem` and `cloud` overlays. They contain:<br>namespaces, PVCs, RBAC, network policies, Ingress;<br>n8n, Qdrant, Ollama;<br>glm-serve at 0 replicas | `kubectl apply --dry-run=server`, kind |
+| 0 ✅ | `dev` overlay: the whole stack with a small model (GLM-Edge on CPU, or GLM-4.5-Air on 4×H100) | kind with Calico in CI, then your cluster |
+| 1 ✅ | Kustomize base, `onprem` and `cloud` overlays. They contain:<br>namespaces, PVCs, RBAC, network policies, Ingress;<br>n8n, Qdrant, Ollama;<br>glm-serve at 0 replicas | `kubectl apply --dry-run=server`, kind |
 | 2 | Abliteration stages as Jobs with live logs, run registry, Promote and Rollback | kind with GLM-Edge on CPU |
 | 3 | n8n webhook trigger, OpenAI-compatible operator node, console polling into the live feed, free prompts to vLLM | real n8n, vLLM stand-in |
 | 4 | Kill and Isolate with RBAC and audit | kind with Calico: time to kill, isolation cuts traffic |
