@@ -183,6 +183,55 @@ The console's header shows the model server's state (**model running**, **isolat
 
 Network policies only ever allow traffic, so isolation removes the allow and `default-deny` stays.
 
+## Copilot: runs, free prompts, live feed
+
+The **copilot** button in the console's header opens the copilot panel.
+
+**Connect n8n once.** The console starts runs through n8n's webhook and follows them through n8n's API. One script sets up
+both sides:
+
+```bash
+kubectl -n lab-copilot port-forward svc/n8n 5678:5678
+```
+```bash
+python deploy/n8n/connect_console.py --email <your n8n login> --apply-secret
+```
+
+- **What it sets up:**
+  - the copilot's credentials: the operator (OpenAI-compatible, `glm-serve`), Ollama (judge, embeddings), Qdrant, and
+    the webhook secret;
+  - the workflow, imported and published;
+  - an n8n API key that may only read and stop executions;
+  - the Secret `copilot` in `lab` with the key and the webhook secret.
+- **Login:** it asks for your n8n password. A temporary full-scope key does the setup and is deleted at the end.
+- **No restart:** the console reads the Secret from a mounted file, so it is connected within a minute or two.
+- **Re-running** updates everything in place and rotates the key and the secret.
+- **Fresh n8n:** add `--setup-owner --password ...` to create the owner account.
+
+**In the panel:**
+- **Ask the copilot:** a task and one target from `LAB_ALLOWLIST`, which is set in n8n's environment in
+  `base/copilot/n8n.yaml` (`10.10.10.0/24,192.168.56.0/24`; EDIT it for your lab).
+  - **The run:** one event per stage (scope, retrieval, the operator's proposal, the policy gate, the judge), then a
+    result card with the exact command, the decisions and the next step.
+  - **Stop run** stops it in n8n.
+  - **Nothing executes:** the Execute node is disabled. Authorized runs wait at Human approval, since auto-run is off
+    in the cluster (`LAB_AUTORUN_READONLY`).
+- **Prompt the model directly:** straight to `glm-serve`'s OpenAI-compatible API, streamed. This is model testing:
+  there is no policy gate or judge, since nothing can execute either way.
+- **Live feed:** everything as it happens, from every source:
+  - copilot runs and free prompts;
+  - pipeline Jobs and their steps;
+  - Kill / Isolate / Release / Start, Promote / Rollback;
+  - changes of the model server's state.
+
+**Logged and kept:**
+- **Audit:** every run's start, stop and end, and every free prompt with its answer (up to 2,000 characters), go to the
+  audit log with who asked.
+- **The run list** lives in the console's memory, so a console restart forgets it. n8n keeps the executions.
+- **The webhook secret is in n8n's execution data**, as part of the request headers n8n stores for the webhook node.
+  Only n8n's owner and the console's key can read executions, and both have the secret anyway. The console never shows
+  that node's data.
+
 ## Tested in CI
 
 `.github/workflows/k8s-e2e.yml` runs on every push that touches `deploy/k8s`, `app` or `abliterate`, each time on a
@@ -195,8 +244,8 @@ kind cluster with Calico.
   - RBAC: what the console may and may not do;
   - Isolate / Release and Kill / Start, performed as the console's ServiceAccount, including how long it takes until the
     model's container is gone from the node.
-- **`pipeline` (`tests/pipeline-e2e.sh`)** builds the console image from the commit (CPU torch) and first runs the unit
-  tests inside it (`abliterate/tests`, `app/tests`). Then it drives the console through its API on a tiny random GLM,
+- **`pipeline` (`tests/pipeline-e2e.sh`)** runs the n8n workflow's tests, builds the console image from the commit (CPU
+  torch) and runs the unit tests inside it (`abliterate/tests`, `app/tests`). Then it drives the console through its API on a tiny random GLM,
   saved by transformers v5 like newer checkpoints:
   - download, scan, apply, validate and deploy as Jobs;
   - each Job's network labels;
@@ -205,6 +254,13 @@ kind cluster with Calico.
   - Rollback to the first run's exact model;
   - Stop;
   - the kill switch through the login: cross-site and body-less POSTs refused, Isolate and Release, Kill timed until
-    the container is gone from the node, Start, and the audit entries with the login user.
+    the container is gone from the node, Start, and the audit entries with the login user;
+  - copilot runs through **real n8n**, with a model stand-in (`app/tests/model_standin.py`) as the operator, judge and
+    embeddings. `connect_console.py` sets n8n up; then:
+    - every branch arrives in the console, one event per stage: approval, policy block, judge reject, out of scope;
+    - Stop cancels a waiting run;
+    - the webhook refuses calls without the secret, and the console's n8n key can't list workflows;
+    - a free prompt streams from `glm-serve`;
+    - the feed and the audit log record all of it.
 
 Not covered by CI: GPUs, vLLM with real weights, GLM-5.x itself.

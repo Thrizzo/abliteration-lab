@@ -1,6 +1,7 @@
 # Design: GLM-5.3 on Kubernetes, from abliteration to the copilot
 
-Status: phases 0, 1, 2 and 4 are built (`deploy/k8s/`, `app/k8sjobs.py`, tested on kind with Calico in CI); the rest is the plan.
+Status: phases 0 to 4 are built (`deploy/k8s/`, `app/k8sjobs.py`, `app/copilot_runs.py`, tested on kind with Calico in CI);
+knowledge uploads (5) and the GLM-5.3 run (6) are the plan.
 Section 10 is the build order.
 
 ## 1. What this adds
@@ -205,6 +206,17 @@ sequenceDiagram
 
   Model text is escaped exactly as on the form's result page.
 - **Stop run:** `POST /api/v1/executions/{id}/stop`.
+- **Built (phase 3), with what building it required:**
+  - **Live progress:** n8n stores a run's node results only when it ends, unless the workflow sets
+    `saveExecutionProgress`. It does.
+  - **Console runs need their own ending.** The form's result pages are skipped for them, and the console renders the
+    result itself, escaped.
+  - **The operator node is `lmChatOpenAi` with `responsesApiEnabled: false`.** v1.3 defaults to OpenAI's Responses API,
+    which neither vLLM nor Ollama needs to offer.
+  - **Setup:** `deploy/n8n/connect_console.py` creates the console's API key with execution scopes only. n8n 2.48.7
+    enforces them; checked: the key can't list workflows.
+  - **The webhook secret ends up in n8n's execution data**, since the webhook node's output keeps the request headers.
+    Only principals that hold the secret anyway can read executions. The console never forwards that node's output.
 - **Free prompts** are model testing, not copilot runs. The console sends them straight to vLLM and streams the answer token
   by token, as the Compare stage does today with Ollama, and logs them in the feed. They skip the policy gate and the judge,
   since nothing can execute either way.
@@ -337,7 +349,7 @@ kubectl -n lab delete pod -l app=glm-serve --grace-period=0 --force
 | 0 ✅ | `dev` overlay: the whole stack with a small model (GLM-Edge on CPU, or GLM-4.5-Air on 4×H100) | kind with Calico in CI, then your cluster |
 | 1 ✅ | Kustomize base, `onprem` and `cloud` overlays. They contain:<br>namespaces, PVCs, RBAC, network policies, Ingress;<br>n8n, Qdrant, Ollama;<br>glm-serve at 0 replicas | `kubectl apply --dry-run=server`, kind |
 | 2 ✅ | Abliteration stages as Jobs with live logs, run registry, Promote and Rollback | kind: the real console image, every stage on a tiny GLM |
-| 3 | n8n webhook trigger, OpenAI-compatible operator node, console polling into the live feed, free prompts to vLLM | real n8n, vLLM stand-in |
+| 3 ✅ | n8n webhook trigger, OpenAI-compatible operator node, console polling into the live feed, free prompts to vLLM | kind: real n8n, a model stand-in for the operator, judge and embeddings, `glm-serve` for free prompts |
 | 4 ✅ | Kill, Isolate, Release and Start in the console, with audit | kind with Calico: the real console through its login; time until the container is gone from the node, isolation cuts traffic, audit |
 | 5 | Knowledge uploads incl. PDF, list and delete | unit tests, live ingest |
 | 6 | GLM-5.3: download, measure, edit, evaluate, promote | your 8×H200 node, on-prem or cloud |

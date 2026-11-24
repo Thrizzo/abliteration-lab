@@ -62,9 +62,14 @@ instead of guessing a scope.
 
 ## The layers
 
-1. **Form (input).** Two required fields, *Task* and *Target*, at `http://localhost:5678/form/pentest-copilot` once the
-   workflow is published. The editor's *Execute workflow* opens the same form as a test. The target is its own field on
-   purpose: the scope gate checks one exact target and never has to pick one out of free text.
+1. **Input: the form or the lab console.**
+   - **Form:** two required fields, *Task* and *Target*, at `http://localhost:5678/form/pentest-copilot` once the
+     workflow is published. The editor's *Execute workflow* opens the same form as a test. The target is its own field
+     on purpose: the scope gate checks one exact target and never has to pick one out of free text.
+   - **Console (Kubernetes):** `POST /webhook/copilot-run` with the shared secret in `X-Lab-Secret` (a Header Auth
+     credential). n8n answers at once with the execution id; the console follows the run through n8n's API and shows one
+     event per stage. Console runs skip the result pages. The workflow stores each node's result as soon as it finishes
+     (`saveExecutionProgress`), so the console can show the run while it is still going.
 2. **Scope gate (code).** The target must be in `LAB_ALLOWLIST` *before any model is called*. An out-of-scope run makes
    zero model or vector-store calls (verified live).
 3. **Retrieval (RAG).** Top-4 chunks of your writeups from Qdrant (`copilot.ingest` fills it). They are bounded to 3.5k
@@ -102,10 +107,11 @@ instead of guessing a scope.
 
 | File | What it is |
 | --- | --- |
-| `workflows/pentest-copilot.json` | The importable workflow (34 nodes). **Generated**, do not hand-edit. |
+| `workflows/pentest-copilot.json` | The importable workflow (39 nodes). **Generated**, do not hand-edit. |
+| `connect_console.py` | One-shot setup: credentials, the workflow (published), and, for the Kubernetes console, an n8n API key limited to reading and stopping executions plus the console's Secret. Safe to re-run. |
 | `build_workflow.js` | Generator: embeds `policy.js` into the Code nodes and reads the prompts from `copilot/operator_contract.json`. Every Code node is parsed at build time; `--check` fails if the JSON is stale. |
 | `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 66 tests. |
-| `workflow.test.js` | Runs each Code node's actual code with mocked n8n globals (neutralizer, `$env` fail-closed, parse, veto-only judge, store-down detection, result-page escaping). Also checks the graph: blocked runs never reach approval or execution. |
+| `workflow.test.js` | Runs each Code node's actual code with mocked n8n globals (neutralizer, `$env` fail-closed, parse, veto-only judge, store-down detection, result-page escaping). Also checks the graph: blocked runs never reach approval or execution, console runs never reach a form page, and the operator calls chat completions (not the Responses API). |
 | `docker-compose.n8n.yml` | n8n + Qdrant overlay on the lab stack. n8n listens on localhost only; Qdrant has no published port. |
 | `../../copilot/` | Ingestion, scrubbing, QLoRA pairs, trainer and eval ([copilot/README.md](../../copilot/README.md)). |
 
@@ -137,12 +143,23 @@ instead of guessing a scope.
    docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
      run --rm app python -m copilot.ingest --src /workspace/writeups
    ```
-5. **Credentials in n8n** (http://localhost:5678):
-   - **Ollama**: Base URL `http://ollama:11434`
-   - **Qdrant**: URL `http://qdrant:6333`, no API key
-6. **Import** `workflows/pentest-copilot.json` and pick the credentials in the 3 Ollama nodes and the Qdrant node. Set the
-   model names to what `ollama list` shows, then **Publish** the workflow. To keep PWK material out of retrieval, add the
-   filter `{"must_not":[{"key":"metadata.source","match":{"value":"pwk"}}]}` under the Qdrant node's *Search Filter*.
+5. **Credentials and the workflow**, in one go. Create your n8n login at http://localhost:5678 first, then:
+   ```bash
+   python deploy/n8n/connect_console.py --n8n http://localhost:5678 --email <your n8n login> \
+     --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
+   ```
+   - **What it sets up:**
+     - the **operator** as an OpenAI-compatible credential: Ollama serves the same API under `/v1`, and so does vLLM;
+     - **Ollama** for the judge and the embeddings, and **Qdrant**;
+     - a **Header Auth** credential for the console webhook, which the workflow needs before it can be published;
+     - the workflow itself, imported with those credentials selected and published.
+   - **Model names:** the operator's comes from `COPILOT_OPERATOR_MODEL` (compose default `glm-edge-1.5b-chat-abl:latest`;
+     set it in `deploy/.env` to what `ollama list` shows); the judge (`qwen3:8b`) and embeddings (`nomic-embed-text`)
+     are set in their nodes.
+   - **By hand instead:** create those four credentials (OpenAI with Base URL `http://ollama:11434/v1` and any API key),
+     import `workflows/pentest-copilot.json`, pick them in the nodes, and **Publish**.
+6. **Optional:** to keep PWK material out of retrieval, add the filter
+   `{"must_not":[{"key":"metadata.source","match":{"value":"pwk"}}]}` under the Qdrant node's *Search Filter*.
 7. **Use it:** open http://localhost:5678/form/pentest-copilot, enter a task and one target from `LAB_ALLOWLIST`, and click
    *Ask the copilot*. The result page appears when the judge is done.
    - **No login:** the form has none of its own. n8n listens on localhost only, so that is fine on a single-user machine;
