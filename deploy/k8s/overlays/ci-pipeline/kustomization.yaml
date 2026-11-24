@@ -1,6 +1,7 @@
 # CI only (.github/workflows/k8s-e2e.yml, job "pipeline"): the dev overlay with the REAL console image, built from this
 # commit (CPU torch) and loaded into kind as ghcr.io/thrizzo/redteam-llm-lab:ci. The test drives download, scan, apply,
-# validate and deploy through the console's API on a tiny random GLM, then Promote and Rollback.
+# validate and deploy through the console's API on a tiny random GLM, then Promote and Rollback, the kill switch, and
+# copilot runs through real n8n with a model stand-in (standin.yaml) in place of the copilot's Ollama.
 # TEST-ONLY secrets below. Never use this overlay for a real deployment.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -11,6 +12,7 @@ images:
     newTag: ci
 patches:
   - path: small.yaml
+  - path: standin.yaml
 configMapGenerator:
   - name: lab-jobs
     namespace: lab

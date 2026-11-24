@@ -30,16 +30,21 @@ def call(app, method, path, headers=None, body=None):
     raw = json.dumps(body).encode() if isinstance(body, (dict, list)) else (body or b"")
     hdrs = {"host": "lab.example.internal", **({"content-type": "application/json"} if isinstance(body, (dict, list)) else {}),
             **{k.lower(): v for k, v in (headers or {}).items()}}
-    msgs = []
+    msgs, state = [], {"sent": False}
 
     async def receive():
-        return {"type": "http.request", "body": raw, "more_body": False}
+        # like a real server: the body once, then nothing until the client goes away (which it never does here)
+        if not state["sent"]:
+            state["sent"] = True
+            return {"type": "http.request", "body": raw, "more_body": False}
+        await asyncio.Event().wait()
 
     async def send(m):
         msgs.append(m)
 
+    path, _, query = path.partition("?")
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method, "scheme": "http",
-             "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
+             "path": path, "raw_path": path.encode(), "query_string": query.encode(), "root_path": "",
              "headers": [(k.encode(), v.encode()) for k, v in hdrs.items()], "client": ("127.0.0.1", 50000),
              "server": ("127.0.0.1", 8787)}
     asyncio.run(app(scope, receive, send))
@@ -127,6 +132,45 @@ class TestControlHTTP(unittest.TestCase):
         rec = call(self.app, "GET", "/api/control")[1]["audit"][0]
         self.assertEqual((rec["source"], rec["stage"], rec["level"], rec["who"]["user"]), ("serving", "promote", "error", "admin"))
 
+
+@unittest.skipUnless(HAVE_FASTAPI, "the console's dependencies are not installed here")
+class TestCopilotHTTP(unittest.TestCase):
+    """The feed, the copilot's status and a streamed free prompt through the real app (model: the stand-in)."""
+
+    @classmethod
+    def setUpClass(cls):
+        TestControlHTTP.setUpClass()                                 # the same server module, in Kubernetes mode
+        cls.server = TestControlHTTP.server
+        import model_standin
+        from http.server import ThreadingHTTPServer
+        import threading
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), model_standin.H)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def test_feed_copilot_status_and_free_prompt(self):
+        s = self.server
+        s.model_chat.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        st, body = call(s.app, "GET", "/api/copilot")
+        self.assertEqual(st, 200)
+        self.assertFalse(body["configured"])                         # no Secret mounted in this test
+        self.assertIn("n8n-api-key", body["missing"])
+        st, body = call(s.app, "POST", "/api/copilot/run", {}, {"task": "t", "target": "10.10.10.5"})
+        self.assertEqual(st, 409)
+        self.assertIn("connect_console.py", body["detail"])
+        before = call(s.app, "GET", "/api/feed")[1]["latest"]
+        st, text = call(s.app, "POST", "/api/model/chat", {"x-lab-user": "admin"}, {"prompt": "hello there", "max_tokens": 16})
+        self.assertEqual(st, 200)
+        lines = [json.loads(line) for line in text.strip().split("\n")]
+        self.assertEqual("".join(x.get("token", "") for x in lines), "stand-in answer to: hello there")
+        self.assertTrue(lines[-1]["done"])
+        feed = call(s.app, "GET", f"/api/feed?after={before}")[1]["events"]
+        self.assertEqual([(e["source"], e["stage"]) for e in feed], [("model", "prompt")])
+        self.assertEqual(feed[0]["data"]["who"]["user"], "admin")
+        self.assertEqual(call(s.app, "POST", "/api/model/chat", {}, {"prompt": ""})[0], 422)
 
 if __name__ == "__main__":
     unittest.main()

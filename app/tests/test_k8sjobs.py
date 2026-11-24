@@ -344,6 +344,24 @@ class TestJobs(Base):
         self.assertFalse(any(line.startswith("2026-") for line in lines))            # timestamps stripped
         self.assertTrue(os.path.isfile(st["log_path"]) and "done" in open(st["log_path"]).read())
 
+    def test_jobs_report_to_the_live_feed(self):
+        import copilot_runs
+        self.pl.feed = copilot_runs.Feed()
+        self.api.pod_plan["*"] = {"phases": ["Running"], "exit": 3, "logs": [[
+            ("2026-11-24T10:00:00.1Z", "10:00:00 run runs/abliterate_20261124_100000: model m stage scan"),
+            ("2026-11-24T10:00:00.2Z", "EVENT " + json.dumps({"t": 1, "step": "data", "status": "done"})),
+            ("2026-11-24T10:00:00.3Z", "EVENT " + json.dumps({"t": 2, "step": "scan", "status": "progress"})),
+            ("2026-11-24T10:00:00.4Z", "EVENT " + json.dumps({"t": 3, "step": "error", "status": "error", "message": "CUDA OOM"})),
+        ]]}
+        self.pl.start(PY + ["--stage", "scan", "--model", "m"], "abliterate", "scan")
+        wait_done(self.pl)
+        evs = self.pl.feed.since(0)["events"]
+        self.assertEqual([e["message"].split(": ", 1)[-1] if e["message"].startswith("Job") else e["message"] for e in evs],
+                         ["stage scan started", "data: done", "error: CUDA OOM", "stage scan exited with code 3"])
+        self.assertEqual({e["source"] for e in evs}, {"pipeline"})
+        self.assertEqual([e["level"] for e in evs], ["info", "info", "error", "error"])
+        self.assertEqual(evs[-1]["run_id"], self.pl.run_id_of(self.pl.run_dir))       # the run the Job was created for
+
     def test_reconnect_skips_lines_already_seen(self):
         self.api.pod_plan["*"] = {"phases": ["Running"], "exit": 3, "logs": [
             [("2026-11-24T10:00:00.1Z", "one"), ("2026-11-24T10:00:00.5Z", "two")],                  # API closes early

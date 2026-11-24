@@ -51,6 +51,11 @@ spec:
             - { name: N8N_PERSONALIZATION_ENABLED, value: "false" }
             - { name: GENERIC_TIMEZONE, value: UTC }
             - { name: LAB_RUNNER_URL, value: "" }                      # no executor: the Execute node stays disabled
+            # the copilot's scope (EDIT: your lab's ranges) and auto-run tier; with Execute disabled, auto-run changes only
+            # the result's wording ("auto-run" vs "waiting for your approval")
+            - { name: LAB_ALLOWLIST, value: "10.10.10.0/24,192.168.56.0/24" }
+            - { name: LAB_AUTORUN_READONLY, value: "false" }
+            - { name: COPILOT_OPERATOR_MODEL, value: glm-abl }            # the name glm-serve serves (Promote points it at a run)
           ports: [{ containerPort: 5678, name: http }]
           volumeMounts: [{ name: data, mountPath: /home/node/.n8n }]
           resources:

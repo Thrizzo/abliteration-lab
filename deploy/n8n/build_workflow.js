@@ -8,6 +8,10 @@
  * AUTHORIZEs or REJECTs -> the runner executes the POLICY-VETTED command, never text the judge produced.
  * Read-only recon auto-runs (passive tier); safe NSE + sqlmap-enumerate only with the active tier; else a human.
  *
+ * Two ways in: the web form, and a webhook the lab console calls (header secret). The webhook answers at once with the
+ * execution id; the console then follows the run through n8n's API. Console runs end without the form's result pages.
+ * The operator is an OpenAI-compatible chat model: glm-serve (vLLM) on GPU clusters, Ollama's /v1 API in dev.
+ *
  * policy.js is embedded verbatim into the Code nodes (n8n Code nodes cannot require local files), and the prompts come
  * from copilot/operator_contract.json, shared with the Python side (QLoRA pairs, eval), so the two cannot drift.
  * Every generated Code node is parsed at build time: a quoting slip fails here, not inside n8n. */
@@ -38,6 +42,10 @@ const boolIf = (name, col, expr) => add({
 });
 const code = (name, col, js, row = 200) => add({ name, type: 'n8n-nodes-base.code', typeVersion: 2, position: [x(col), row], parameters: { jsCode: js } });
 const ollama = (name, col, model, extra = {}) => add({ name, type: '@n8n/n8n-nodes-langchain.lmChatOllama', typeVersion: 1, position: [x(col), 440], parameters: { model, options: { temperature: 0, ...extra } } });
+// OpenAI-compatible chat model: vLLM and Ollama both serve /v1/chat/completions. responsesApiEnabled must be false:
+// it defaults to true in v1.3 and would call OpenAI's Responses API instead, which neither server needs to offer.
+const openAiCompatible = (name, col, model, extra = {}) => add({ name, type: '@n8n/n8n-nodes-langchain.lmChatOpenAi', typeVersion: 1.3,
+  position: [x(col), 440], parameters: { model: { __rl: true, mode: 'id', value: model }, responsesApiEnabled: false, options: { temperature: 0, ...extra } } });
 const chain = (name, col, text, sys) => add({
   name, type: '@n8n/n8n-nodes-langchain.chainLlm', typeVersion: 1.6, position: [x(col), 200],
   parameters: { promptType: 'define', text, messages: { messageValues: [{ message: sys }] } },
@@ -58,11 +66,24 @@ add({ name: 'Copilot form', type: 'n8n-nodes-base.formTrigger', typeVersion: 2.6
     responseMode: 'lastNode',   // n8n switches to its multi-page flow on its own, because Form pages follow
     options: { path: FORM_PATH, buttonLabel: 'Ask the copilot', appendAttribution: false },
   } });
+// 0b input: the lab console. POST {task, target, requested_by} with the shared secret in X-Lab-Secret (Header Auth
+// credential). It answers at once with the execution id, then the same pipeline runs; the console follows it through
+// n8n's API (GET /api/v1/executions/{id}?includeData=true) and can stop it (POST .../stop).
+const WEBHOOK_PATH = 'copilot-run';
+add({ name: 'Console webhook', type: 'n8n-nodes-base.webhook', typeVersion: 2.2, position: [x(0), 0], webhookId: 'c0de7a1e-5e11-4b6a-9d2c-7f3e8a9b0c55',
+  parameters: { httpMethod: 'POST', path: WEBHOOK_PATH, authentication: 'headerAuth', responseMode: 'responseNode', options: {} } });
+add({ name: 'Respond: execution id', type: 'n8n-nodes-base.respondToWebhook', typeVersion: 1.5, position: [x(0) + 120, 0],
+  parameters: { respondWith: 'json', responseBody: '={{ { "execution_id": $execution.id } }}', options: { responseCode: 202 } } });
+conn('Console webhook', 'Respond: execution id');
 add({ name: 'Define task + target', type: 'n8n-nodes-base.set', typeVersion: 3.4, position: [x(1), 200],
   parameters: { assignments: { assignments: [
-    { id: 'a1', name: 'task', type: 'string', value: '={{ String($json.task ?? "").trim() }}' },
-    { id: 'a2', name: 'target', type: 'string', value: '={{ String($json.target ?? "").trim() }}' } ] } } });
+    // console runs bring their fields in the request body, form runs as top-level fields
+    { id: 'a1', name: 'task', type: 'string', value: '={{ String(($json.body ? $json.body.task : $json.task) ?? "").trim() }}' },
+    { id: 'a2', name: 'target', type: 'string', value: '={{ String(($json.body ? $json.body.target : $json.target) ?? "").trim() }}' },
+    { id: 'a3', name: 'source', type: 'string', value: '={{ $("Console webhook").isExecuted ? "console" : "form" }}' },
+    { id: 'a4', name: 'requestedBy', type: 'string', value: '={{ String(($json.body && $json.body.requested_by) || "").slice(0, 120) }}' } ] } } });
 conn('Copilot form', 'Define task + target');
+conn('Respond: execution id', 'Define task + target');
 
 // 1 scope gate -------------------------------------------------------------------------------
 code('Scope gate', 2, `${POLICY}
@@ -122,10 +143,11 @@ conn('Retrieve writeups (Qdrant)', 'Build reference context');
 // user message format mirrored in copilot/contract.py (operator_messages); copilot/tests/test_contract.py renders both
 const OPERATOR_TEXT = '={{ "TASK: " + $json.task + "\\nTARGET (authorized, in scope): " + $json.target + ($json.refCount ? "\\n\\n" + '
   + JSON.stringify(C.reference_header) + ' + "\\n<<<\\n" + $json.references + "\\n>>>" : "") }}';
-ollama('Ollama: abliterated model', 6, 'glm-edge-1.5b-chat-abl:latest');
+// served name from COPILOT_OPERATOR_MODEL (glm-serve serves glm-abl, which Promote points at a run)
+openAiCompatible('Operator model (OpenAI-compatible)', 6, '={{ $env.COPILOT_OPERATOR_MODEL || "glm-abl" }}');
 chain('Abliterated operator (suggest)', 6, OPERATOR_TEXT, C.operator_system);
 conn('Build reference context', 'Abliterated operator (suggest)');
-conn('Ollama: abliterated model', 'Abliterated operator (suggest)', 'ai_languageModel');
+conn('Operator model (OpenAI-compatible)', 'Abliterated operator (suggest)', 'ai_languageModel');
 
 // 3 parse proposal (abliterated output = data) -----------------------------------------------
 code('Parse proposal', 7, `
@@ -227,13 +249,18 @@ const resultPage = (name, col, row, webhookId) => add({ name, type: 'n8n-nodes-b
   parameters: { operation: 'completion', respondWith: 'text', completionTitle: '={{ $json.resultTitle }}', completionMessage: '={{ $json.resultMessage }}', options: {} } });
 
 code('Result text (authorized)', 13, RESULT);
+// form runs end on a result page; console runs have no page to show (the console renders the result itself)
+const formRun = (name, col, row) => { boolIf(name, col, '$json.source !== "console"'); nodes[nodes.length - 1].position[1] = row; return name; };
+formRun('Form run? (authorized)', 13.5, 200);
 resultPage('Result page: authorized', 14, 200, '5d2f9a64-1b7e-4f0c-8e3a-6a9b0c1d2e33');
 conn('Authorized?', 'Result text (authorized)', 'main', 0);
-conn('Result text (authorized)', 'Result page: authorized');
+conn('Result text (authorized)', 'Form run? (authorized)');
+conn('Form run? (authorized)', 'Result page: authorized', 'main', 0);
 
 // 8 auto-run split + human approval + execute ------------------------------------------------
 boolIf('Auto-run (recon tier)?', 15, '$json.autoRun');
 conn('Result page: authorized', 'Auto-run (recon tier)?');
+conn('Form run? (authorized)', 'Auto-run (recon tier)?', 'main', 1);
 add({ name: 'Human approval', type: 'n8n-nodes-base.wait', typeVersion: 1.1, position: [x(16), 360], webhookId: 'pentest-approval', parameters: { resume: 'webhook', options: {} } });
 conn('Auto-run (recon tier)?', 'Human approval', 'main', 1);
 add({ name: 'Execute on lab target (DISABLED)', type: 'n8n-nodes-base.httpRequest', typeVersion: 4.2, position: [x(17), 200], disabled: true,
@@ -244,8 +271,10 @@ conn('Human approval', 'Execute on lab target (DISABLED)');
 
 // blocked terminals: each ends on the blocked result page ---------------------------------------
 code('Result text (blocked)', 13, RESULT, 640);
+formRun('Form run? (blocked)', 13.5, 640);
 resultPage('Result page: blocked', 14, 640, '9e1c7b20-4d5a-4a8f-b6c3-2f0e1d9a8b44');
-conn('Result text (blocked)', 'Result page: blocked');
+conn('Result text (blocked)', 'Form run? (blocked)');
+conn('Form run? (blocked)', 'Result page: blocked', 'main', 0);      // console runs end here (false branch: nothing)
 [['In scope?', 'out of scope', 3], ['Policy passed?', 'policy', 9], ['Authorized?', 'judge rejected', 12]].forEach(([src, label, col]) => {
   const name = `Blocked (${label})`;
   add({ name, type: 'n8n-nodes-base.noOp', typeVersion: 1, position: [x(col), 640] });
@@ -256,6 +285,7 @@ conn('Result text (blocked)', 'Result page: blocked');
 // sticky notes --------------------------------------------------------------------------------
 const notes = [
   [x(0) - 20, 40, 360, 120, '#2E86DE', '1 - Input (web form)\nTask + one Target. Once published: http://localhost:5678/form/' + FORM_PATH + '. In the editor, Execute workflow opens a test form.'],
+  [x(0) - 20, -170, 360, 150, '#2E86DE', '1b - Input (lab console)\nPOST /webhook/' + WEBHOOK_PATH + ' with the X-Lab-Secret header (Header Auth credential). Answers at once with the execution id; the console follows the run through the n8n API. Console runs skip the result pages.'],
   [x(2) - 20, 40, 220, 120, '#10AC84', '2 - Scope gate (code)\nTarget must be in LAB_ALLOWLIST before the abliterated model runs.'],
   [x(4) - 20, 40, 460, 120, '#2E86DE', '2b - Retrieval (RAG)\nTop-4 chunks from past writeups (Qdrant, collection writeups) as bounded background for the operator only; their addresses are neutralized. Empty/unreachable store -> runs without references.'],
   [x(6) - 20, 40, 220, 120, '#8854D0', '3 - Abliterated\nSUGGESTS ONLY. No tools; can never run a command.'],
@@ -270,7 +300,9 @@ for (const n of nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   try { new Function('$input', '$json', '$', '$env', n.parameters.jsCode); }
   catch (e) { throw new Error(`generated Code node "${n.name}" does not parse: ${e.message}`); }
 }
-const workflow = { name: 'Pentest lab copilot (RAG + abliterated suggests, regular judge authorizes, runner executes)', nodes, connections, settings: { executionOrder: 'v1' }, active: false };
+// saveExecutionProgress: n8n otherwise stores a run's node results only when it ends, and the console follows a run
+// live through the executions API (one event per finished node)
+const workflow = { name: 'Pentest lab copilot (RAG + abliterated suggests, regular judge authorizes, runner executes)', nodes, connections, settings: { executionOrder: 'v1', saveExecutionProgress: true }, active: false };
 const json = JSON.stringify(workflow, null, 2) + '\n';
 
 if (process.argv.includes('--check')) {

@@ -152,7 +152,13 @@ class JobPipeline:
         self.proc = None                       # no child process; kept so callers that check it see None
         self.thread = None
         self.job = None
+        self.feed = None                       # the console's live feed (copilot.Feed), when set
         self._reset()
+
+    def _feed(self, message, level="info", data=None):
+        if self.feed:
+            run = self.run_id_of(self.run_dir) if self.run_dir else None
+            self.feed.emit("pipeline", self.stage or "?", message, level, data, run_id=run)
 
     def _reset(self):
         self.lines, self.events = [], []
@@ -274,6 +280,7 @@ class JobPipeline:
         self._log_file = open(self.log_path, "a", encoding="utf-8")
         for n in notes:
             self._line(n)
+        self._feed(f"Job {job}: stage {stage} started", data={"job": job})
         self.thread = threading.Thread(target=self._pump, daemon=True)
         self.thread.start()
 
@@ -289,9 +296,14 @@ class JobPipeline:
         with self.lock:
             if line.startswith("EVENT "):
                 try:
-                    self.events.append(json.loads(line[6:]))
+                    ev = json.loads(line[6:])
+                    self.events.append(ev)
                 except ValueError:
-                    pass
+                    ev = None
+                if isinstance(ev, dict) and ev.get("status") in ("done", "error") and ev.get("step"):
+                    err = ev.get("status") == "error"
+                    msg = f"{ev['step']}: " + (str(ev.get("message") or "failed")[:200] if err else "done")
+                    self._feed(msg, "error" if err else "info")      # the feed has its own lock: no inversion
                 if '"generations"' in line or '"baseline"' in line or '"separation_pct"' in line:
                     line = line[:160] + " …"
             elif not self.run_dir:
@@ -316,6 +328,8 @@ class JobPipeline:
             if self.exit_code is None:
                 self.exit_code = -1
         self._line(f"[app] process exited with code {self.exit_code}")
+        self._feed(f"Job {self.job}: stage {self.stage} exited with code {self.exit_code}", "info" if self.exit_code == 0 else "error",
+                   {"job": self.job, "exit_code": self.exit_code})
         if self._log_file:
             self._log_file.close()
             self._log_file = None
@@ -555,9 +569,10 @@ class Audit:
     X-Forwarded-For chain as the login proxy saw them. With one shared login, the address is the only "who".
     Every record is also printed to stdout: the container log keeps a copy the Jobs, which share the workspace, can't edit."""
 
-    def __init__(self, project):
+    def __init__(self, project, feed=None):
         self.dir = os.path.join(project, "audit")
         self.lock = threading.Lock()
+        self.feed = feed                        # every audit record also goes to the live feed
 
     def write(self, source, stage, message, level="info", data=None, who=None, run_id=None):
         now = datetime.now(timezone.utc)
@@ -569,6 +584,8 @@ class Audit:
             with open(os.path.join(self.dir, now.strftime("%Y-%m-%d") + ".jsonl"), "a", encoding="utf-8") as f:
                 f.write(line + "\n")
         print("AUDIT " + line, flush=True)
+        if self.feed:
+            self.feed.emit(source, stage, message, level, {**(data or {}), "who": who or {}}, run_id=run_id, ts=rec["ts"])
         return rec
 
     def recent(self, n=30):

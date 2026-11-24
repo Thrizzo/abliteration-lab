@@ -1,0 +1,17 @@
+# CI only: the copilot's Ollama replaced by a deterministic model stand-in (app/tests/model_standin.py), so the console's
+# copilot runs reach every branch of the workflow without GPUs: it answers as the judge and the embeddings (Ollama API)
+# and, through connect_console.py --operator-url, as the operator (OpenAI API). pipeline-e2e.sh creates the ConfigMap.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ollama, namespace: lab-copilot }
+spec:
+  template:
+    spec:
+      containers:
+        - name: ollama
+          image: python:3.12-alpine
+          command: [python, /standin/model_standin.py, "11434"]
+          volumeMounts:
+            - { name: standin, mountPath: /standin, readOnly: true }
+      volumes:
+        - { name: standin, configMap: { name: model-standin } }

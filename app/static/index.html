@@ -24,6 +24,7 @@
     <span title="model server (glm-serve): open the kill switch" id="modelMini" style="display:none;cursor:pointer"><span class="dot" id="dotModel"></span><span id="modelVal" class="mono">model</span></span>
     <button class="btn sm" id="dataToggle">datasets</button>
     <button class="btn sm" id="sbomToggle">SBOM</button>
+    <button class="btn sm" id="copilotToggle" style="display:none">copilot</button>
     <button class="btn sm" id="serveToggle" style="display:none">serving</button>
     <button class="btn sm" id="logToggle">log</button>
   </div>
@@ -157,6 +158,36 @@
   <div class="card"><h3>Runs with an edited model</h3><div id="serveRuns"></div></div>
   <div class="card"><h3>History</h3><div id="serveHist"></div></div>
   <div class="card" id="auditCard" style="display:none"><h3>Audit log</h3><div class="small">Kill / Isolate / Release / Start and every Promote / Rollback, with who asked: <span class="mono">workspace/audit/YYYY-MM-DD.jsonl</span>, and a copy in the console's container log.</div><div id="auditList"></div></div>
+</div></section>
+<section class="panel" id="copilotPanel"><div class="inner">
+  <div class="row" style="justify-content:space-between"><div><h2>Copilot</h2><div class="small">Ask the pentest copilot for the next step against an in-scope lab target, or prompt the served model directly. The abliterated model only suggests; the policy gate and a regular judge decide. Nothing runs from here: the workflow's Execute node is disabled.</div></div><button class="btn sm" id="copilotClose">close</button></div>
+  <div class="cp-grid">
+    <div>
+      <div class="card"><h3>Ask the copilot</h3>
+        <div id="cpConn" class="small"></div>
+        <label class="small" for="cpTask">Task</label><textarea id="cpTask" rows="3" maxlength="2000" placeholder="Enumerate SMB on the box and suggest the next step."></textarea>
+        <label class="small" for="cpTarget">Target: one host or address in LAB_ALLOWLIST</label><input type="text" id="cpTarget" maxlength="253" placeholder="10.10.10.5" autocomplete="off">
+        <div class="row"><button class="btn primary" id="cpRun">Run</button><span class="small">scope gate, retrieval, operator, policy gate, judge</span></div>
+      </div>
+      <div class="card" id="cpRunCard" style="display:none">
+        <div class="row" style="justify-content:space-between;margin-top:0"><h3 id="cpRunTitle">Run</h3><button class="btn danger" id="cpStop">Stop run</button></div>
+        <div id="cpResult"></div>
+        <div id="cpEvents" class="cp-events"></div>
+      </div>
+      <div class="card"><h3>Runs from this console</h3><div id="cpRuns"></div></div>
+    </div>
+    <div>
+      <div class="card"><h3>Prompt the model directly</h3>
+        <div class="small">Straight to the served model (<span class="mono" id="cpModelName">glm-abl</span>): model testing without the policy gate or the judge, since nothing can execute either way. Every prompt and answer goes into the audit log.</div>
+        <textarea id="cpPrompt" rows="3" maxlength="20000" placeholder="Ask the model anything"></textarea>
+        <div class="row"><button class="btn" id="cpSend">Send</button><label class="small" for="cpMax">max tokens</label><input type="number" id="cpMax" value="512" min="1" max="4096" style="width:90px"><span class="small" id="cpPromptInfo"></span></div>
+        <pre id="cpAnswer" class="cp-answer"></pre>
+      </div>
+      <div class="card"><div class="row" style="justify-content:space-between;margin-top:0"><h3>Live feed</h3><select id="cpFeedSrc" aria-label="feed source"><option value="">everything</option><option>copilot</option><option>model</option><option>pipeline</option><option>control</option><option>serving</option></select></div>
+        <div id="cpFeed" class="cp-events"></div>
+      </div>
+    </div>
+  </div>
 </div></section>
 
 <script src="/static/guide.js"></script>

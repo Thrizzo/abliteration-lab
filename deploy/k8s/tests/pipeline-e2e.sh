@@ -11,6 +11,10 @@
 #   6. the kill switch through the login: cross-site and body-less POSTs refused; Isolate cuts traffic while the
 #      model runs, Release restores it; Kill removes the container from the node within seconds and nothing restarts
 #      it; Start brings it back; every action is audited with the login user, on the workspace and in the log
+#   7. copilot runs through REAL n8n (the model stand-in answers as operator, judge and embeddings): connect_console.py
+#      sets n8n up and the console picks up its Secret without a restart; every branch (approval / policy / judge /
+#      scope) arrives as one event per stage; Stop cancels a waiting run; the webhook needs the secret; the console's
+#      n8n key can only read and stop executions; a free prompt streams from glm-serve; feed and audit record it all
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
 pass=0; fail=0
@@ -62,6 +66,9 @@ serving_done() {
 }
 
 echo "== deploy (ci-pipeline overlay)"
+kubectl apply -f deploy/k8s/base/namespaces.yaml >/dev/null
+# the copilot's Ollama is replaced by the model stand-in in CI (overlays/ci-pipeline/standin.yaml); its code:
+kubectl -n lab-copilot create configmap model-standin --from-file=app/tests/model_standin.py --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -k deploy/k8s/overlays/ci-pipeline >/dev/null
 check "rollout console" kubectl -n lab rollout status deploy/console --timeout=600s
 check "rollout glm-serve" kubectl -n lab rollout status deploy/glm-serve --timeout=600s
@@ -172,6 +179,54 @@ check "audit: start, kill, release, isolate, each by user ci" test "$(API /contr
 check "audit: the isolate reason is kept" test "$(API /control | jq -r '[.audit[] | select(.stage == "isolate")][0].data.reason')" = "ci: isolate"
 check "audit: written to the workspace" console bash -c 'grep -q "\"stage\": \"kill\"" /workspace/audit/*.jsonl'
 check "audit: copied to the console's container log" bash -c "kubectl -n lab logs deploy/console -c app | grep -q '^AUDIT .*\"stage\": \"kill\"'"
+
+echo "== 7. Copilot runs through real n8n, free prompts, the live feed"
+check "rollout n8n" kubectl -n lab-copilot rollout status deploy/n8n --timeout=600s
+check "rollout the model stand-in (in place of the copilot's Ollama)" kubectl -n lab-copilot rollout status deploy/ollama --timeout=300s
+kubectl -n lab-copilot port-forward svc/n8n 15678:5678 >/dev/null 2>&1 &
+PF2=$!
+for i in $(seq 1 120); do [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:15678/rest/settings)" = 200 ] && break; sleep 2; done
+check "connect_console.py: owner, API keys, credentials, workflow published, console Secret" python3 deploy/n8n/connect_console.py \
+  --n8n http://127.0.0.1:15678 --email ci@lab.test --password Ci-Only-Owner-Pass-1 --setup-owner \
+  --operator-url http://ollama.lab-copilot.svc:11434/v1 --apply-secret
+copilot_ready() { local i; for i in $(seq 1 120); do [ "$(API /copilot | jq -r .configured)" = true ] && return 0; sleep 2; done; return 1; }
+check "the console picks up the Secret (no restart)" copilot_ready
+# start a run through the console, wait until it reaches one of the given states, echo the run
+copilot_run() {
+  local task=$1 target=$2 st id i run s; shift 2
+  st=$(API /copilot/run -d "$(jq -cn --arg t "$task" --arg g "$target" '{task: $t, target: $g}')")
+  id=$(jq -r '.id // empty' <<<"$st")
+  [ -n "$id" ] || { echo "  copilot run refused: $st" >&2; echo '{}'; return; }
+  for i in $(seq 1 120); do
+    run=$(API "/copilot/runs/$id")
+    for s in "$@"; do [ "$(jq -r .status <<<"$run")" = "$s" ] && { echo "$run"; return; }; done
+    sleep 1
+  done
+  echo "  run $id stayed $(jq -r .status <<<"$run")" >&2; echo "$run"
+}
+stages() { jq -r '[.events[].stage | select(. != "error")] | join(",")' <<<"$1"; }
+R=$(copilot_run "Enumerate services on the box" 10.10.10.5 waiting done error)
+check "run: authorized, parked at Human approval (auto-run is off)" test "$(jq -r '.status + " / " + .result.title' <<<"$R")" = "waiting / Authorized: waiting for your approval"
+check "run: one event per stage ($(stages "$R"))" test "$(stages "$R")" = "start,scope,retrieval,proposal,policy,judge,result,approval"
+check "run: the operator's proposal, as the console shows it" test "$(jq -r .result.command <<<"$R")" = "nmap -sV -Pn 10.10.10.5"
+RID=$(jq -r .id <<<"$R")
+check "stop the waiting run from the console" post_ok "/copilot/runs/$RID/stop" '{}'
+run_status() { local i; for i in $(seq 1 30); do [ "$(API "/copilot/runs/$1" | jq -r .status)" = "$2" ] && return 0; sleep 1; done; return 1; }
+check "the run is canceled in n8n" run_status "$RID" canceled
+B=$(copilot_run "destroy the box" 10.10.10.5 done error)
+check "run: rm -rf blocked by the policy gate; the judge never saw it" test "$(jq -r .result.title <<<"$B") / $(stages "$B")" = "Blocked by the policy gate / start,scope,retrieval,proposal,policy,result,end"
+J=$(copilot_run "reject this scan" 10.10.10.5 done error)
+check "run: blocked by the judge" test "$(jq -r .result.title <<<"$J")" = "Blocked: the judge rejected it"
+O=$(copilot_run "Enumerate services" 8.8.8.8 done error)
+check "run: out of scope, no model called" test "$(jq -r .result.title <<<"$O") / $(stages "$O")" = "Blocked: target out of scope / start,scope,result,end"
+check "n8n refuses the webhook without the secret" test "$(console curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' http://n8n.lab-copilot.svc:5678/webhook/copilot-run)" = 403
+check "the console's n8n key may not list workflows (execution scopes only)" test "$(console sh -c 'curl -s -o /dev/null -w "%{http_code}" -H "X-N8N-API-KEY: $(cat /etc/lab-copilot/n8n-api-key)" http://n8n.lab-copilot.svc:5678/api/v1/workflows')" = 403
+P=$(curl -sS -N -u ci:ci-only-password -H 'Content-Type: application/json' -d '{"prompt": "Say hello.", "max_tokens": 8}' http://127.0.0.1:18080/api/model/chat)
+check "free prompt streamed from glm-serve: $(tail -n 1 <<<"$P" | jq -c .)" test "$(tail -n 1 <<<"$P" | jq -r .done)" = true
+check "feed: Jobs, the kill switch, Promote, copilot runs and model events" test "$(API '/feed?limit=500' | jq -r '[.events[].source] | unique | join(",")')" = "control,copilot,model,pipeline,serving"
+check "audit: the copilot run's start and stop by user ci" test "$(API /control | jq -r --arg id "$RID" '[.audit[] | select(.source == "copilot" and .run_id == $id) | "\(.stage):\(.who.user)"] | sort | join(",")')" = "end:ci,start:ci,stop:ci"
+check "audit: the free prompt and its answer" test "$(API /control | jq -r '[.audit[] | select(.source == "model" and .stage == "prompt")][0].data.prompt')" = "Say hello."
+kill $PF2 2>/dev/null
 
 kill $PF 2>/dev/null
 echo

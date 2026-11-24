@@ -1,7 +1,7 @@
 # Kubernetes deployment (deploy/k8s) on throwaway kind clusters with Calico, so network policies are enforced.
 #   kind      fast: stub console; deploy, network policies, login, RBAC, Isolate and Kill (deploy/k8s/tests/e2e.sh)
 #   pipeline  the real console image built from this commit (CPU torch); every pipeline stage as a Job on a tiny GLM,
-#             then Promote / Rollback (deploy/k8s/tests/pipeline-e2e.sh)
+#             then Promote / Rollback, the kill switch, and copilot runs through real n8n (deploy/k8s/tests/pipeline-e2e.sh)
 name: k8s e2e
 
 on:
@@ -13,6 +13,8 @@ on:
       - "deploy/entrypoint.sh"
       - "app/**"
       - "abliterate/**"
+      - "deploy/n8n/**"
+      - "copilot/operator_contract.json"
       - ".github/workflows/k8s-e2e.yml"
   workflow_dispatch: {}
 
@@ -69,6 +71,12 @@ jobs:
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
+
+      - name: n8n workflow tests (generated workflow up to date, policy, Code nodes)
+        run: |
+          node deploy/n8n/build_workflow.js --check
+          node deploy/n8n/policy.test.js
+          node deploy/n8n/workflow.test.js
 
       - name: Build the console image (CPU torch)
         run: docker build -f deploy/Dockerfile --build-arg TORCH_FLAVOR=cpu -t ghcr.io/thrizzo/redteam-llm-lab:ci .

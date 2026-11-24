@@ -219,3 +219,22 @@ body.wiz{display:block;overflow:auto}
 .ctlbtns .btn{min-width:78px}
 #ctlReason{width:100%;max-width:520px;margin-top:10px}
 @media (max-width:700px){ .sysmini{flex-wrap:wrap;gap:8px} }
+/* copilot panel */
+.cp-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+@media (max-width:900px){ .cp-grid{grid-template-columns:minmax(0,1fr)} .panel{padding:16px 16px 60px} }
+#copilotPanel label.small{display:block;margin:10px 0 4px}
+.cp-events{display:flex;flex-direction:column;max-height:440px;overflow:auto;font-size:12.5px;margin-top:8px}
+.cp-ev{display:grid;grid-template-columns:64px 96px minmax(0,1fr);gap:8px;padding:5px 2px;border-bottom:1px solid var(--grid)}
+.cp-ev .t{color:var(--muted);font-family:var(--mono);font-size:11px}
+.cp-ev .s{font-family:var(--mono);font-size:11px;color:var(--ink2);overflow-wrap:anywhere}
+.cp-ev .m{overflow-wrap:anywhere}
+.cp-ev.warn .s{color:var(--warn)}
+.cp-ev.error .s{color:var(--critical)}
+.cp-cmd{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);background:var(--page);border:1px solid var(--axis);border-radius:8px;padding:8px 10px;margin:6px 0}
+.cp-answer{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--page);border:1px solid var(--axis);border-radius:9px;padding:10px;min-height:48px;font-family:var(--mono);font-size:12.5px;margin:8px 0 0}
+.cp-reasons{margin:6px 0 0;padding-left:18px}
+.cp-runrow{cursor:pointer}
+.cp-runrow:hover td{color:var(--accent)}
+#cpRuns{overflow-x:auto}
+/* the header holds more buttons in the Kubernetes console: below 1400 px the steps drop their subtitles */
+@media (max-width:1400px){ header .stages li small{display:none} }

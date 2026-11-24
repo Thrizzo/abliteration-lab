@@ -505,3 +505,106 @@ async function ctlAct(action){
 ['kill','isolate','release','start'].forEach(a=>{ $('#ctl'+a[0].toUpperCase()+a.slice(1)).onclick=()=>ctlAct(a); });
 $('#modelMini').onclick=()=>$('#serveToggle').click();
 ctlLoad().then(ok=>{ if(ok) setInterval(ctlLoad, 5000); });
+
+// ------------------------------------------------------------------ copilot runs, free prompts, live feed (Kubernetes)
+// Everything from n8n, the models or the form is data: it reaches the page only through esc() / textContent.
+const CP = {run:null, runT:null, feedT:null, feedNext:0, feed:[]};
+const escA = s => esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const fmtTime = ts => { const d=new Date(ts); return isNaN(d) ? '' : d.toLocaleTimeString(); };
+const lvl = l => l==='error' ? 'error' : (l==='warn' ? 'warn' : '');
+const evRow = (e, withSource) => `<div class="cp-ev ${lvl(e.level)}"><span class="t">${esc(fmtTime(e.ts))}</span><span class="s">${esc(withSource ? e.source+' · '+e.stage : e.stage)}</span><span class="m">${esc(e.message)}</span></div>`;
+const RUN_BADGE = {running:'warn', waiting:'warn', done:'pass', error:'fail', crashed:'fail', lost:'fail', canceled:'ghost'};
+function cpResultHtml(r){
+  if(!r) return '';
+  const kv = [['target', r.target, 'mono'], ['rationale', r.rationale], ['judge', r.judge==null ? null : (r.judge || '(empty answer)')], ['tier', r.tier, 'mono']]
+    .filter(x => x[1]).map(([k, v, c]) => `<b>${k}</b><span class="${c||''}">${esc(v)}</span>`).join('');
+  return `<div class="cp-result"><div class="row" style="margin:0 0 6px"><span class="badge ${r.allowed?'pass':'fail'}">${r.allowed?'authorized':'blocked'}</span><b>${esc(r.title)}</b></div>`
+    + (r.command ? `<code class="cp-cmd">${esc(r.command)}</code>` : '')
+    + (kv ? `<div class="kv">${kv}</div>` : '')
+    + ((r.reasons||[]).length ? `<ul class="small cp-reasons">${r.reasons.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>` : '')
+    + `<div class="small" style="margin-top:6px"><b>Next:</b> ${esc(r.next)}</div></div>`;
+}
+function cpRenderRun(){
+  const r=CP.run; if(!r) return;
+  $('#cpRunCard').style.display='';
+  $('#cpRunTitle').innerHTML = `Run ${esc(r.id)} <span class="badge ${RUN_BADGE[r.status]||'ghost'}">${esc(r.status)}</span>`;
+  $('#cpStop').disabled = !['running','waiting'].includes(r.status);
+  $('#cpResult').innerHTML = cpResultHtml(r.result);
+  $('#cpEvents').innerHTML = (r.events||[]).map(e=>evRow(e, false)).join('');
+}
+async function cpShowRun(id){
+  clearTimeout(CP.runT);
+  try{ CP.run=await api('/copilot/runs/'+encodeURIComponent(id)); }catch(e){ toast(e.message, true); return; }
+  cpRenderRun();
+  if(['running','waiting'].includes(CP.run.status) && $('#copilotPanel').classList.contains('open'))
+    CP.runT=setTimeout(()=>cpShowRun(id), CP.run.status==='waiting' ? 5000 : 1000);
+  else cpLoad();
+}
+async function cpLoad(){
+  let s; try{ s=await api('/copilot'); }catch(e){ return false; }        // 404 outside Kubernetes: no copilot button
+  $('#copilotToggle').style.display='';
+  $('#cpConn').innerHTML = s.configured
+    ? `<span class="badge pass">connected</span> n8n at <span class="mono">${esc(s.n8n)}</span>`
+    : `<span class="badge warn">not connected</span> missing: <span class="mono">${esc((s.missing||[]).join(', '))}</span>. Run <span class="mono">deploy/n8n/connect_console.py</span> once (deploy/k8s/README.md, section Copilot).`;
+  $('#cpRun').disabled = !s.configured;
+  $('#cpModelName').textContent = (s.model && s.model.name) || 'glm-abl';
+  $('#cpSend').disabled = !(s.model && s.model.configured);
+  const runs=s.runs||[];
+  $('#cpRuns').innerHTML = runs.length ? `<table><tr><th>run</th><th>task</th><th>target</th><th>status</th><th>result</th></tr>${runs.map(r=>`<tr data-run="${escA(r.id)}" class="cp-runrow"><td class="mono">${esc(r.id)}</td><td>${esc(r.task)}</td><td class="mono">${esc(r.target)}</td><td><span class="badge ${RUN_BADGE[r.status]||'ghost'}">${esc(r.status)}</span></td><td>${esc(r.title||'')}</td></tr>`).join('')}</table>` : '<div class="empty">No runs from this console yet.</div>';
+  $('#cpRuns').querySelectorAll('[data-run]').forEach(tr=>tr.onclick=()=>cpShowRun(tr.dataset.run));
+  return true;
+}
+async function cpFeedLoad(){
+  let f; try{ f=await api('/feed?after='+CP.feedNext+'&limit=300'); }catch(e){ return; }
+  if(!f.events.length) return;
+  CP.feed=CP.feed.concat(f.events).slice(-500); CP.feedNext=f.next; cpFeedRender();
+  if(f.events.some(e=>e.source==='copilot')) cpLoad();
+}
+function cpFeedRender(){
+  const src=$('#cpFeedSrc').value, ev=CP.feed.filter(e=>!src || e.source===src).slice(-200).reverse();
+  $('#cpFeed').innerHTML = ev.length ? ev.map(e=>evRow(e, true)).join('') : '<div class="empty">Nothing yet.</div>';
+}
+$('#cpFeedSrc').onchange=cpFeedRender;
+$('#cpRun').onclick=async()=>{
+  const task=$('#cpTask').value.trim(), target=$('#cpTarget').value.trim();
+  if(!task || !target) return toast('task and target are both needed', true);
+  $('#cpRun').disabled=true;
+  try{ const r=await api('/copilot/run', {task, target}); toast(`copilot run ${r.id} started`); cpShowRun(r.id); }catch(e){ toast(e.message, true); }
+  $('#cpRun').disabled=false;
+};
+$('#cpStop').onclick=async()=>{
+  const r=CP.run; if(!r || !confirm(`Stop copilot run ${r.id} in n8n?`)) return;
+  try{ await api('/copilot/runs/'+encodeURIComponent(r.id)+'/stop', {}); toast('stopped'); }catch(e){ toast(e.message, true); }
+  cpShowRun(r.id);
+};
+$('#cpSend').onclick=async()=>{
+  const prompt=$('#cpPrompt').value.trim(); if(!prompt) return;
+  const out=$('#cpAnswer'), info=$('#cpPromptInfo'); out.textContent=''; info.textContent='streaming…'; $('#cpSend').disabled=true;
+  try{
+    const r=await fetch('/api/model/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({prompt, max_tokens:+$('#cpMax').value || 512})});
+    if(!r.ok){ let m=r.statusText; try{ m=(await r.json()).detail || m; }catch(e){} throw new Error(m); }
+    const rd=r.body.getReader(), dec=new TextDecoder(); let buf='';
+    for(;;){
+      const {value, done}=await rd.read(); if(done) break;
+      buf+=dec.decode(value, {stream:true}); let i;
+      while((i=buf.indexOf('\n'))>=0){
+        const line=buf.slice(0, i); buf=buf.slice(i+1); if(!line.trim()) continue;
+        const ev=JSON.parse(line);
+        if(ev.token) out.textContent+=ev.token;
+        else if(ev.done) info.textContent=`${ev.tokens} pieces in ${ev.ms} ms`;
+        else if(ev.error){ info.textContent=''; toast(ev.error, true); }
+      }
+    }
+  }catch(e){ info.textContent=''; toast(e.message, true); }
+  $('#cpSend').disabled=false;
+};
+$('#copilotToggle').onclick=()=>{
+  ['#dataPanel','#sbomPanel','#servePanel'].forEach(p=>$(p).classList.remove('open'));
+  $('#copilotPanel').classList.add('open'); cpLoad(); cpFeedLoad();
+  clearInterval(CP.feedT); CP.feedT=setInterval(cpFeedLoad, 1500);
+  if(CP.run) cpShowRun(CP.run.id);
+};
+const cpClose=()=>{ $('#copilotPanel').classList.remove('open'); clearInterval(CP.feedT); clearTimeout(CP.runT); };
+$('#copilotClose').onclick=cpClose;
+['#dataToggle','#sbomToggle','#serveToggle'].forEach(b=>$(b).addEventListener('click', cpClose));
+cpLoad();

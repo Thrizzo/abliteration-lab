@@ -24,6 +24,8 @@ services:
       LAB_AUTORUN_READONLY: ${LAB_AUTORUN_READONLY:-true}        # passive recon that cleared every gate runs without a prompt
       LAB_AUTORUN_ACTIVE_RECON: ${LAB_AUTORUN_ACTIVE_RECON:-false}  # opt-in: also auto-run safe-category nmap NSE + sqlmap enumerate-only
       LAB_RUNNER_URL: ${LAB_RUNNER_URL:-}          # your own executor endpoint; empty = nothing to run against
+      # the operator is an OpenAI-compatible chat model: credential Base URL http://ollama:11434/v1, model name below
+      COPILOT_OPERATOR_MODEL: ${COPILOT_OPERATOR_MODEL:-glm-edge-1.5b-chat-abl:latest}
       # n8n 2.x blocks $env in Code nodes and expressions by default; the copilot reads the settings above through it.
       # Trade-off: any Code node can then read this container's environment, including N8N_ENCRYPTION_KEY. Acceptable
       # for a single-user lab where only you author workflows (model output is data, never evaluated as code).

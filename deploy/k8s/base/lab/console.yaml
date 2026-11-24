@@ -37,6 +37,7 @@ spec:
             - { name: ABL_RUNNER, value: k8s }
             - { name: LAB_JOBS_SETTINGS, value: /etc/lab/jobs.json }
             - { name: LAB_STATE_DIR, value: /var/lib/lab }                  # the console's copy of glm-serve-allow
+            - { name: COPILOT_SECRETS_DIR, value: /etc/lab-copilot }         # Secret "copilot": deploy/n8n/connect_console.py
             - { name: OLLAMA_HOST, value: "http://ollama.lab-copilot.svc:11434" }
             - { name: QDRANT_URL, value: "http://qdrant.lab-copilot.svc:6333" }
             - { name: RAG_COLLECTION, value: writeups }
@@ -48,6 +49,7 @@ spec:
             - { name: workspace, mountPath: /workspace }
             - { name: lab-jobs, mountPath: /etc/lab, readOnly: true }
             - { name: console-state, mountPath: /var/lib/lab }
+            - { name: copilot, mountPath: /etc/lab-copilot, readOnly: true }
           resources:
             requests: { cpu: "1", memory: 4Gi }
             limits: { memory: 16Gi }              # the in-process layer lab loads small models (GLM-Edge-1.5B: ~7 GB in float32)
@@ -94,6 +96,9 @@ spec:
         # Release recreates glm-serve-allow from the copy kept here, not on the workspace, which Jobs (and, in dev, the
         # model server) can write. It survives container restarts; a new pod takes a fresh copy at start.
         - { name: console-state, emptyDir: { sizeLimit: 1Mi } }
+        # the copilot's webhook secret and n8n API key. Optional: the console starts without them, and picks them up
+        # (the kubelet refreshes the files) once connect_console.py has created the Secret: no restart needed.
+        - { name: copilot, secret: { secretName: copilot, optional: true, defaultMode: 0440 } }
 ---
 apiVersion: v1
 kind: Service

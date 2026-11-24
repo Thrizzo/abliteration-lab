@@ -21,14 +21,15 @@ from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 import rundata  # noqa: E402
+import copilot_runs as CR  # noqa: E402
 from lab import Lab  # noqa: E402
 from datasets import Datasets, FILES as DATA_FILES  # noqa: E402
 from sbom import SbomJob  # noqa: E402
@@ -66,17 +67,28 @@ def run_dir_of(run_id):
 app = FastAPI(title="Red Team LLM Lab")
 
 
-@app.middleware("http")
-async def _same_origin_only(request, call_next):
+class SameOriginOnly:
     """CSRF: a browser sends the lab's basic-auth credentials with requests another site makes, so a page elsewhere could
     press Kill, Release or Promote. State-changing requests from another origin are refused; clients that send no
-    Origin / Sec-Fetch-Site headers (curl, n8n) are unaffected."""
-    if request.method not in ("GET", "HEAD", "OPTIONS"):
-        site, origin = request.headers.get("sec-fetch-site"), request.headers.get("origin")
-        host = (request.headers.get("host") or "").lower()
-        if (site and site not in ("same-origin", "none")) or (origin and urllib.parse.urlsplit(origin).netloc.lower() != host):
-            return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
-    return await call_next(request)
+    Origin / Sec-Fetch-Site headers (curl, n8n) are unaffected. Plain ASGI, so streamed answers pass through untouched."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+            h = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []}
+            site, origin, host = h.get("sec-fetch-site"), h.get("origin"), h.get("host", "").lower()
+            if (site and site not in ("same-origin", "none")) or (origin and urllib.parse.urlsplit(origin).netloc.lower() != host):
+                body = b'{"detail":"cross-site request refused"}'
+                await send({"type": "http.response.start", "status": 403,
+                            "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(SameOriginOnly)
 lab = Lab(PROJECT)
 datasets = Datasets(os.path.join(PROJECT, "data"))
 sbom = SbomJob(PROJECT)
@@ -185,6 +197,19 @@ if K8S:
 else:
     pipeline = Pipeline()
     serving = audit = control = None
+
+# the live feed: copilot runs, free prompts, the kill switch and Promote/Rollback (audit records), Jobs, model state
+FEED = CR.Feed()
+if K8S:
+    audit.feed = FEED
+    pipeline.feed = FEED
+# copilot runs go through n8n (its webhook + API); the secrets come from the mounted Secret "copilot", read on use
+copilot = CR.CopilotRuns(os.environ.get("N8N_URL"), os.environ.get("COPILOT_SECRETS_DIR", "/etc/lab/copilot"), FEED, audit=audit,
+                         http_error=HTTPException)
+# free prompts straight to the model server (OpenAI-compatible: vLLM, or Ollama's /v1 in dev)
+model_chat = CR.ModelChat(os.environ.get("GLM_SERVE_URL"),
+                          (_k8s_settings.get("serving") or {}).get("servedName", "glm-abl") if K8S else os.environ.get("GLM_SERVE_MODEL", "glm-abl"),
+                          FEED, audit=audit)
 PY = PL.pipeline_python(PROJECT)
 
 
@@ -489,6 +514,54 @@ def control_action(action: str, b: Action, request: Request):
     return _control().act(action, _who(request), b.reason[:500])
 
 
+# ------------------------------------------------------------------------- API: live feed, copilot runs, free prompts
+@app.get("/api/feed")
+def feed_since(after: int = 0, source: str = "", limit: int = 200):
+    """Everything after the last seq the browser saw (it polls). Model and form text is data: the browser escapes it."""
+    return FEED.since(after, min(max(limit, 1), 500), source or None)
+
+
+class CopilotRun(BaseModel):
+    task: str = Field(min_length=1, max_length=2000)
+    target: str = Field(min_length=1, max_length=253)
+
+
+@app.get("/api/copilot")
+def copilot_status():
+    return {**copilot.status(), "model": {"configured": bool(model_chat.base), "name": model_chat.model}}
+
+
+@app.post("/api/copilot/run")
+def copilot_run(b: CopilotRun, request: Request):
+    """Starts the n8n copilot (scope gate, retrieval, operator, policy gate, judge). It suggests; nothing executes."""
+    return copilot.start(b.task, b.target, _who(request))
+
+
+@app.get("/api/copilot/runs/{run_id}")
+def copilot_get(run_id: str):
+    return copilot.get(run_id)
+
+
+@app.post("/api/copilot/runs/{run_id}/stop")
+def copilot_stop(run_id: str, b: Action, request: Request):
+    return copilot.stop(run_id, _who(request))
+
+
+class Prompt(BaseModel):
+    prompt: str = Field(min_length=1, max_length=20000)
+    max_tokens: int = Field(512, ge=1, le=4096)
+
+
+@app.post("/api/model/chat")
+def model_chat_stream(b: Prompt, request: Request):
+    """A free prompt to the served model, streamed as NDJSON ({"token"} ..., then {"done"} or {"error"}), audited."""
+    if not model_chat.base:
+        raise HTTPException(404, "no model server configured (GLM_SERVE_URL)")
+    who = _who(request)
+    return StreamingResponse((json.dumps(ev) + "\n" for ev in model_chat.stream(b.prompt, b.max_tokens, who)),
+                             media_type="application/x-ndjson")
+
+
 @app.post("/api/pipeline/stop")
 def pipeline_stop():
     return pipeline.stop()
@@ -715,6 +788,7 @@ def _startup():
     if K8S:
         pipeline.attach()
         threading.Thread(target=control.snapshot, daemon=True).start()     # a copy of glm-serve-allow for Release
+        threading.Thread(target=CR.ModelWatch(control, FEED).run, daemon=True).start()   # model state changes -> feed
 
 
 @app.on_event("shutdown")

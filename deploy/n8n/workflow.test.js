@@ -82,12 +82,38 @@ for (const n of wf.nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   ok('ambiguous verdict -> not authorized', fuzzy.allowed === false);
 }
 
-// ---- model nodes: the judge runs without a thinking trace, the operator is left to the model's default ----
+// ---- model nodes: the judge runs without a thinking trace; the operator is an OpenAI-compatible chat model ----
 {
   const judge = node('Ollama: judge model (regular)').parameters.options;
-  const operator = node('Ollama: abliterated model').parameters.options;
+  const op = node('Operator model (OpenAI-compatible)');
   ok('judge: think=false, temperature 0 (no minutes-long hidden trace on CPU)', judge.think === false && judge.temperature === 0, judge);
-  ok('operator: think not forced', !('think' in operator), operator);
+  ok('operator: lmChatOpenAi v1.3 (vLLM and Ollama both serve /v1/chat/completions)', op.type === '@n8n/n8n-nodes-langchain.lmChatOpenAi' && op.typeVersion === 1.3, op);
+  ok('operator: chat completions, not the Responses API (on by default in v1.3)', op.parameters.responsesApiEnabled === false, op.parameters);
+  ok('operator: temperature 0, think not forced', op.parameters.options.temperature === 0 && !('think' in op.parameters.options), op.parameters.options);
+  ok('operator: served name from COPILOT_OPERATOR_MODEL, glm-abl by default', op.parameters.model.__rl === true && op.parameters.model.mode === 'id'
+    && op.parameters.model.value.includes('$env.COPILOT_OPERATOR_MODEL') && op.parameters.model.value.includes('"glm-abl"'), op.parameters.model);
+  const into = (target, type) => Object.entries(wf.connections).flatMap(([src, c]) => (c[type] || []).flat().filter((o) => o.node === target).map(() => src));
+  ok('operator model feeds the operator chain', JSON.stringify(into('Abliterated operator (suggest)', 'ai_languageModel')) === JSON.stringify(['Operator model (OpenAI-compatible)']));
+}
+
+// ---- console webhook: header secret, answers at once with the execution id, then the same pipeline ----
+{
+  const wh = node('Console webhook');
+  ok('webhook: POST /webhook/copilot-run, header auth, answered by a Respond node', wh.type === 'n8n-nodes-base.webhook'
+    && wh.parameters.httpMethod === 'POST' && wh.parameters.path === 'copilot-run' && wh.parameters.authentication === 'headerAuth'
+    && wh.parameters.responseMode === 'responseNode' && !!wh.webhookId, wh);
+  const rs = node('Respond: execution id');
+  ok('respond: JSON with the execution id, 202', rs.parameters.respondWith === 'json' && rs.parameters.responseBody.includes('$execution.id')
+    && rs.parameters.options.responseCode === 202, rs.parameters);
+  ok('respond passes the request on (no enableResponseOutput)', !rs.parameters.enableResponseOutput);
+  const kids = (n) => ((wf.connections[n] || {}).main || []).flat().map((c) => c.node);
+  ok('webhook -> respond -> Define task + target', JSON.stringify(kids('Console webhook')) === JSON.stringify(['Respond: execution id'])
+    && JSON.stringify(kids('Respond: execution id')) === JSON.stringify(['Define task + target']));
+  const set = Object.fromEntries(node('Define task + target').parameters.assignments.assignments.map((a) => [a.name, a.value]));
+  ok('console runs read task / target from the body, form runs from the fields', set.task.includes('$json.body.task') && set.task.includes(': $json.task')
+    && set.target.includes('$json.body.target') && set.target.includes(': $json.target'), set);
+  ok('source: "console" when the webhook ran, else "form"', set.source.includes('$("Console webhook").isExecuted') && set.source.includes('"console"') && set.source.includes('"form"'), set.source);
+  ok('requestedBy is bounded', set.requestedBy.includes('.slice(0, 120)'), set.requestedBy);
 }
 
 // ---- web form: two required fields that land in task / target ----
@@ -99,7 +125,8 @@ for (const n of wf.nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   ok('form: published at /form/pentest-copilot', form.parameters.options.path === 'pentest-copilot');
   const set = node('Define task + target').parameters.assignments.assignments;
   ok('form input is trimmed into task / target', set.some((a) => a.name === 'task' && a.value.includes('$json.task')) && set.some((a) => a.name === 'target' && a.value.includes('$json.target')), set);
-  ok('no manual trigger left (one way in)', !wf.nodes.some((n) => n.type === 'n8n-nodes-base.manualTrigger'));
+  ok('no manual trigger (two ways in: the form and the console webhook)', !wf.nodes.some((n) => n.type === 'n8n-nodes-base.manualTrigger')
+    && wf.nodes.filter((n) => /Trigger$|\.webhook$/.test(n.type)).map((n) => n.name).sort().join('|') === 'Console webhook|Copilot form');
 }
 
 // ---- graph: a blocked run can never reach approval or execution ----
@@ -109,12 +136,37 @@ for (const n of wf.nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   const danger = ['Auto-run (recon tier)?', 'Human approval', 'Execute on lab target (DISABLED)'];
   for (const b of ['Blocked (out of scope)', 'Blocked (policy)', 'Blocked (judge rejected)']) {
     const r = reach(b);
-    ok(`${b} ends on the blocked page, never reaches approval/execute`, r.has('Result page: blocked') && danger.every((d) => !r.has(d)), [...r]);
+    ok(`${b} ends at the blocked result (page for form runs), never reaches approval/execute`,
+      r.has('Result text (blocked)') && r.has('Result page: blocked') && danger.every((d) => !r.has(d)), [...r]);
   }
-  // the only way into the authorized page is the true branch of Authorized?
+  // the only way into the authorized result is the true branch of Authorized?
   const into = (target) => Object.entries(wf.connections).flatMap(([src, c]) => (c.main || []).flatMap((outs, i) => outs.filter((o) => o.node === target).map(() => `${src}#${i}`)));
-  ok('authorized page is fed only by Authorized? (true)', JSON.stringify(into('Result text (authorized)')) === JSON.stringify(['Authorized?#0']), into('Result text (authorized)'));
-  ok('auto-run split is fed only by the authorized page', JSON.stringify(into('Auto-run (recon tier)?')) === JSON.stringify(['Result page: authorized#0']), into('Auto-run (recon tier)?'));
+  ok('authorized result is fed only by Authorized? (true)', JSON.stringify(into('Result text (authorized)')) === JSON.stringify(['Authorized?#0']), into('Result text (authorized)'));
+  ok('the form-run split is fed only by the authorized result', JSON.stringify(into('Form run? (authorized)')) === JSON.stringify(['Result text (authorized)#0']), into('Form run? (authorized)'));
+  ok('auto-run split: the authorized page (form runs) or the false branch of Form run? (console runs), nothing else',
+    JSON.stringify(into('Auto-run (recon tier)?').sort()) === JSON.stringify(['Form run? (authorized)#1', 'Result page: authorized#0']), into('Auto-run (recon tier)?'));
+  for (const [pageNode, split] of [['Result page: authorized', 'Form run? (authorized)'], ['Result page: blocked', 'Form run? (blocked)']]) {
+    const cond = node(split).parameters.conditions.conditions[0].leftValue;
+    ok(`${pageNode}: only form runs (true branch of ${split}: source is not "console")`,
+      JSON.stringify(into(pageNode)) === JSON.stringify([`${split}#0`]) && cond === '={{ $json.source !== "console" }}', [into(pageNode), cond]);
+  }
+  ok('blocked console runs end there: Form run? (blocked) has no false branch', ((wf.connections['Form run? (blocked)'] || {}).main || [])[1] === undefined
+    || ((wf.connections['Form run? (blocked)'].main[1]) || []).length === 0);
+}
+
+// ---- "source" reaches the form-run splits through every Code node (else a console run would hit a form page) ----
+{
+  const env = { LAB_ALLOWLIST: '10.10.11.0/24', LAB_AUTORUN_READONLY: 'true' };
+  const defined = { task: 'Enumerate SMB', target: '10.10.11.42', source: 'console', requestedBy: 'admin' };
+  const scope = run('Scope gate', { json: defined, env })[0].json;
+  const refs = run('Build reference context', { input: [{}], nodesOut: { 'Scope gate': scope } })[0].json;
+  const parsed = run('Parse proposal', { json: { text: '{"command": "nmap -sV 10.10.11.42", "target": "10.10.11.42"}' }, nodesOut: { 'Define task + target': defined, 'Scope gate': scope } })[0].json;
+  const pg = run('Policy gate', { json: parsed, env })[0].json;
+  const judged = run('Apply judge decision', { json: { text: 'AUTHORIZE' }, nodesOut: { 'Policy gate': pg }, env })[0].json;
+  const result = run('Result text (authorized)', { json: judged, nodesOut: { 'Build reference context': refs } })[0].json;
+  const blockedOut = run('Result text (blocked)', { json: run('Scope gate', { json: { ...defined, target: '8.8.8.8' }, env })[0].json })[0].json;
+  ok('source and requestedBy survive scope, retrieval, parse, policy, judge and result', [scope, refs, parsed, pg, judged, result, blockedOut]
+    .every((j) => j.source === 'console' && j.requestedBy === 'admin'), [scope, refs, parsed, pg, judged, result].map((j) => j.source));
 }
 
 // ---- result page text: right verdict per path; form and model text escaped, command shown exactly ----
