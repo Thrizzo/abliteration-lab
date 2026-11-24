@@ -1,7 +1,7 @@
 # Design: GLM-5.3 on Kubernetes, from abliteration to the copilot
 
-Status: phases 0 and 1 are built (`deploy/k8s/`, tested on kind with Calico in CI); the rest is the plan. Section 10 is
-the build order.
+Status: phases 0 to 2 are built (`deploy/k8s/`, `app/k8sjobs.py`, tested on kind with Calico in CI); the rest is the plan.
+Section 10 is the build order.
 
 ## 1. What this adds
 
@@ -61,22 +61,21 @@ From `README.md` §6 and the model catalogue in `app/server.py`:
 ```mermaid
 flowchart TB
   user([Browser]) -->|"HTTPS + basic auth"| ing[Ingress]
-  subgraph control ["namespace: lab-control"]
-    console["Console (the lab app)"]
+  subgraph lab ["namespace: lab"]
+    console["Console (the lab app + login)"]
+    vllm["glm-serve (vLLM, 8 GPUs)"]
+    dl["download Job"]
+    ms["scan Job (8 GPUs)"]
+    ed["apply Job (CPU)"]
+    ev["validate Job (8 GPUs)"]
+    ws[("PVC workspace")]
+  end
+  subgraph copilot ["namespace: lab-copilot"]
     n8n["n8n (copilot engine)"]
     qdrant[("Qdrant")]
     ollama["Ollama (judge + embeddings)"]
   end
-  subgraph model ["namespace: lab-model"]
-    vllm["glm-serve (vLLM, 8 GPUs)"]
-    dl["download Job"]
-    ms["measure + scan Job (8 GPUs)"]
-    ed["edit Job (CPU)"]
-    ev["evaluate Job (8 GPUs)"]
-  end
   k8s{{"Kubernetes API"}}
-  models[("PVC models")]
-  ws[("PVC workspace")]
   hf(("Hugging Face"))
   ing --> console
   console -->|"webhook + API polling"| n8n
@@ -86,23 +85,22 @@ flowchart TB
   n8n -->|operator| vllm
   n8n -->|judge| ollama
   n8n -->|retrieve| qdrant
-  dl & ms & ed & ev --- models
-  vllm -.->|"read-only"| models
+  dl & ms & ed & ev --- ws
+  vllm -.->|"read-only"| ws
   console --- ws
   dl -->|"the only egress"| hf
 ```
 
-- **`lab-control`:** the console, n8n, Qdrant, and Ollama for the judge and the embeddings.
+- **`lab`:** everything that touches the model weights: the console, the Jobs it starts, `glm-serve`, and the
+  **workspace** volume they share (models, runs with their own edited model each, datasets, GGUFs, serving history,
+  uploads).
+  - **Why one namespace:** a PersistentVolumeClaim belongs to one namespace, and all of these read or write the same
+    weights. The console mounts the workspace too, so the GUI shows runs, charts and logs exactly as with a local run.
   - **Login:** a Caddy sidecar in the console pod (basic auth). The app itself listens on 127.0.0.1 only, so the Ingress
     carries no auth annotations and any ingress controller works.
-- **`lab-model`:** vLLM serving the promoted abliterated model, and the abliteration Jobs.
-  - **Why the Jobs live here:** they read and write the same weights as the server, and a PersistentVolumeClaim belongs to
-    one namespace. Separate namespaces would need storage-specific static volumes.
   - **Consequence for the kill switch:** its permissions cover the whole namespace, so a mistaken pod delete can abort a
-    Job too, and nothing else may run here.
-- **Storage:**
-  - PVC `models`: base, candidates, promoted, previous;
-  - PVC `workspace`: runs, datasets, uploads, audit log.
+    Job too, and nothing but lab workloads may run here.
+- **`lab-copilot`:** n8n, Qdrant, and Ollama for the judge and the embeddings.
 
 | Component | Kind | Reachable from |
 | --- | --- | --- |
@@ -111,14 +109,14 @@ flowchart TB
 | Qdrant | StatefulSet | n8n, the console |
 | Ollama (judge, embeddings) | Deployment | n8n, the console |
 | glm-serve (vLLM) | Deployment, 0 or 1 replicas | n8n and the console only |
-| download / measure / edit / evaluate | one Job per stage | nothing |
+| download / scan / apply / validate / deploy | one Job per stage, from a fixed template in `app/k8sjobs.py` | nothing |
 
 ### On-prem and cloud overlays
 
 | | `onprem` (e.g. RKE2) | `cloud` (AKS, EKS, GKE or a GPU cloud) |
 | --- | --- | --- |
 | GPUs | NVIDIA GPU Operator, fixed GPU node | GPU node pool that scales from 0, tainted for model workloads |
-| `models` volume | local NVMe on the GPU node (pins model workloads to it) or RWX (Longhorn, CephFS, NFS) | RWX file storage (Azure Files NFS, EFS, Filestore), or a block disk plus node affinity |
+| workspace volume | local NVMe on the GPU node (pins the console and every Job to it) or RWX (Longhorn, CephFS, NFS) | RWX file storage (Azure Files NFS, EFS, Filestore), or a block disk plus node affinity |
 | Network policies | RKE2's default Canal enforces them | AKS: Azure NPM or Cilium. EKS: network policies enabled in the VPC CNI. GKE: Dataplane V2. |
 | Ingress | ingress-nginx | the provider's ingress-nginx or equivalent |
 | Cost | none per hour | Kill scales the model to 0, so the autoscaler can remove the idle GPU node: Kill also stops the bill |
@@ -136,11 +134,18 @@ flowchart LR
   H -.->|Rollback| J["Previous version"]
 ```
 
-- **Run folder:** every run is `models/runs/<run-id>/` with a `manifest.json` holding:
-  - the base repo and revision;
-  - the chosen layers and direction;
-  - the pipeline's git commit;
-  - the eval metrics and the state.
+- **Run folder (built):** every run is `runs/abliterate_<id>/` on the workspace, written by the pipeline's own stages:
+  - `run.json` (model, arguments, chosen layer, state, `out_dir`);
+  - `events.jsonl` and `run.log`;
+  - the scan, apply and validation results;
+  - the run's own edited model in `model/` (`--out-dir`), and its own GGUF (`gguf/<slug>-abl-<run>-<type>.gguf`).
+- **Stages as Jobs (built):** the console runs each stage (`download`, `scan`, `apply`, `validate`, `deploy`) as a Job
+  from a fixed template.
+  - **Per stage:** resources, placement and network labels from ConfigMap `lab-jobs`. Only download Jobs reach the
+    internet.
+  - **Live log:** the pod log streams into the same GUI.
+  - **Stop:** deletes the Job.
+  - **Console restart:** the new console re-attaches to a running Job.
 - **Evaluation:**
   - **Refusals:** refusal rate on held-out harmful prompts, base vs candidate.
   - **Harmless capability:** agreement with the base model on harmless prompts, plus a small fixed benchmark subset.
@@ -148,10 +153,14 @@ flowchart LR
     `policy_allowed`). This needs an OpenAI-compatible client in `eval_operator`, which today only talks to Ollama.
   - **Gate:** configurable thresholds give pass or fail. **Promote** stays disabled until the report exists, and a failed
     gate needs a typed confirmation.
-- **Promote:** points the `glm-serve` ConfigMap at the run's checkpoint and restarts the Deployment. The copilot uses the
-  new model from the next request. The previous version stays on disk, and **Rollback** is the same step in reverse.
+- **Promote (built):** the copilot uses the new model from the next request.
+  - **vLLM:** sets `MODEL_PATH` in ConfigMap `glm-serve` to the run's model folder and restarts a running `glm-serve` pod.
+  - **Ollama, dev overlay:** publishes the run's GGUF to `glm-serve` as `glm-abl`.
+  - **Rollback:** promotes the run before.
+  - **History:** every change is kept in `serving/history.json`. The gate below (thresholds, typed confirmation) is not
+    built yet: Promote is a confirmed click on the serving panel.
 - **Operator node:** today the n8n operator node talks to Ollama. `build_workflow.js --operator openai` will generate n8n's
-  OpenAI Chat Model node instead, with the credential's *Base URL* set to `http://glm-serve.lab-model.svc:8000/v1` (n8n 2.48's
+  OpenAI Chat Model node instead, with the credential's *Base URL* set to `http://glm-serve.lab.svc:8000/v1` (n8n 2.48's
   OpenAI credential has that field). GLM-5.x reasons before it answers, so vLLM runs with its GLM reasoning parser and n8n
   receives only the answer.
 
@@ -235,7 +244,7 @@ sequenceDiagram
 Kubernetes network policies only ever **allow**. A "deny everything" policy added next to an existing allow policy changes
 nothing, because traffic is allowed as soon as any policy allows it. So isolation works by **removing the allow**:
 
-- **Always in `lab-model`:** `default-deny`, which selects every pod and allows nothing in or out.
+- **Always in `lab`:** `default-deny`, which selects every pod and allows nothing in or out.
 - **The one opening:** `glm-serve-allow`, which allows traffic in on port 8000 from n8n and the console. Nothing is allowed
   out, so vLLM runs with `HF_HUB_OFFLINE=1`.
 
@@ -273,13 +282,16 @@ the node 0.4 s after Kill started, and nothing restarted it. Ollama exits on SIG
 After a kill:
 - **Start:** an explicit button scales the model back to 1 and recreates the allow policy. GLM-5.3 takes minutes to load.
 
-**Permissions** for the console's ServiceAccount, in `lab-model` only:
+**Permissions** for the console's ServiceAccount, in `lab` only:
 
 | Resource | Verbs | Limited to |
 | --- | --- | --- |
 | `deployments/scale` | get, patch | `glm-serve` |
 | `deployments` | get, watch | `glm-serve` |
-| `pods` | get, list, watch, delete | the namespace; pods can't be limited by name, so `lab-model` holds only the model server and its Jobs |
+| `pods` | get, list, watch, delete | the namespace; pods can't be limited by name, so `lab` holds only lab workloads |
+| `pods/log` | get | the namespace (Job logs) |
+| `jobs` | get, list, watch, create, delete | the namespace (pipeline stages) |
+| `configmaps` | get, patch | `glm-serve` (Promote) |
 | `networkpolicies` | get, delete | `glm-serve-allow` |
 | `networkpolicies` | create | the namespace; Kubernetes can't limit create by name |
 
@@ -288,9 +300,9 @@ No `pods/exec`, nothing cluster-wide. The kill path depends only on the API serv
 **Fallback** when the console itself is down:
 
 ```bash
-kubectl -n lab-model delete networkpolicy glm-serve-allow
-kubectl -n lab-model scale deploy/glm-serve --replicas=0
-kubectl -n lab-model delete pod -l app=glm-serve --grace-period=0 --force
+kubectl -n lab delete networkpolicy glm-serve-allow
+kubectl -n lab scale deploy/glm-serve --replicas=0
+kubectl -n lab delete pod -l app=glm-serve --grace-period=0 --force
 ```
 
 ## 9. Security
@@ -319,7 +331,7 @@ kubectl -n lab-model delete pod -l app=glm-serve --grace-period=0 --force
 | --- | --- | --- |
 | 0 ✅ | `dev` overlay: the whole stack with a small model (GLM-Edge on CPU, or GLM-4.5-Air on 4×H100) | kind with Calico in CI, then your cluster |
 | 1 ✅ | Kustomize base, `onprem` and `cloud` overlays. They contain:<br>namespaces, PVCs, RBAC, network policies, Ingress;<br>n8n, Qdrant, Ollama;<br>glm-serve at 0 replicas | `kubectl apply --dry-run=server`, kind |
-| 2 | Abliteration stages as Jobs with live logs, run registry, Promote and Rollback | kind with GLM-Edge on CPU |
+| 2 ✅ | Abliteration stages as Jobs with live logs, run registry, Promote and Rollback | kind: the real console image, every stage on a tiny GLM |
 | 3 | n8n webhook trigger, OpenAI-compatible operator node, console polling into the live feed, free prompts to vLLM | real n8n, vLLM stand-in |
 | 4 | Kill and Isolate with RBAC and audit | kind with Calico: time to kill, isolation cuts traffic |
 | 5 | Knowledge uploads incl. PDF, list and delete | unit tests, live ingest |
