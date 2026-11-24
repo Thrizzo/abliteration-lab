@@ -1,0 +1,11 @@
+[
+  {"in": "nmap -p- -T4 192.168.50.10", "out": "nmap -p- -T4 <other-host-ip>"},
+  {"in": "The site redirects to lantern.htb on 10.10.11.42", "out": "The site redirects to <other-host> on <other-host-ip>"},
+  {"in": "dc01.corp.local and fs01.acme.internal", "out": "<other-host> and <other-host>"},
+  {"in": "Apache 2.4.49, OpenSSH 7.2p2, Windows build 10.0.17763", "out": "Apache 2.4.49, OpenSSH 7.2p2, Windows build 10.0.17763"},
+  {"in": "odd 1.300.2.4 stays", "out": "odd 1.300.2.4 stays"},
+  {"in": "see https://github.com/fortra/impacket and nmap.org", "out": "see https://github.com/fortra/impacket and nmap.org"},
+  {"in": "smbclient -N -L //10.10.11.42/backups", "out": "smbclient -N -L //<other-host-ip>/backups"},
+  {"in": "five part 1.2.3.4.5 is a version", "out": "five part 1.2.3.4.5 is a version"},
+  {"in": "crackmapexec smb <IP_2> -u <USER_2> -d <HOST_1>", "out": "crackmapexec smb <other-host-ip> -u <USER_2> -d <other-host>"}
+]
