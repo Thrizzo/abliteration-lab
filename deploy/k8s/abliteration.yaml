@@ -1,4 +1,4 @@
-# Abliteration Lab on Kubernetes (Rancher / RKE2 / k3s).
+# Red Team LLM Lab (abliteration app) on Kubernetes (Rancher / RKE2 / k3s).
 #   kubectl apply -f deploy/k8s/abliteration.yaml
 #
 # Prerequisites on the cluster
@@ -20,7 +20,7 @@
 #   - secrets (the namespace must exist first: kubectl create namespace abliteration):
 #               htpasswd -c auth admin && kubectl -n abliteration create secret generic basic-auth --from-file=auth
 #               kubectl -n abliteration create secret generic hf --from-literal=token=hf_xxxxxxxx   (optional, gated repos)
-#   - the image in a registry the cluster can pull from (ghcr.io/thrizzo/abliteration-lab, built by the GitHub workflow).
+#   - the image in a registry the cluster can pull from (ghcr.io/thrizzo/redteam-llm-lab, built by the GitHub workflow).
 apiVersion: v1
 kind: Namespace
 metadata: { name: abliteration }
@@ -65,7 +65,7 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: app
-          image: ghcr.io/thrizzo/abliteration-lab:latest
+          image: ghcr.io/thrizzo/redteam-llm-lab:latest
           imagePullPolicy: IfNotPresent
           env:
             - { name: OLLAMA_HOST, value: "http://127.0.0.1:11434" }   # ollama runs in the same pod
@@ -120,7 +120,7 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/auth-type: basic
     nginx.ingress.kubernetes.io/auth-secret: basic-auth
-    nginx.ingress.kubernetes.io/auth-realm: "Abliteration Lab"
+    nginx.ingress.kubernetes.io/auth-realm: "Red Team LLM Lab"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Abliteration Lab</title>
+<title>Red Team LLM Lab</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="wiz">
@@ -11,7 +11,7 @@
 <div class="toast" id="toast"></div>
 
 <header class="wizhead">
-  <div class="brand"><div class="logo"></div><div><b>Abliteration</b><small>GLM family</small></div></div>
+  <div class="brand"><div class="logo"></div><div><b>Red Team LLM Lab</b><small>abliteration · GLM family</small></div></div>
   <ol class="stages">
     <li data-stage="model"><span class="n">1</span><div><b>Model</b><small id="stModel">choose a GLM model</small></div></li>
     <li data-stage="abl"><span class="n">2</span><div><b>Abliterate</b><small id="stAbl">not run</small></div></li>
@@ -52,7 +52,7 @@
         <span class="small" id="runInfo"></span>
       </div>
       <details><summary>Advanced</summary><div class="row">
-        <label class="small">device <select id="optDevice"><option value="cuda">cuda (one GPU)</option><option value="auto">auto (multi-GPU / CPU offload)</option></select></label>
+        <label class="small">device <select id="optDevice"><option value="cuda">cuda (one GPU)</option><option value="auto">auto (multi-GPU / CPU offload)</option><option value="cpu">cpu (no GPU, slow)</option></select></label>
         <label class="small"><input type="checkbox" id="optVerify" checked> reload and validate after the edit</label>
         <label class="small">prompts per group <input type="number" id="optTrain" value="256" min="16" max="2048" style="width:80px"></label>
         <label class="small">test prompts <input type="number" id="optTest" value="16" min="4" max="64" style="width:70px"></label>

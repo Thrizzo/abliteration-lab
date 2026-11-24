@@ -1,0 +1,5 @@
+# extras for copilot.train_qlora, on top of deploy/requirements.txt (torch, transformers 5.x, safetensors)
+# peft 0.17.x imports transformers.HybridCache, which transformers 5 removed: 0.22.0 is the first verified to work here
+peft==0.22.0
+# 4-bit QLoRA proper; CUDA only. Without it train_qlora falls back to a bf16/fp32 LoRA.
+bitsandbytes>=0.45; sys_platform != "darwin"

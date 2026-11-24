@@ -1,0 +1,68 @@
+# n8n + Qdrant for the Red Team LLM Lab, as an overlay on the main stack so both share the network with Ollama.
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env up -d
+#   # with GPU, add -f deploy/docker-compose.gpu.yml as usual
+#
+# n8n reaches the models at http://ollama:11434 and the writeup store at http://qdrant:6333 (use those as the Base URL /
+# Qdrant URL in its credentials). n8n is bound to localhost only, like Caddy; Qdrant is not published at all.
+# Import the workflow from deploy/n8n/workflows/pentest-copilot.json (Workflows -> ... -> Import from File) and Publish it;
+# then use the copilot at http://localhost:5678/form/pentest-copilot (Task + Target -> result page).
+# Fill the writeup store with:
+#   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
+#     run --rm app python -m copilot.ingest --src /workspace/writeups
+services:
+  n8n:
+    # pinned; bump deliberately and re-import the workflow if node versions change. Docker Hub by default: the same
+    # official image is on n8n's own registry (N8N_IMAGE=docker.n8n.io/n8nio/n8n:2.48.7) if Docker Hub is blocked for you
+    image: ${N8N_IMAGE:-n8nio/n8n:2.48.7}
+    restart: unless-stopped
+    environment:
+      # --- reach the models in the Ollama container (same compose network) ---
+      OLLAMA_HOST: http://ollama:11434
+      # --- lab scope, read by the workflow's Code nodes via $env ---
+      LAB_ALLOWLIST: ${LAB_ALLOWLIST:-10.10.10.0/24,192.168.56.0/24,127.0.0.1}
+      LAB_AUTORUN_READONLY: ${LAB_AUTORUN_READONLY:-true}        # passive recon that cleared every gate runs without a prompt
+      LAB_AUTORUN_ACTIVE_RECON: ${LAB_AUTORUN_ACTIVE_RECON:-false}  # opt-in: also auto-run safe-category nmap NSE + sqlmap enumerate-only
+      LAB_RUNNER_URL: ${LAB_RUNNER_URL:-}          # your own executor endpoint; empty = nothing to run against
+      # n8n 2.x blocks $env in Code nodes and expressions by default; the copilot reads the settings above through it.
+      # Trade-off: any Code node can then read this container's environment, including N8N_ENCRYPTION_KEY. Acceptable
+      # for a single-user lab where only you author workflows (model output is data, never evaluated as code).
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # --- local, single-user, http-on-loopback settings ---
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}   # approval resume links point here
+      N8N_SECURE_COOKIE: "false"                   # allow the cookie over plain http on localhost
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in deploy/.env (any long random string; keeps saved credentials readable across restarts)}
+      GENERIC_TIMEZONE: ${TZ:-UTC}
+      N8N_PERSONALIZATION_ENABLED: "false"
+    ports:
+      - "${N8N_BIND_ADDR:-127.0.0.1}:${N8N_PORT:-5678}:5678"   # localhost only; reach it over SSH tunnel / VPN
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      - ollama
+      - qdrant
+
+  # writeup store for retrieval (RAG); internal to the compose network, no published port
+  qdrant:
+    image: qdrant/qdrant:v1.20.2               # matches the Qdrant client bundled with n8n 2.48 (1.20.x)
+    restart: unless-stopped
+    environment:
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # the app image runs the ingester (python -m copilot.ingest); point it at the same store and embedding model
+  app:
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      RAG_COLLECTION: ${RAG_COLLECTION:-writeups}
+      RAG_EMBED_MODEL: ${RAG_EMBED_MODEL:-nomic-embed-text}
+
+volumes:
+  n8n_data: {}
+  qdrant_data: {}

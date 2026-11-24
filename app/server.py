@@ -1,4 +1,4 @@
-r"""Abliteration Lab - local app server.
+r"""Red Team LLM Lab - local app server (abliteration).
 
     .\.venv\Scripts\python.exe app\server.py --open                        (from the project folder)
     .\.venv\Scripts\python.exe app\server.py --project C:\path\to\Abliteration --port 8787
@@ -60,7 +60,7 @@ def run_dir_of(run_id):
     return os.path.join("runs", f"abliterate_{run_id}")
 
 
-app = FastAPI(title="Abliteration Lab")
+app = FastAPI(title="Red Team LLM Lab")
 lab = Lab(PROJECT)
 datasets = Datasets(os.path.join(PROJECT, "data"))
 sbom = SbomJob(PROJECT)
@@ -179,16 +179,19 @@ def ollama_post(path, body, timeout=30):
         return json.loads(r.read())
 
 
-_cuda = {"checked": False, "available": None, "torch": None}
+_cuda = {"checked": False, "available": None, "torch": None, "dtype": None}
 
 
 def cuda_available():
-    """torch.cuda.is_available() computed once in a thread (importing torch costs ~2 s); None until known."""
+    """torch.cuda.is_available() computed once in a thread (importing torch costs ~2 s); None until known.
+    Also records the dtype a run gets here by default (bfloat16 on a GPU, usually float32 on the CPU)."""
     if not _cuda["checked"]:
         _cuda["checked"] = True
         def probe():
             try:
                 import torch
+                from abliterate.hooks import resolve_device
+                _cuda["dtype"] = resolve_device("cuda", "auto", log=lambda *a: None)[1]
                 _cuda["available"], _cuda["torch"] = bool(torch.cuda.is_available()), torch.__version__
             except Exception as e:
                 _cuda["available"], _cuda["torch"] = False, f"import failed: {e}"
@@ -226,7 +229,7 @@ def env():
         oll = {"reachable": True, "models": models, "loaded": loaded}
     except Exception as e:
         oll = {"reachable": False, "error": str(e), "models": [], "loaded": []}
-    return {"project": PROJECT, "code": CODE, "gpu": gpu_info(), "cuda": cuda_available(), "torch": _cuda["torch"], "os": os.name,
+    return {"project": PROJECT, "code": CODE, "gpu": gpu_info(), "cuda": cuda_available(), "torch": _cuda["torch"], "dtype": _cuda["dtype"], "os": os.name,
             "notebook_engine": os.name == "nt", "disk_free_gb": round(disk.free / 1e9, 1), "python": PY, "ollama_host": OLLAMA,
             "venv": os.path.isfile(PY), "venv_gguf": os.path.isfile(PL.gguf_python(PROJECT)),
             "llama_cpp": os.path.isfile(os.path.join(PL.llama_cpp_dir(PROJECT), "convert_hf_to_gguf.py")), "data": os.path.isfile(p("data", "harmful_test.jsonl")),
@@ -330,8 +333,8 @@ class Start(BaseModel):
     pause_at_choice: bool = False
     no_ollama: bool = False
     skip_verify: bool = False
-    device_map: str = "cuda"
-    dtype: str = "bfloat16"
+    device_map: str = "cuda"            # cuda | cpu | auto; cuda falls back to cpu when no GPU is visible
+    dtype: str = "auto"                 # bfloat16 on a GPU, float32 on the CPU
     n_train: int = 256
     n_test: int = 16
     batch: int = 16
@@ -636,7 +639,7 @@ def main():
     datasets.dir = os.path.join(PROJECT, "data")
     sbom.project, sbom.dir = PROJECT, os.path.join(PROJECT, "sbom")
     import uvicorn
-    print(f"Abliteration Lab: code {CODE}, project {PROJECT}, python {PY}, ollama {OLLAMA} -> http://{a.host}:{a.port}")
+    print(f"Red Team LLM Lab: code {CODE}, project {PROJECT}, python {PY}, ollama {OLLAMA} -> http://{a.host}:{a.port}")
     if a.open:
         threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{a.port}")).start()
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
