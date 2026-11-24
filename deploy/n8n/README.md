@@ -124,6 +124,7 @@ instead of guessing a scope.
    LAB_AUTORUN_READONLY=true
    LAB_AUTORUN_ACTIVE_RECON=false
    # LAB_RUNNER_URL=http://your-lab-runner:8080/run          # leave unset until you have an executor
+   # N8N_IMAGE=docker.n8n.io/n8nio/n8n:2.48.7                # default is Docker Hub; n8n's own registry has the same image
    ```
 3. **Start** n8n and Qdrant with the stack:
    ```bash
