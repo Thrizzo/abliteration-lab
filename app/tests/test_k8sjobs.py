@@ -1,4 +1,4 @@
-"""JobPipeline and Serving (app/k8sjobs.py) against a fake Kubernetes API server.
+"""JobPipeline, Serving and ModelControl (app/k8sjobs.py) against a fake Kubernetes API server.
 
     python -m unittest discover -s app/tests        (from the repository root; standard library only)
 """
@@ -26,13 +26,16 @@ class HTTPError(Exception):
 
 
 class FakeAPI:
-    """Just enough of the Kubernetes API: Jobs, their pods and logs, one Deployment and one ConfigMap."""
+    """Just enough of the Kubernetes API: Jobs, their pods and logs, one Deployment (with its scale subresource), one
+    ConfigMap and network policies. fail[(method, path)] = (status, message) makes that call fail."""
 
     def __init__(self):
         self.lock = threading.Lock()
         self.requests = []
         self.jobs, self.pods, self.logs = {}, {}, {}
-        self.deployment = {"spec": {"replicas": 0}, "status": {}}
+        self.deployment = {"spec": {"replicas": 0, "selector": {"matchLabels": {"app": "glm-serve"}}}, "status": {}}
+        self.policies = {}
+        self.fail = {}
         self.configmap = {"data": {"MODEL_PATH": "/workspace/serving/current"}}
         self.pod_plan = {}            # job name -> list of phases the new pod goes through
         self.log_plan = {}            # pod -> list of "connections", each a list of (ts, text); then the pod ends
@@ -97,12 +100,54 @@ class FakeAPI:
         self.log_plan[name] = logs if logs is not None else [[]]
         return name
 
+    def add_server_pod(self, name="glm-serve-7d4f-x1"):
+        self.pods[name] = {"metadata": {"name": name, "labels": {"app": "glm-serve", "lab-role": "glm-serve"}},
+                           "status": {"phase": "Running"}, "_phases": ["Running"]}
+
+    def serve_running(self):
+        """glm-serve up, reachable: its policy as kubectl apply leaves it, one replica, one pod."""
+        self.policies["glm-serve-allow"] = {
+            "apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+            "metadata": {"name": "glm-serve-allow", "namespace": NS, "uid": "u-1", "resourceVersion": "42",
+                         "creationTimestamp": "2026-11-24T10:00:00Z", "generation": 1, "managedFields": [{"manager": "kubectl"}],
+                         "annotations": {"kubectl.kubernetes.io/last-applied-configuration": "{}"}},
+            "spec": {"podSelector": {"matchLabels": {"lab-role": "glm-serve"}}, "policyTypes": ["Ingress"],
+                     "ingress": [{"from": [{"podSelector": {"matchLabels": {"lab-role": "console"}}}], "ports": [{"port": 8000}]}]}}
+        self.deployment["spec"]["replicas"] = 1
+        self.deployment["status"]["readyReplicas"] = 1
+        self.add_server_pod()
+
     def route(self, method, path, q, body, h):
         base_jobs = f"/apis/batch/v1/namespaces/{NS}/jobs"
         base_pods = f"/api/v1/namespaces/{NS}/pods"
+        base_pol = f"/apis/networking.k8s.io/v1/namespaces/{NS}/networkpolicies"
         with self.lock:
+            if (method, path) in self.fail:
+                status, msg = self.fail[(method, path)]
+                return status, {"message": msg}
             if path == f"/apis/apps/v1/namespaces/{NS}/deployments/glm-serve" and method == "GET":
                 return 200, self.deployment
+            if path == f"/apis/apps/v1/namespaces/{NS}/deployments/glm-serve/scale" and method == "PATCH":
+                n = body["spec"]["replicas"]
+                self.deployment["spec"]["replicas"] = n
+                self.deployment["status"]["readyReplicas"] = n          # instant readiness is enough here
+                if n and not any(k.startswith("glm-serve-") for k in self.pods):
+                    self.add_server_pod()
+                return 200, {"spec": {"replicas": n}}
+            if path == base_pol and method == "POST":
+                name = body["metadata"]["name"]
+                if name in self.policies:
+                    return 409, {"message": f"networkpolicies \"{name}\" already exists"}
+                self.policies[name] = {**body, "metadata": {**body["metadata"], "uid": "u-2", "resourceVersion": "9"}}
+                return 201, self.policies[name]
+            if path.startswith(base_pol + "/"):
+                name = path.rsplit("/", 1)[1]
+                if name not in self.policies:
+                    return 404, {"message": f"networkpolicies \"{name}\" not found"}
+                if method == "DELETE":
+                    del self.policies[name]
+                    return 200, {}
+                return 200, self.policies[name]
             if path == f"/api/v1/namespaces/{NS}/configmaps/glm-serve" and method == "PATCH":
                 self.configmap["data"].update(body.get("data") or {})
                 return 200, self.configmap
@@ -463,6 +508,167 @@ class TestServing(Base):
         self.assertIn("glm-serve unreachable", st["error"])
         self.assertIsNone(st["busy"])
         self.assertIsNone(st["current"])
+
+
+class TestControl(Base):
+    WHO = {"user": "admin", "ip": "10.42.0.7", "forwarded_for": "192.168.1.20"}
+
+    def setUp(self):
+        super().setUp()
+        self.state = tempfile.mkdtemp()
+        self.audit = k8sjobs.Audit(self.project)
+        self.ctl = self.control()
+
+    def tearDown(self):
+        shutil.rmtree(self.state, ignore_errors=True)
+        super().tearDown()
+
+    def control(self):
+        return k8sjobs.ModelControl(self.settings, self.k8s, self.state, self.audit, http_error=HTTPError)
+
+    def calls(self):
+        return [(r["method"], r["path"].rsplit("/", 2)[-2] + "/" + r["path"].rsplit("/", 1)[-1]) for r in self.api.requests
+                if r["method"] != "GET"]
+
+    def test_states(self):
+        self.assertEqual(self.ctl.status()["state"], "killed")                   # no policy, 0 replicas, no pods
+        self.api.serve_running()
+        st = self.ctl.status()
+        self.assertEqual((st["state"], st["replicas"], st["ready"], st["policy"]), ("running", 1, 1, True))
+        self.assertEqual([p["name"] for p in st["pods"]], ["glm-serve-7d4f-x1"])
+        self.api.deployment["status"]["readyReplicas"] = 0
+        self.assertEqual(self.ctl.status()["state"], "starting")
+        del self.api.policies["glm-serve-allow"]
+        self.assertEqual(self.ctl.status()["state"], "isolated")
+        self.api.deployment["spec"]["replicas"] = 0
+        self.assertEqual(self.ctl.status()["state"], "stopping")               # pods still there
+        self.api.pods.clear()
+        self.assertEqual(self.ctl.status()["state"], "killed")
+        self.api.serve_running()
+        self.api.deployment["spec"]["replicas"] = 0
+        self.api.pods.clear()
+        self.assertEqual(self.ctl.status()["state"], "stopped")                  # the GPU overlays' default: policy, 0 replicas
+
+    def test_kill_cuts_first_then_scales_then_deletes_with_grace_0(self):
+        self.api.serve_running()
+        out = self.ctl.act("kill", self.WHO, "loops on every prompt")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"]["state"], "killed")
+        self.assertEqual(self.calls(), [("DELETE", "networkpolicies/glm-serve-allow"), ("PATCH", "glm-serve/scale"),
+                                        ("DELETE", "pods/glm-serve-7d4f-x1")])
+        delete_pod = next(r for r in self.api.requests if r["method"] == "DELETE" and "/pods/" in r["path"])
+        self.assertEqual(delete_pod["body"], {"gracePeriodSeconds": 0})
+        pods_query = next(r for r in self.api.requests if r["path"].endswith("/pods") and r["method"] == "GET")
+        self.assertEqual(pods_query["query"]["labelSelector"], "app=glm-serve")    # the Deployment's own selector
+        self.assertEqual([s["step"] for s in out["steps"]][-1], "check: no pods left")
+        rec = self.audit.recent(1)[0]
+        self.assertEqual((rec["source"], rec["stage"], rec["level"], rec["who"]["user"]), ("control", "kill", "info", "admin"))
+        self.assertEqual(rec["data"]["reason"], "loops on every prompt")
+        self.assertEqual(rec["data"]["state"], "killed")
+
+    def test_kill_keeps_going_when_a_step_fails(self):
+        self.api.serve_running()
+        self.api.fail[("DELETE", f"/apis/networking.k8s.io/v1/namespaces/{NS}/networkpolicies/glm-serve-allow")] = (500, "etcd timeout")
+        out = self.ctl.act("kill", self.WHO)
+        self.assertFalse(out["ok"])
+        self.assertEqual([s["ok"] for s in out["steps"]], [False, True, True, True])
+        self.assertIn("etcd timeout", out["steps"][0]["error"])
+        self.assertEqual(self.api.deployment["spec"]["replicas"], 0)                # still scaled down
+        self.assertFalse(any(k.startswith("glm-serve-") for k in self.api.pods))     # and the pod is gone
+        self.assertEqual(self.audit.recent(1)[0]["level"], "error")
+
+    def test_isolate_and_release_recreate_the_same_policy(self):
+        self.api.serve_running()
+        original = json.loads(json.dumps(self.api.policies["glm-serve-allow"]))
+        self.assertTrue(self.ctl.act("isolate", self.WHO)["ok"])
+        self.assertNotIn("glm-serve-allow", self.api.policies)
+        self.assertEqual(self.ctl.status()["state"], "isolated")
+        self.assertEqual(self.api.deployment["spec"]["replicas"], 1)                 # the model keeps running
+        self.assertTrue(self.ctl.act("release", self.WHO)["ok"])
+        posted = next(r["body"] for r in self.api.requests if r["method"] == "POST")
+        self.assertEqual(posted["spec"], original["spec"])
+        self.assertEqual(posted["metadata"]["annotations"], original["metadata"]["annotations"])
+        for k in ("uid", "resourceVersion", "creationTimestamp", "generation", "managedFields"):
+            self.assertNotIn(k, posted["metadata"])
+        self.assertEqual(self.ctl.status()["state"], "running")
+        self.assertEqual([r["stage"] for r in self.audit.recent(5)], ["release", "isolate"])
+
+    def test_copy_survives_a_console_restart_and_lives_outside_the_workspace(self):
+        self.api.serve_running()
+        self.ctl.act("isolate", self.WHO)
+        self.assertTrue(os.path.isfile(os.path.join(self.state, "glm-serve-allow.json")))
+        for r, _, files in os.walk(self.project):
+            self.assertNotIn("glm-serve-allow.json", files)                       # never on the shared workspace
+        self.assertTrue(self.control().act("release", self.WHO)["ok"])          # a new console process
+
+    def test_release_without_a_copy_is_refused_and_audited(self):
+        with self.assertRaises(HTTPError) as e:
+            self.ctl.act("release", self.WHO)
+        self.assertEqual(e.exception.status, 409)
+        self.assertIn("re-apply the overlay", e.exception.msg)
+        rec = self.audit.recent(1)[0]
+        self.assertEqual((rec["stage"], rec["level"]), ("release", "error"))
+        self.assertIn("refused", rec["message"])
+
+    def test_a_tampered_copy_is_not_used(self):
+        with open(os.path.join(self.state, "glm-serve-allow.json"), "w") as f:
+            json.dump({"kind": "NetworkPolicy", "metadata": {"name": "glm-serve-allow"},
+                       "spec": {"podSelector": {}, "ingress": [{}]}}, f)          # would open every pod in the namespace
+        with self.assertRaises(HTTPError):
+            self.control().act("release", self.WHO)
+        self.assertNotIn("glm-serve-allow", self.api.policies)
+
+    def test_snapshot_at_start_makes_release_work_after_a_manual_delete(self):
+        self.api.serve_running()
+        self.assertTrue(self.ctl.snapshot())
+        del self.api.policies["glm-serve-allow"]                                  # kubectl delete, outside the console
+        self.assertTrue(self.ctl.act("release", self.WHO)["ok"])
+        self.assertIn("glm-serve-allow", self.api.policies)
+
+    def test_start_after_kill(self):
+        self.api.serve_running()
+        self.ctl.act("kill", self.WHO)
+        out = self.ctl.act("start", self.WHO)
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["status"]["state"], "running")
+        self.assertIn("glm-serve-allow", self.api.policies)
+        self.assertEqual(self.api.deployment["spec"]["replicas"], 1)
+
+    def test_start_refused_while_a_gpu_job_runs(self):
+        self.api.jobs["abl-scan-1"] = {"metadata": {"name": "abl-scan-1", "labels": {"app": "lab-job", "lab-stage": "scan"}},
+                                       "status": {"active": 1}}
+        with self.assertRaises(HTTPError) as e:
+            self.ctl.act("start", self.WHO)
+        self.assertEqual(e.exception.status, 409)
+        self.assertIn("GPU node busy", e.exception.msg)
+        self.assertEqual(self.api.deployment["spec"]["replicas"], 0)
+        self.settings["serving"]["exclusiveGpu"] = False                             # a second GPU node
+        self.api.serve_running()
+        self.assertTrue(self.control().act("start", self.WHO)["ok"])
+
+    def test_unknown_action(self):
+        with self.assertRaises(HTTPError) as e:
+            self.ctl.act("explode", self.WHO)
+        self.assertEqual(e.exception.status, 404)
+
+
+class TestAudit(unittest.TestCase):
+    def test_daily_files_newest_first_and_stdout_copy(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        a = k8sjobs.Audit(d)
+        os.makedirs(a.dir)
+        with open(os.path.join(a.dir, "2026-11-23.jsonl"), "w") as f:
+            f.write(json.dumps({"stage": "old"}) + "\nnot json\n")
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rec = a.write("control", "kill", "kill: done in 412 ms", who={"user": "admin"}, data={"ok": True})
+        self.assertTrue(buf.getvalue().startswith("AUDIT {"))
+        self.assertRegex(rec["ts"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+        self.assertEqual(set(rec), {"ts", "source", "run_id", "stage", "level", "message", "data", "who"})
+        self.assertEqual([r["stage"] for r in a.recent(10)], ["kill", "old"])
 
 
 class TestHelpers(unittest.TestCase):

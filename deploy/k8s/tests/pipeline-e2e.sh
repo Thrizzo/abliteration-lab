@@ -8,6 +8,9 @@
 #   3. every run keeps its own model folder and its own GGUF
 #   4. Promote run 1, Promote run 2 (different layer: glm-serve's model changes), Rollback (run 1's model is back)
 #   5. Stop deletes a running Job
+#   6. the kill switch through the login: cross-site and body-less POSTs refused; Isolate cuts traffic while the
+#      model runs, Release restores it; Kill removes the container from the node within seconds and nothing restarts
+#      it; Start brings it back; every action is audited with the login user, on the workspace and in the log
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
 pass=0; fail=0
@@ -128,6 +131,47 @@ API /pipeline/stop -d '{}' >/dev/null
 for i in $(seq 1 60); do [ "$(API /pipeline/status | jq -r .running)" = false ] && break; sleep 1; done
 check "stop: no longer running" test "$(API /pipeline/status | jq -r .running)" = false
 check "stop: Job $JOB deleted" bash -c "! kubectl -n lab get job '$JOB' >/dev/null 2>&1"
+
+echo "== 6. Kill switch (through the login, as the browser calls it)"
+not()   { ! "$@"; }
+eventually() { local i; for i in $(seq 1 20); do "$@" && return 0; sleep 1; done; return 1; }
+state() { API /control | jq -r .state; }
+# the model's container on the node, from the container runtime's view (not the API's)
+model_containers() { docker exec lab-control-plane crictl ps -q --label io.kubernetes.pod.namespace=lab --label io.kubernetes.container.name=server | wc -l; }
+reach_model() { console curl -s -o /dev/null -m 5 http://glm-serve.lab.svc:8000/api/tags; }
+code_of() { curl -s -o /dev/null -w '%{http_code}' -u ci:ci-only-password "$@"; }
+CTL=http://127.0.0.1:18080/api/control
+check "model server running" test "$(state)" = running
+check "cross-site POST refused (Origin)" test "$(code_of -H 'Origin: https://evil.example' -H 'Content-Type: application/json' -d '{}' $CTL/kill)" = 403
+check "cross-site POST refused (Sec-Fetch-Site)" test "$(code_of -H 'Sec-Fetch-Site: cross-site' -H 'Content-Type: application/json' -d '{}' $CTL/kill)" = 403
+check "POST without a JSON body refused" test "$(code_of -X POST $CTL/kill)" = 422
+check "the model still runs after those" test "$(state)" = running
+out=$(API /control/isolate -H 'Origin: http://127.0.0.1:18080' -d '{"reason": "ci: isolate"}')
+check "isolate ok (same-origin browser request)" test "$(jq -r .ok <<<"$out")" = true
+check "isolate: state isolated" test "$(state)" = isolated
+check "isolate: the console can no longer reach the model" eventually not reach_model
+check "isolate: the model keeps running" test "$(model_containers)" = 1
+check "release ok" test "$(API /control/release -d '{}' | jq -r .ok)" = true
+check "release: the console reaches the model again" eventually reach_model
+t0=$(date +%s%N)
+out=$(API /control/kill -d '{"reason": "ci: kill"}')
+until [ "$(model_containers)" = 0 ]; do
+  [ $(( ($(date +%s%N) - t0) / 1000000 )) -gt 30000 ] && break
+  sleep 0.2
+done
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+check "kill ok: $(jq -r .message <<<"$out")" test "$(jq -r .ok <<<"$out")" = true
+check "kill: container gone from the node in ${ms} ms (< 10 s)" test "$ms" -lt 10000
+sleep 10
+check "kill: nothing restarted it" test "$(model_containers)" = 0
+check "kill: state killed" test "$(state)" = killed
+check "start ok" test "$(API /control/start -d '{}' | jq -r .ok)" = true
+check "start: model ready" kubectl -n lab rollout status deploy/glm-serve --timeout=300s
+check "start: the console reaches the model" eventually reach_model
+check "audit: start, kill, release, isolate, each by user ci" test "$(API /control | jq -r '[.audit[] | select(.source == "control") | "\(.stage):\(.who.user)"] | .[0:4] | join(",")')" = "start:ci,kill:ci,release:ci,isolate:ci"
+check "audit: the isolate reason is kept" test "$(API /control | jq -r '[.audit[] | select(.stage == "isolate")][0].data.reason')" = "ci: isolate"
+check "audit: written to the workspace" console bash -c 'grep -q "\"stage\": \"kill\"" /workspace/audit/*.jsonl'
+check "audit: copied to the console's container log" bash -c "kubectl -n lab logs deploy/console -c app | grep -q '^AUDIT .*\"stage\": \"kill\"'"
 
 kill $PF 2>/dev/null
 echo

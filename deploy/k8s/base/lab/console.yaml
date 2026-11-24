@@ -36,6 +36,7 @@ spec:
             - { name: ABL_HOST, value: "127.0.0.1" }                         # only Caddy (same pod) reaches it
             - { name: ABL_RUNNER, value: k8s }
             - { name: LAB_JOBS_SETTINGS, value: /etc/lab/jobs.json }
+            - { name: LAB_STATE_DIR, value: /var/lib/lab }                  # the console's copy of glm-serve-allow
             - { name: OLLAMA_HOST, value: "http://ollama.lab-copilot.svc:11434" }
             - { name: QDRANT_URL, value: "http://qdrant.lab-copilot.svc:6333" }
             - { name: RAG_COLLECTION, value: writeups }
@@ -46,6 +47,7 @@ spec:
           volumeMounts:
             - { name: workspace, mountPath: /workspace }
             - { name: lab-jobs, mountPath: /etc/lab, readOnly: true }
+            - { name: console-state, mountPath: /var/lib/lab }
           resources:
             requests: { cpu: "1", memory: 4Gi }
             limits: { memory: 16Gi }              # the in-process layer lab loads small models (GLM-Edge-1.5B: ~7 GB in float32)
@@ -89,6 +91,9 @@ spec:
         - { name: lab-jobs, configMap: { name: lab-jobs } }
         - { name: caddyfile, configMap: { name: console-caddy } }
         - { name: caddy-tmp, emptyDir: { sizeLimit: 64Mi } }
+        # Release recreates glm-serve-allow from the copy kept here, not on the workspace, which Jobs (and, in dev, the
+        # model server) can write. It survives container restarts; a new pod takes a fresh copy at start.
+        - { name: console-state, emptyDir: { sizeLimit: 1Mi } }
 ---
 apiVersion: v1
 kind: Service

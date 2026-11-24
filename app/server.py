@@ -14,13 +14,14 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 import webbrowser
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -63,6 +64,19 @@ def run_dir_of(run_id):
 
 
 app = FastAPI(title="Red Team LLM Lab")
+
+
+@app.middleware("http")
+async def _same_origin_only(request, call_next):
+    """CSRF: a browser sends the lab's basic-auth credentials with requests another site makes, so a page elsewhere could
+    press Kill, Release or Promote. State-changing requests from another origin are refused; clients that send no
+    Origin / Sec-Fetch-Site headers (curl, n8n) are unaffected."""
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        site, origin = request.headers.get("sec-fetch-site"), request.headers.get("origin")
+        host = (request.headers.get("host") or "").lower()
+        if (site and site not in ("same-origin", "none")) or (origin and urllib.parse.urlsplit(origin).netloc.lower() != host):
+            return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
+    return await call_next(request)
 lab = Lab(PROJECT)
 datasets = Datasets(os.path.join(PROJECT, "data"))
 sbom = SbomJob(PROJECT)
@@ -164,9 +178,13 @@ if K8S:
     _k8s = k8sjobs.K8s(namespace=_k8s_settings.get("namespace"))
     pipeline = k8sjobs.JobPipeline(PROJECT, CODE, _k8s_settings, _k8s, http_error=HTTPException, run_id_of=rundata.run_id)
     serving = k8sjobs.Serving(PROJECT, _k8s_settings, _k8s, http_error=HTTPException, publish=_ollama_publish)
+    audit = k8sjobs.Audit(PROJECT)
+    # the copy of glm-serve-allow that Release recreates stays in the console pod (an emptyDir), off the shared workspace
+    control = k8sjobs.ModelControl(_k8s_settings, _k8s, os.environ.get("LAB_STATE_DIR", "/var/lib/lab"), audit,
+                                   http_error=HTTPException)
 else:
     pipeline = Pipeline()
-    serving = None
+    serving = audit = control = None
 PY = PL.pipeline_python(PROJECT)
 
 
@@ -416,15 +434,59 @@ def serving_status():
     return _serving().status()
 
 
+def _who(request):
+    """Who asked, as the login proxy (Caddy, same pod) passes it on: the app listens on 127.0.0.1 only, so these headers
+    can't come from anyone else. One shared login: the address is the real "who"."""
+    h = request.headers
+    return {"user": h.get("x-lab-user") or None, "ip": h.get("x-lab-peer") or (request.client.host if request.client else None),
+            "forwarded_for": h.get("x-lab-forwarded-for") or None}
+
+
+def _audited(stage, message, who, fn, run_id=None):
+    """Serving changes go into the audit log too, failed attempts included."""
+    try:
+        out = fn()
+    except HTTPException as e:
+        audit.write("serving", stage, f"{message} refused: {e.detail}", level="error", who=who, run_id=run_id)
+        raise
+    audit.write("serving", stage, message, who=who, run_id=run_id,
+                data={"mode": out.get("mode"), "busy": out.get("busy")})
+    return out
+
+
 @app.post("/api/serving/promote")
-def serving_promote(b: Promote):
+def serving_promote(b: Promote, request: Request):
     run_dir_of(b.run_id)                                     # validates the id
-    return _serving().promote(b.run_id)
+    who = _who(request)
+    return _audited("promote", f"promote run {b.run_id}", who, lambda: _serving().promote(b.run_id, by=who["user"]), b.run_id)
 
 
 @app.post("/api/serving/rollback")
-def serving_rollback():
-    return _serving().rollback()
+def serving_rollback(request: Request):
+    who = _who(request)
+    return _audited("rollback", "rollback", who, lambda: _serving().rollback(by=who["user"]))
+
+
+# ------------------------------------------------------------------------- API: Kill / Isolate (Kubernetes only)
+class Action(BaseModel):
+    reason: str = ""                                         # optional, for the audit log
+
+
+def _control():
+    if not control:
+        raise HTTPException(404, "Kill / Isolate exist in the Kubernetes deployment only")
+    return control
+
+
+@app.get("/api/control")
+def control_status():
+    return {**_control().status(), "audit": audit.recent(30)}
+
+
+@app.post("/api/control/{action}")
+def control_action(action: str, b: Action, request: Request):
+    """kill | isolate | release | start. The JSON body is required (an empty cross-site form post can't trigger it)."""
+    return _control().act(action, _who(request), b.reason[:500])
 
 
 @app.post("/api/pipeline/stop")
@@ -652,6 +714,7 @@ def _startup():
     """Kubernetes: a Job that kept running while the console restarted is followed again."""
     if K8S:
         pipeline.attach()
+        threading.Thread(target=control.snapshot, daemon=True).start()     # a copy of glm-serve-allow for Release
 
 
 @app.on_event("shutdown")

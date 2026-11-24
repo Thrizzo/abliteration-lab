@@ -15,6 +15,12 @@
 		max_size 50MB
 	}
 	reverse_proxy 127.0.0.1:8787 {
+		# who asked, for the console's audit log (Kill / Isolate / Promote). header_up replaces whatever the client sent,
+		# and the app listens on 127.0.0.1 only, so nobody else can set these. Behind an Ingress the peer is the ingress
+		# controller; the X-Forwarded-For chain it sent is passed on as received (informative, not proof).
+		header_up X-Lab-User {http.auth.user.id}
+		header_up X-Lab-Peer {http.request.remote.host}
+		header_up X-Lab-Forwarded-For {http.request.header.X-Forwarded-For}
 		flush_interval -1
 		transport http {
 			read_timeout 0

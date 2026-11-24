@@ -21,6 +21,7 @@
     <span title="GPU"><span class="dot" id="dotGpu"></span><span id="gpuVal" class="mono">—</span></span>
     <span title="pipeline"><span class="dot" id="dotPipe"></span><span id="sysPipe" class="mono">idle</span></span>
     <span title="Ollama"><span class="dot" id="dotOll"></span>ollama</span>
+    <span title="model server (glm-serve): open the kill switch" id="modelMini" style="display:none;cursor:pointer"><span class="dot" id="dotModel"></span><span id="modelVal" class="mono">model</span></span>
     <button class="btn sm" id="dataToggle">datasets</button>
     <button class="btn sm" id="sbomToggle">SBOM</button>
     <button class="btn sm" id="serveToggle" style="display:none">serving</button>
@@ -144,10 +145,18 @@
 
 <!-- ============================================================ serving panel (Kubernetes only) -->
 <section class="panel" id="servePanel"><div class="inner">
-  <div class="row" style="justify-content:space-between"><div><h2>Serving</h2><div class="small">Which run's abliterated model glm-serve gives the pentest copilot. Promote a finished run after reading its validation; Rollback returns to the run before. Every change is kept in <span class="mono">serving/history.json</span>.</div></div><button class="btn sm" id="serveClose">close</button></div>
+  <div class="row" style="justify-content:space-between"><div><h2>Serving</h2><div class="small">Which run's abliterated model glm-serve gives the pentest copilot, and the kill switch for it. Promote a finished run after reading its validation; Rollback returns to the run before. Every change is kept in <span class="mono">serving/history.json</span> and the audit log.</div></div><button class="btn sm" id="serveClose">close</button></div>
+  <div class="card" id="ctlCard" style="display:none">
+    <div class="row" style="justify-content:space-between;align-items:flex-start;margin-top:0"><div><h3>Model server</h3><div id="ctlState" class="small"></div></div>
+      <div class="row ctlbtns" style="margin:0"><button class="btn danger solid" id="ctlKill">Kill</button><button class="btn" id="ctlIsolate">Isolate</button><button class="btn" id="ctlRelease">Release</button><button class="btn" id="ctlStart">Start</button></div></div>
+    <input type="text" id="ctlReason" maxlength="500" placeholder="reason (optional, goes into the audit log)">
+    <div class="small" style="margin-top:8px"><b>Kill</b> cuts the network, scales glm-serve to 0 and deletes its pod at once. <b>Isolate</b> cuts the network while the model keeps running; <b>Release</b> reopens it. <b>Start</b> brings a killed or stopped model back: a large model takes minutes to load. A response already streaming can outlive Isolate; Kill ends it.</div>
+    <div id="ctlResult"></div>
+  </div>
   <div class="card"><div id="serveNow"></div><div class="row"><button class="btn" id="serveRollback">Rollback</button><span class="small" id="serveInfo"></span></div></div>
   <div class="card"><h3>Runs with an edited model</h3><div id="serveRuns"></div></div>
   <div class="card"><h3>History</h3><div id="serveHist"></div></div>
+  <div class="card" id="auditCard" style="display:none"><h3>Audit log</h3><div class="small">Kill / Isolate / Release / Start and every Promote / Rollback, with who asked: <span class="mono">workspace/audit/YYYY-MM-DD.jsonl</span>, and a copy in the console's container log.</div><div id="auditList"></div></div>
 </div></section>
 
 <script src="/static/guide.js"></script>

@@ -446,7 +446,7 @@ function sbomRenderPkgs(){ if(!SB) return; const q=$('#sbomQ').value.toLowerCase
 // ================================================================== serving panel (Kubernetes: Promote / Rollback)
 let serveT=null;
 api('/serving').then(()=>{ $('#serveToggle').style.display=''; }).catch(()=>{});      // 404 outside Kubernetes: no button
-$('#serveToggle').onclick=()=>{ ['#dataPanel','#sbomPanel'].forEach(p=>$(p).classList.remove('open')); $('#servePanel').classList.add('open'); serveLoad(); clearInterval(serveT); serveT=setInterval(serveLoad, 5000); };
+$('#serveToggle').onclick=()=>{ ['#dataPanel','#sbomPanel'].forEach(p=>$(p).classList.remove('open')); $('#servePanel').classList.add('open'); serveLoad(); ctlLoad(); clearInterval(serveT); serveT=setInterval(serveLoad, 5000); };
 $('#serveClose').onclick=()=>{ $('#servePanel').classList.remove('open'); clearInterval(serveT); };
 $('#serveRollback').onclick=async()=>{ if(!confirm('Go back to the run promoted before this one?')) return; try{ await api('/serving/rollback', {}); toast('rolled back'); }catch(e){ toast(e.message,true); } serveLoad(); };
 async function serveLoad(){
@@ -464,3 +464,44 @@ async function serveLoad(){
   const h=s.history||[];
   $('#serveHist').innerHTML = h.length ? `<table><tr><th>when</th><th>action</th><th>run</th><th>model</th><th class="num">layer</th></tr>${h.map(e=>`<tr><td class="small">${esc(e.at)}</td><td>${esc(e.action)}</td><td class="mono">${esc(e.run_id)}</td><td>${esc(e.model||'')}</td><td class="num">${e.layer??'–'}</td></tr>`).join('')}</table>` : '<div class="empty">No promotions yet.</div>';
 }
+
+// ------------------------------------------------------------------ the kill switch for glm-serve (Kubernetes only)
+const CTL_BADGE = {running:'pass', starting:'warn', isolated:'warn', stopping:'fail', killed:'fail', stopped:'ghost', unknown:'ghost'};
+const CTL_DOT = {running:'on', starting:'busy', stopping:'busy', isolated:'warn', killed:'bad'};
+const fmtTs = ts => { const d=new Date(ts); return isNaN(d) ? (ts||'') : d.toLocaleString(); };
+let ctl=null;
+async function ctlLoad(){
+  try{ ctl=await api('/control'); }catch(e){ return false; }        // 404 outside Kubernetes: no kill switch
+  $('#modelMini').style.display='';
+  $('#dotModel').className='dot '+(CTL_DOT[ctl.state]||'');
+  $('#modelVal').textContent='model '+ctl.state;
+  if($('#servePanel').classList.contains('open')) ctlRender();
+  return true;
+}
+function ctlRender(){
+  const c=ctl; if(!c) return;
+  $('#ctlCard').style.display=''; $('#auditCard').style.display='';
+  const pods=(c.pods||[]).map(p=>`${esc(p.name)} ${esc(p.phase||'')}${p.deleting?' (deleting)':''}`).join(', ')||'no pod';
+  $('#ctlState').innerHTML=`<span class="badge ${CTL_BADGE[c.state]||'ghost'}">${esc(c.state)}</span> ${esc(c.deployment||'glm-serve')}: ${c.ready??0}/${c.replicas??0} ready · ${pods} · network ${c.policy?'open':'<b>cut</b>'}${c.error?` · <span class="vuln">${esc(c.error)}</span>`:''}`;
+  const reps=c.replicas||0, up=reps>0||(c.pods||[]).length>0;
+  $('#ctlKill').disabled = !(up || c.state==='unknown');
+  $('#ctlIsolate').disabled = !(c.policy && up);
+  $('#ctlRelease').disabled = !(!c.policy && reps>0);
+  $('#ctlRelease').title = c.saved_copy ? '' : 'the console has no copy of the policy: re-apply the overlay';
+  $('#ctlStart').disabled = reps>0;
+  const a=c.audit||[];
+  $('#auditList').innerHTML = a.length ? `<table><tr><th>when</th><th>action</th><th>result</th><th>who</th><th class="num">ms</th></tr>${a.map(r=>`<tr><td class="small">${esc(fmtTs(r.ts))}</td><td>${esc(r.stage)}</td><td>${r.level==='error'?'<span class="badge fail">failed</span> ':''}${esc(r.message)}${r.data&&r.data.reason?` <span class="small">“${esc(r.data.reason)}”</span>`:''}</td><td class="small">${esc((r.who&&r.who.user)||'–')} · ${esc((r.who&&(r.who.forwarded_for||r.who.ip))||'')}</td><td class="num">${r.data&&r.data.total_ms!=null?r.data.total_ms:''}</td></tr>`).join('')}</table>` : '<div class="empty">No actions yet.</div>';
+}
+async function ctlAct(action){
+  if(action==='kill' && !confirm('Kill glm-serve now?\n\nIts network is cut, the Deployment is scaled to 0 and the pod deleted with grace period 0. A large model takes minutes to load again.')) return;
+  ['#ctlKill','#ctlIsolate','#ctlRelease','#ctlStart'].forEach(b=>$(b).disabled=true);
+  try{
+    const r=await api('/control/'+action, {reason: $('#ctlReason').value.trim()});
+    $('#ctlResult').innerHTML=`<div class="small" style="margin-top:10px"><b>${esc(r.message)}</b></div><table>${r.steps.map(s=>`<tr><td>${s.ok?'<span class="badge pass">ok</span>':'<span class="badge fail">failed</span>'}</td><td>${esc(s.step)}</td><td class="small">${esc(s.ok?s.detail:s.error)}</td><td class="num">${s.ms} ms</td></tr>`).join('')}</table>`;
+    toast(r.message, !r.ok); $('#ctlReason').value='';
+  }catch(e){ toast(e.message, true); $('#ctlResult').innerHTML=`<div class="small vuln" style="margin-top:10px">${esc(e.message)}</div>`; }
+  await ctlLoad(); ctlRender();
+}
+['kill','isolate','release','start'].forEach(a=>{ $('#ctl'+a[0].toUpperCase()+a.slice(1)).onclick=()=>ctlAct(a); });
+$('#modelMini').onclick=()=>$('#serveToggle').click();
+ctlLoad().then(ok=>{ if(ok) setInterval(ctlLoad, 5000); });

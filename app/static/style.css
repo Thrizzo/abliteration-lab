@@ -213,3 +213,9 @@ body.wiz{display:block;overflow:auto}
 .rowbox .dpo b{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
 .pager{display:flex;gap:8px;align-items:center;margin:8px 0;font-size:12.5px;color:var(--ink2)}
 .vuln{color:#f09a9a}
+/* kill switch (serving panel) */
+.btn.danger.solid{background:var(--critical);color:#fff;border-color:transparent;font-weight:600}
+.btn.danger.solid:hover{filter:brightness(1.1);color:#fff}
+.ctlbtns .btn{min-width:78px}
+#ctlReason{width:100%;max-width:520px;margin-top:10px}
+@media (max-width:700px){ .sysmini{flex-wrap:wrap;gap:8px} }
