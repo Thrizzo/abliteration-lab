@@ -1,0 +1,52 @@
+# Red Team LLM Lab on Kubernetes: the shared base. Deploy an overlay (deploy/k8s/overlays/<name>), not this folder.
+# Layout and decisions: docs/design/glm5-k8s-console.md. How to deploy: deploy/k8s/README.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+labels:
+  - pairs: { app.kubernetes.io/part-of: redteam-llm-lab }
+    includeSelectors: false
+
+resources:
+  - namespaces.yaml
+  # lab-control: console (lab app + login), n8n (copilot engine), Qdrant (retrieval), Ollama (judge + embeddings)
+  - control/console.yaml
+  - control/n8n.yaml
+  - control/qdrant.yaml
+  - control/ollama.yaml
+  - control/ingress.yaml
+  - control/network-policies.yaml
+  # lab-model: the model server for the abliterated model, its weights, and what the console may do to it
+  - model/storage.yaml
+  - model/glm-serve.yaml
+  - model/network-policies.yaml
+  - model/console-rbac.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true      # stable names: the console edits glm-serve's ConfigMap on Promote
+
+configMapGenerator:
+  # the copilot's lab scope, read by n8n's Code nodes (same variables as deploy/n8n/docker-compose.n8n.yml)
+  - name: copilot-settings
+    namespace: lab-control
+    literals:
+      - LAB_ALLOWLIST=10.10.10.0/24
+      - LAB_AUTORUN_READONLY=true
+      - LAB_AUTORUN_ACTIVE_RECON=false
+  # models the judge/embeddings Ollama pulls when it starts (space-separated; empty = pull nothing)
+  - name: ollama-models
+    namespace: lab-control
+    literals:
+      - OLLAMA_PULL=qwen3:8b nomic-embed-text
+  # what glm-serve serves. Promote points MODEL_PATH at a run's checkpoint and restarts the Deployment.
+  - name: glm-serve
+    namespace: lab-model
+    literals:
+      - MODEL_PATH=/models/serving/current
+      - SERVED_MODEL_NAME=glm-abl
+      - VLLM_ARGS=--tensor-parallel-size 8 --max-model-len 32768 --gpu-memory-utilization 0.90
+  # the console's login proxy (Caddy). Basic auth lives inside the pod, so it works behind any ingress controller.
+  - name: console-caddy
+    namespace: lab-control
+    files:
+      - control/Caddyfile

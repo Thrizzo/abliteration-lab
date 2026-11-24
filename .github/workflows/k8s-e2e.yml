@@ -1,0 +1,50 @@
+# Kubernetes manifests (deploy/k8s) on a throwaway kind cluster with Calico, so network policies are enforced:
+# deploy, network policies, login, RBAC, Isolate and Kill. See deploy/k8s/tests/e2e.sh.
+name: k8s e2e
+
+on:
+  push:
+    paths: ["deploy/k8s/**", ".github/workflows/k8s-e2e.yml"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: k8s-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kind
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSLo "$HOME/bin/kind" https://github.com/kubernetes-sigs/kind/releases/download/v0.27.0/kind-linux-amd64
+          chmod +x "$HOME/bin/kind"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Create the cluster and install Calico
+        run: |
+          kind create cluster --name lab --config deploy/k8s/tests/kind-config.yaml --wait 0s
+          kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml
+          kubectl -n kube-system rollout status daemonset/calico-node --timeout=300s
+          kubectl wait --for=condition=Ready nodes --all --timeout=300s
+          kubectl version
+
+      - name: End-to-end test
+        run: bash deploy/k8s/tests/e2e.sh
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide
+          kubectl -n lab-control describe pods | tail -n 150
+          kubectl -n lab-model describe pods | tail -n 80
+          kubectl get events -A --sort-by=.lastTimestamp | tail -n 60
+          for d in console n8n ollama; do echo "--- $d"; kubectl -n lab-control logs deploy/$d --all-containers --tail=40 || true; done
+          kubectl -n lab-model logs deploy/glm-serve --tail=40 || true

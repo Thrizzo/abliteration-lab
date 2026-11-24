@@ -1,0 +1,32 @@
+# The lab app replaced by a few lines of Python on 127.0.0.1:8787 (same address the real app binds), so everything
+# around it is the real thing: Caddy login, Service, network policies, the console ServiceAccount.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: console, namespace: lab-control }
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          image: python:3.12-alpine
+          imagePullPolicy: IfNotPresent
+          command: [python3, -c]
+          args:
+            - |
+              import http.server
+              class H(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      self.send_response(200); self.end_headers(); self.wfile.write(b"console stub ok")
+                  def log_message(self, *a):
+                      pass
+              http.server.HTTPServer(("127.0.0.1", 8787), H).serve_forever()
+          startupProbe:
+            exec: { command: [python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz')"] }
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            exec: { command: [python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz')"] }
+            periodSeconds: 10
+          livenessProbe:
+            exec: { command: [python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/healthz')"] }
+            periodSeconds: 30

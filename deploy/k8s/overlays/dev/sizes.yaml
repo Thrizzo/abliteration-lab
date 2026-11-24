@@ -1,0 +1,52 @@
+# Small volumes and requests for a laptop-sized cluster (Rancher Desktop gives WSL 2 half the host RAM by default).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: models, namespace: lab-model }
+spec:
+  resources: { requests: { storage: 30Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: workspace, namespace: lab-control }
+spec:
+  resources: { requests: { storage: 50Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: ollama, namespace: lab-control }
+spec:
+  resources: { requests: { storage: 20Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: console, namespace: lab-control }
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          resources:
+            requests: { cpu: 500m, memory: 2Gi }
+            limits: { memory: 12Gi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ollama, namespace: lab-control }
+spec:
+  template:
+    spec:
+      containers:
+        - name: ollama
+          resources:
+            requests: { cpu: "1", memory: 6Gi }
+            limits: { memory: 12Gi }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: qdrant, namespace: lab-control }
+spec:
+  volumeClaimTemplates:
+    - metadata: { name: storage }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 10Gi } }

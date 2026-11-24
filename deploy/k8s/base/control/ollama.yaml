@@ -1,0 +1,57 @@
+# Ollama for the regular models: the judge (qwen3:8b, thinking off in the workflow) and the embeddings
+# (nomic-embed-text). Not the abliterated model: that one runs in lab-model (glm-serve).
+# On start it pulls the models listed in ConfigMap ollama-models, so it is the one pod in lab-control that may reach
+# the internet on 443 (network-policies.yaml).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: ollama, namespace: lab-control }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 50Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ollama, namespace: lab-control, labels: { app: ollama } }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: ollama } }
+  template:
+    metadata:
+      labels: { app: ollama, lab-role: ollama }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }  # the image runs as root (models in /root/.ollama)
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.40.18
+          envFrom: [{ configMapRef: { name: ollama-models } }]
+          env:
+            - { name: OLLAMA_HOST, value: "0.0.0.0:11434" }
+            - { name: OLLAMA_KEEP_ALIVE, value: "30m" }
+          ports: [{ containerPort: 11434, name: http }]
+          lifecycle:
+            postStart:                            # pull in the background; a failed pull never blocks the pod
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - '(sleep 3; for m in $OLLAMA_PULL; do ollama pull "$m"; done) >/proc/1/fd/1 2>&1 & exit 0'
+          volumeMounts: [{ name: models, mountPath: /root/.ollama }]
+          resources:
+            requests: { cpu: "2", memory: 12Gi }
+            limits: { memory: 20Gi }              # qwen3:8b (~6 GB) + embeddings, CPU; add a GPU in the overlay if you have one
+          securityContext:
+            allowPrivilegeEscalation: false
+          readinessProbe: { httpGet: { path: /, port: http }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /, port: http }, periodSeconds: 30, failureThreshold: 6 }
+      volumes:
+        - { name: models, persistentVolumeClaim: { claimName: ollama } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: ollama, namespace: lab-control }
+spec:
+  selector: { app: ollama }
+  ports: [{ name: http, port: 11434, targetPort: http }]

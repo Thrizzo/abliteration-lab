@@ -1,0 +1,29 @@
+# CI only (.github/workflows/k8s-e2e.yml): the dev overlay on a throwaway kind cluster, with
+#   - a stub instead of the lab app image (the real one is private and ~10 GB): it answers on 127.0.0.1:8787 behind the
+#     real Caddy login, so the login, the network policies and the kill/isolate path are tested for real;
+#   - no model pulls, tiny requests and volumes;
+#   - TEST-ONLY secrets below. Never use this overlay for a real deployment.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+patches:
+  - path: stub-console.yaml
+  - path: tiny.yaml
+configMapGenerator:
+  - name: ollama-models
+    namespace: lab-control
+    behavior: replace
+    literals: [OLLAMA_PULL=]
+generatorOptions:
+  disableNameSuffixHash: true
+secretGenerator:
+  - name: basic-auth
+    namespace: lab-control
+    literals:
+      - user=ci
+      - hash=$2b$10$VJt/mXFY99jLajdn2EX9fea6mqH7iziQINYuyeKAzOT77t/twjrcC   # bcrypt of "ci-only-password"
+  - name: n8n
+    namespace: lab-control
+    literals:
+      - encryption-key=ci-only-not-a-secret

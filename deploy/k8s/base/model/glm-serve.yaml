@@ -1,0 +1,66 @@
+# glm-serve: vLLM serving the promoted abliterated model to the copilot (OpenAI-compatible API on :8000).
+#
+# - replicas 0: it starts when you press Start / Promote (or `kubectl -n lab-model scale deploy/glm-serve --replicas=1`).
+# - Recreate: one 8-GPU node never holds two copies.
+# - offline: no egress at all (network-policies.yaml), no Hugging Face access, weights mounted read-only.
+# - Kill (console or README fallback) removes the allow policy, scales this to 0 and deletes the pod with grace 0.
+#
+# vLLM version: pinned to the newest release when this was written. GLM-5.x support (MoE + DSA sparse attention, FP8)
+# was NOT verified against this tag: smoke-test it on your GPU node and adjust VLLM_ARGS (ConfigMap glm-serve), e.g. the
+# reasoning parser for GLM's thinking output, before relying on it.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: glm-serve, namespace: lab-model, labels: { app: glm-serve } }
+spec:
+  replicas: 0
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: glm-serve } }
+  template:
+    metadata:
+      labels: { app: glm-serve, lab-role: glm-serve }
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: server
+          image: vllm/vllm-openai:v0.34.0
+          command: [/bin/sh, -c]
+          args: ['exec vllm serve "$MODEL_PATH" --served-model-name "$SERVED_MODEL_NAME" --host 0.0.0.0 --port 8000 $VLLM_ARGS']
+          envFrom: [{ configMapRef: { name: glm-serve } }]
+          env:
+            - { name: HF_HUB_OFFLINE, value: "1" }
+            - { name: TRANSFORMERS_OFFLINE, value: "1" }
+            - { name: VLLM_NO_USAGE_STATS, value: "1" }
+            - { name: DO_NOT_TRACK, value: "1" }
+            - { name: HOME, value: /tmp/home }
+            - { name: XDG_CACHE_HOME, value: /tmp/cache }
+          ports: [{ containerPort: 8000, name: http }]
+          volumeMounts:
+            - { name: models, mountPath: /models, readOnly: true }
+            - { name: shm, mountPath: /dev/shm }                       # NCCL between the 8 GPUs
+            - { name: tmp, mountPath: /tmp }
+          resources:
+            requests: { cpu: "16", memory: 256Gi, nvidia.com/gpu: 8 }
+            limits: { memory: 512Gi, nvidia.com/gpu: 8 }
+          securityContext:
+            allowPrivilegeEscalation: false
+          startupProbe:                                                # loading ~750 GB onto 8 GPUs takes minutes
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            failureThreshold: 360
+          readinessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 30, failureThreshold: 6 }
+      volumes:
+        - { name: models, persistentVolumeClaim: { claimName: models, readOnly: true } }
+        - { name: shm, emptyDir: { medium: Memory, sizeLimit: 64Gi } }
+        - { name: tmp, emptyDir: { sizeLimit: 50Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: glm-serve, namespace: lab-model }
+spec:
+  selector: { app: glm-serve }
+  ports: [{ name: http, port: 8000, targetPort: http }]      # always :8000 for clients, whatever the engine listens on

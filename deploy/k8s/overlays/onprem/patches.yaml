@@ -1,0 +1,32 @@
+# EDIT: fast local storage on the GPU node for the weights. With a node-local class (local-path, TopoLVM, OpenEBS
+# LVM) the volume binds where glm-serve runs, i.e. on the GPU node. An RWX class (Longhorn, CephFS, NFS) also works
+# and lets the phase-2 edit Job run on a CPU node.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: models, namespace: lab-model }
+spec:
+  storageClassName: local-path
+---
+# GPU Operator registers the "nvidia" RuntimeClass. Drop this patch if containerd already uses the NVIDIA runtime by
+# default on your GPU node.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: glm-serve, namespace: lab-model }
+spec:
+  template:
+    spec:
+      runtimeClassName: nvidia
+---
+# EDIT: host name, and the ingress class your cluster has (`kubectl get ingressclass`: traefik, nginx, ...).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: console, namespace: lab-control }
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: lab.example.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: console, port: { name: http } } }

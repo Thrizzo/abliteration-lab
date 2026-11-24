@@ -1,0 +1,47 @@
+# Qdrant: the writeup store for retrieval (copilot.ingest fills it, n8n reads it). Cluster-internal only.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: qdrant, namespace: lab-control, labels: { app: qdrant } }
+spec:
+  replicas: 1
+  serviceName: qdrant
+  selector: { matchLabels: { app: qdrant } }
+  template:
+    metadata:
+      labels: { app: qdrant, lab-role: qdrant }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000                           # the -unprivileged image runs as uid 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:v1.20.2-unprivileged   # matches the Qdrant client in n8n 2.48 (1.20.x)
+          env:
+            - { name: QDRANT__TELEMETRY_DISABLED, value: "true" }
+          ports: [{ containerPort: 6333, name: http }]
+          volumeMounts: [{ name: storage, mountPath: /qdrant/storage }]
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 4Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          readinessProbe: { httpGet: { path: /readyz, port: http }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /livez, port: http }, periodSeconds: 30, failureThreshold: 6 }
+  volumeClaimTemplates:
+    - metadata: { name: storage }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 50Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: qdrant, namespace: lab-control }
+spec:
+  selector: { app: qdrant }
+  ports: [{ name: http, port: 6333, targetPort: http }]

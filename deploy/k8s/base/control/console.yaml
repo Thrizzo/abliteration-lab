@@ -1,0 +1,98 @@
+# The console: today's lab app (abliteration GUI) plus a Caddy sidecar that does the login.
+# The app binds 127.0.0.1:8787 and is only reachable through Caddy on :8080 (basic auth, Secret "basic-auth").
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: console, namespace: lab-control }
+# Its Kubernetes permissions (kill / isolate the model server) are in ../model/console-rbac.yaml, scoped to lab-model.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: workspace, namespace: lab-control }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 200Gi } }     # runs, datasets, uploaded writeups, audit log; small models in dev
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: console, namespace: lab-control, labels: { app: console } }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }                    # one writer on the workspace volume
+  selector: { matchLabels: { app: console } }
+  template:
+    metadata:
+      labels: { app: console, lab-role: console }  # network policies select lab-role, never app
+    spec:
+      serviceAccountName: console
+      imagePullSecrets: [{ name: ghcr }]          # the image is private: see deploy/k8s/README.md
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch        # no recursive chown of a large volume on every start
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: app
+          image: ghcr.io/thrizzo/redteam-llm-lab:latest
+          imagePullPolicy: Always
+          env:
+            - { name: ABL_HOST, value: "127.0.0.1" }                         # only Caddy (same pod) reaches it
+            - { name: OLLAMA_HOST, value: "http://ollama.lab-control.svc:11434" }
+            - { name: QDRANT_URL, value: "http://qdrant.lab-control.svc:6333" }
+            - { name: RAG_COLLECTION, value: writeups }
+            - { name: RAG_EMBED_MODEL, value: nomic-embed-text }
+            - { name: N8N_URL, value: "http://n8n.lab-control.svc:5678" }
+            - { name: GLM_SERVE_URL, value: "http://glm-serve.lab-model.svc:8000" }
+            - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf, key: token, optional: true } } }
+          volumeMounts: [{ name: workspace, mountPath: /workspace }]
+          resources:
+            requests: { cpu: "1", memory: 4Gi }
+            limits: { memory: 16Gi }              # small models run in-process (GLM-Edge-1.5B: ~7 GB in float32)
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          startupProbe:
+            exec: { command: [curl, -fsS, "http://127.0.0.1:8787/healthz"] }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: [curl, -fsS, "http://127.0.0.1:8787/healthz"] }
+            periodSeconds: 20
+            timeoutSeconds: 5
+          livenessProbe:
+            exec: { command: [curl, -fsS, "http://127.0.0.1:8787/healthz"] }
+            periodSeconds: 60
+            timeoutSeconds: 5
+        - name: login
+          image: caddy:2.11.9
+          args: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+          env:
+            - { name: CADDY_USER, valueFrom: { secretKeyRef: { name: basic-auth, key: user } } }
+            - { name: CADDY_HASH, valueFrom: { secretKeyRef: { name: basic-auth, key: hash } } }
+            - { name: XDG_CONFIG_HOME, value: /tmp/caddy/config }
+            - { name: XDG_DATA_HOME, value: /tmp/caddy/data }
+          ports: [{ containerPort: 8080, name: http }]
+          volumeMounts:
+            - { name: caddyfile, mountPath: /etc/caddy, readOnly: true }
+            - { name: caddy-tmp, mountPath: /tmp/caddy }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          readinessProbe: { tcpSocket: { port: 8080 }, periodSeconds: 10 }
+      volumes:
+        - { name: workspace, persistentVolumeClaim: { claimName: workspace } }
+        - { name: caddyfile, configMap: { name: console-caddy } }
+        - { name: caddy-tmp, emptyDir: { sizeLimit: 64Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: console, namespace: lab-control }
+spec:
+  selector: { app: console }
+  ports: [{ name: http, port: 8080, targetPort: http }]
