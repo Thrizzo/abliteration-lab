@@ -390,7 +390,7 @@ $('#chatStop').onclick=()=>ctrl&&ctrl.abort();
 
 // ================================================================== datasets panel
 const DS = { file:'harmful_train.jsonl', q:'', regex:false, source:'', offset:0, limit:40, status:[], sel:new Set(), last:null };
-$('#dataToggle').onclick=()=>{ $('#dataPanel').classList.add('open'); $('#sbomPanel').classList.remove('open'); dataLoad(); };
+$('#dataToggle').onclick=()=>{ $('#dataPanel').classList.add('open'); $('#sbomPanel').classList.remove('open'); $('#servePanel').classList.remove('open'); dataLoad(); };
 $('#dataClose').onclick=()=>$('#dataPanel').classList.remove('open');
 async function dataLoad(){ DS.status=await api('/data'); $('#dataTabs').innerHTML=DS.status.map(f=>`<button class="${f.file===DS.file?'active':''}" data-f="${f.file}">${esc(f.label)} <span class="mono">${f.rows_now}</span>${f.edited?' ✎':''}</button>`).join('');
   $('#dataTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{ DS.file=b.dataset.f; DS.offset=0; DS.source=''; DS.sel.clear(); dataLoad(); });
@@ -426,7 +426,7 @@ async function dataRemoved(){ const rows=await api(`/data/${DS.file}/removed`); 
 
 // ================================================================== SBOM panel
 let sbomT=null;
-$('#sbomToggle').onclick=()=>{ $('#sbomPanel').classList.add('open'); $('#dataPanel').classList.remove('open'); sbomLoad(); };
+$('#sbomToggle').onclick=()=>{ $('#sbomPanel').classList.add('open'); $('#dataPanel').classList.remove('open'); $('#servePanel').classList.remove('open'); sbomLoad(); };
 $('#sbomClose').onclick=()=>{ $('#sbomPanel').classList.remove('open'); clearInterval(sbomT); };
 $('#sbomGen').onclick=async()=>{ await api('/sbom/generate', {}); toast('SBOM generation started (PyPI advisory lookups, ~1 min)'); clearInterval(sbomT); sbomT=setInterval(sbomLoad, 3000); };
 $('#sbomQ').oninput=$('#sbomVulnOnly').onchange=()=>sbomRenderPkgs();
@@ -442,3 +442,25 @@ async function sbomLoad(){ const st=await api('/sbom'); $('#sbomGen').disabled=s
 function sbomRenderPkgs(){ if(!SB) return; const q=$('#sbomQ').value.toLowerCase(), only=$('#sbomVulnOnly').checked;
   const rows=SB.packages.filter(p=>(!q||p.name.toLowerCase().includes(q))&&(!only||p.vulns.length));
   $('#sbomPackages').innerHTML=`<div class="small">${rows.length} packages</div><table><tr><th>env</th><th>package</th><th>version</th><th>licence</th><th>advisories</th></tr>${rows.map(p=>`<tr><td class="small">${esc(p.env)}</td><td class="mono">${esc(p.name)}</td><td class="mono">${esc(p.version)}</td><td class="small">${esc(p.license||'')}</td><td class="small">${p.vulns.length?p.vulns.map(v=>`<div class="vuln"><b>${esc(v.id)}</b> fix: ${esc(v.fixed_in.join(', ')||'none')} — ${esc(v.summary)}</div>`).join(''):(p.error?'<span class="small">not checkable</span>':'')}</td></tr>`).join('')}</table>`; }
+
+// ================================================================== serving panel (Kubernetes: Promote / Rollback)
+let serveT=null;
+api('/serving').then(()=>{ $('#serveToggle').style.display=''; }).catch(()=>{});      // 404 outside Kubernetes: no button
+$('#serveToggle').onclick=()=>{ ['#dataPanel','#sbomPanel'].forEach(p=>$(p).classList.remove('open')); $('#servePanel').classList.add('open'); serveLoad(); clearInterval(serveT); serveT=setInterval(serveLoad, 5000); };
+$('#serveClose').onclick=()=>{ $('#servePanel').classList.remove('open'); clearInterval(serveT); };
+$('#serveRollback').onclick=async()=>{ if(!confirm('Go back to the run promoted before this one?')) return; try{ await api('/serving/rollback', {}); toast('rolled back'); }catch(e){ toast(e.message,true); } serveLoad(); };
+async function serveLoad(){
+  let s; try{ s=await api('/serving'); }catch(e){ $('#serveNow').innerHTML=`<div class="small vuln">${esc(e.message)}</div>`; return; }
+  const d=s.deployment||{}, cur=s.current;
+  const state = d.error ? `unknown (${esc(d.error)})` : `${d.ready||0} of ${d.replicas||0} running`;
+  $('#serveNow').innerHTML = `<div class="row"><b>Now serving</b>${cur ? `<span class="mono">${esc(cur.run_id)}</span><span class="small">${esc(cur.model||'')} · layer ${cur.layer??'–'} · ${esc(cur.action)} ${esc(cur.at)}</span>` : '<span class="small">nothing promoted yet</span>'}</div>`
+    + `<div class="small">engine <span class="mono">${esc(s.mode)}</span>${s.served_name?` · served as <span class="mono">${esc(s.served_name)}</span>`:''} · glm-serve ${state}</div>`
+    + (s.busy?`<div class="small">${esc(s.busy)} …</div>`:'') + (s.error?`<div class="small vuln">${esc(s.error)}</div>`:'');
+  $('#serveRollback').disabled = !!s.busy || (s.history||[]).length < 2;
+  $('#serveInfo').textContent = s.mode==='vllm' ? 'vLLM: Promote points glm-serve at the run and restarts it if it is running' : 'Ollama: Promote publishes the run’s GGUF under the served name';
+  const rows=s.candidates||[];
+  $('#serveRuns').innerHTML = rows.length ? `<table><tr><th>run</th><th>model</th><th class="num">layer</th><th>validation</th><th></th></tr>${rows.map(r=>`<tr><td class="mono">${esc(r.run_id)}</td><td>${esc(r.model||'')}</td><td class="num">${r.layer??'–'}</td><td>${esc(r.verdict||'not validated')}</td><td>${cur&&cur.run_id===r.run_id?'<span class="small">serving</span>':`<button class="btn sm" data-promote="${esc(r.run_id)}" ${r.promotable&&!s.busy?'':'disabled'} title="${esc(r.why||'')}">Promote</button>`}</td></tr>`).join('')}</table>` : '<div class="empty">No run has an edited model yet: run Abliterate first.</div>';
+  $('#serveRuns').querySelectorAll('[data-promote]').forEach(b=>b.onclick=async()=>{ const id=b.dataset.promote; if(!confirm(`Promote run ${id}? The copilot uses it from the next request.`)) return; try{ await api('/serving/promote', {run_id:id}); toast(`run ${id} promoted`); }catch(e){ toast(e.message,true); } serveLoad(); });
+  const h=s.history||[];
+  $('#serveHist').innerHTML = h.length ? `<table><tr><th>when</th><th>action</th><th>run</th><th>model</th><th class="num">layer</th></tr>${h.map(e=>`<tr><td class="small">${esc(e.at)}</td><td>${esc(e.action)}</td><td class="mono">${esc(e.run_id)}</td><td>${esc(e.model||'')}</td><td class="num">${e.layer??'–'}</td></tr>`).join('')}</table>` : '<div class="empty">No promotions yet.</div>';
+}

@@ -1,9 +1,0 @@
-# The weights: base checkpoint, run candidates, the promoted version and the previous one (rollback).
-# GLM-5.3 as FP8 is ~750 GB per copy: 4 TiB holds base + promoted + previous + one candidate.
-# Overlays set the storage class: local NVMe on the GPU node (onprem) or fast RWX file storage (cloud).
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata: { name: models, namespace: lab-model }
-spec:
-  accessModes: [ReadWriteOnce]
-  resources: { requests: { storage: 4Ti } }

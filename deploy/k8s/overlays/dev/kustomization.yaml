@@ -1,8 +1,8 @@
 # Phase 0: the whole stack on a small cluster without GPUs (Rancher Desktop's k3s, kind, a spare VM).
 #   kubectl apply -k deploy/k8s/overlays/dev
-# Same namespaces, policies, RBAC and kill/isolate path as the GPU overlays; only the model server differs: glm-serve
-# runs Ollama with a small abliterated model (e.g. GLM-Edge-1.5B from the lab app's Compare stage) instead of vLLM.
-# Clients still use glm-serve.lab-model.svc:8000 (in n8n: an Ollama credential with that Base URL).
+# Same namespaces, policies, RBAC and Kill / Isolate path as the GPU overlays; only the model server differs: glm-serve
+# runs Ollama (CPU) instead of vLLM, and Promote publishes a run's GGUF there as "glm-abl". Clients still use
+# glm-serve.lab.svc:8000 (in n8n: an Ollama credential with that Base URL, model glm-abl).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -11,13 +11,13 @@ patches:
   - path: sizes.yaml
   - target: { kind: Deployment, name: glm-serve }
     path: glm-serve-ollama.yaml
-  # the lab app imports the models it abliterates into glm-serve (its Compare stage talks to OLLAMA_HOST).
+  # the lab app's Compare stage and the deploy stage talk to OLLAMA_HOST: in dev that is glm-serve.
   # IfNotPresent: on Rancher Desktop with the dockerd engine, Kubernetes uses the image `docker compose ... --build`
   # already built locally (same tag), so no GHCR pull secret is needed.
   - patch: |-
       apiVersion: apps/v1
       kind: Deployment
-      metadata: { name: console, namespace: lab-control }
+      metadata: { name: console, namespace: lab }
       spec:
         template:
           spec:
@@ -25,4 +25,12 @@ patches:
               - name: app
                 imagePullPolicy: IfNotPresent
                 env:
-                  - { name: OLLAMA_HOST, value: "http://glm-serve.lab-model.svc:8000" }
+                  - { name: OLLAMA_HOST, value: "http://glm-serve.lab.svc:8000" }
+configMapGenerator:
+  - name: lab-jobs
+    namespace: lab
+    behavior: replace
+    files:
+      - jobs.json
+generatorOptions:
+  disableNameSuffixHash: true

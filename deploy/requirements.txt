@@ -1,5 +1,6 @@
 # main environment of the container (/opt/venv), pinned to the versions validated on 2026-11-16.
-# torch comes from the cu128 index (Dockerfile ARG TORCH_INDEX); bump deliberately and re-run the pipeline test.
+# torch comes from the cu128 index (the Dockerfile swaps cu128 for its TORCH_FLAVOR build arg, e.g. cpu); bump
+# deliberately and re-run the pipeline test.
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch==2.11.0+cu128
 transformers==5.23.0

@@ -1,17 +1,29 @@
-# EDIT: fast local storage on the GPU node for the weights. With a node-local class (local-path, TopoLVM, OpenEBS
-# LVM) the volume binds where glm-serve runs, i.e. on the GPU node. An RWX class (Longhorn, CephFS, NFS) also works
-# and lets the phase-2 edit Job run on a CPU node.
+# EDIT: fast storage for the workspace. With a node-local class (local-path, TopoLVM, OpenEBS LVM) the volume lives on
+# the GPU node, so everything that mounts it (console, every Job, glm-serve) must run there too: that is what the
+# console patch below and the classes in jobs.json do. An RWX class (Longhorn, CephFS, NFS) frees the console and the
+# CPU stages to run on other nodes.
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: { name: models, namespace: lab-model }
+metadata: { name: workspace, namespace: lab }
 spec:
   storageClassName: local-path
+---
+# the console mounts the node-local workspace: it runs on the GPU node (it uses no GPU there)
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: console, namespace: lab }
+spec:
+  template:
+    spec:
+      nodeSelector: { redteam-llm-lab/gpu-node: "true" }
+      tolerations:
+        - { key: redteam-llm-lab/gpu-node, operator: Exists, effect: NoSchedule }
 ---
 # GPU Operator registers the "nvidia" RuntimeClass. Drop this patch if containerd already uses the NVIDIA runtime by
 # default on your GPU node.
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: glm-serve, namespace: lab-model }
+metadata: { name: glm-serve, namespace: lab }
 spec:
   template:
     spec:
@@ -20,7 +32,7 @@ spec:
 # EDIT: host name, and the ingress class your cluster has (`kubectl get ingressclass`: traefik, nginx, ...).
 apiVersion: networking.k8s.io/v1
 kind: Ingress
-metadata: { name: console, namespace: lab-control }
+metadata: { name: console, namespace: lab }
 spec:
   ingressClassName: traefik
   rules:

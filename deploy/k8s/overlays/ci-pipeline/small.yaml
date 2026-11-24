@@ -1,0 +1,73 @@
+# Fit a GitHub-hosted runner (4 vCPU, 16 GB) next to the pipeline Jobs.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: workspace, namespace: lab }
+spec:
+  resources: { requests: { storage: 5Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: ollama, namespace: lab-copilot }
+spec:
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: n8n-data, namespace: lab-copilot }
+spec:
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: console, namespace: lab }
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          resources: { requests: { cpu: 100m, memory: 512Mi }, limits: { memory: 4Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ollama, namespace: lab-copilot }
+spec:
+  template:
+    spec:
+      containers:
+        - name: ollama
+          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 2Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: n8n, namespace: lab-copilot }
+spec:
+  template:
+    spec:
+      containers:
+        - name: n8n
+          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 2Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: glm-serve, namespace: lab }
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 3Gi } }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: qdrant, namespace: lab-copilot }
+spec:
+  template:
+    spec:
+      containers:
+        - name: qdrant
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { memory: 1Gi } }
+  volumeClaimTemplates:
+    - metadata: { name: storage }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }

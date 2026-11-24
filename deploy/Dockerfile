@@ -22,8 +22,12 @@ RUN git init -q /opt/llama.cpp && cd /opt/llama.cpp \
 
 # ---- main environment
 FROM base AS app
+# TORCH_FLAVOR=cpu builds a CPU-only image (no CUDA libraries, several GB smaller) for dev clusters and CI:
+#   docker build -f deploy/Dockerfile --build-arg TORCH_FLAVOR=cpu -t ghcr.io/thrizzo/redteam-llm-lab:cpu .
+ARG TORCH_FLAVOR=cu128
 COPY deploy/requirements.txt /tmp/requirements.txt
-RUN python -m venv /opt/venv \
+RUN sed -i "s#/whl/cu128#/whl/${TORCH_FLAVOR}#; s#+cu128#+${TORCH_FLAVOR}#" /tmp/requirements.txt \
+ && python -m venv /opt/venv \
  && /opt/venv/bin/pip install --quiet "pip==26.3" \
  && /opt/venv/bin/pip install -r /tmp/requirements.txt
 COPY --from=gguf /opt/llama.cpp /opt/llama.cpp

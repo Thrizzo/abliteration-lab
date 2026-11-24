@@ -1,17 +1,17 @@
 # Ollama for the regular models: the judge (qwen3:8b, thinking off in the workflow) and the embeddings
-# (nomic-embed-text). Not the abliterated model: that one runs in lab-model (glm-serve).
-# On start it pulls the models listed in ConfigMap ollama-models, so it is the one pod in lab-control that may reach
+# (nomic-embed-text). Not the abliterated model: that one runs in lab (glm-serve).
+# On start it pulls the models listed in ConfigMap ollama-models, so it is the one pod in lab-copilot that may reach
 # the internet on 443 (network-policies.yaml).
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: { name: ollama, namespace: lab-control }
+metadata: { name: ollama, namespace: lab-copilot }
 spec:
   accessModes: [ReadWriteOnce]
   resources: { requests: { storage: 50Gi } }
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: ollama, namespace: lab-control, labels: { app: ollama } }
+metadata: { name: ollama, namespace: lab-copilot, labels: { app: ollama } }
 spec:
   replicas: 1
   strategy: { type: Recreate }
@@ -51,7 +51,7 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: { name: ollama, namespace: lab-control }
+metadata: { name: ollama, namespace: lab-copilot }
 spec:
   selector: { app: ollama }
   ports: [{ name: http, port: 11434, targetPort: http }]

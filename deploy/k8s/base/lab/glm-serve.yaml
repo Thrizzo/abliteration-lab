@@ -1,16 +1,17 @@
 # glm-serve: vLLM serving the promoted abliterated model to the copilot (OpenAI-compatible API on :8000).
 #
-# - replicas 0: it starts when you press Start / Promote (or `kubectl -n lab-model scale deploy/glm-serve --replicas=1`).
+# - replicas 0: started by you (`kubectl -n lab scale deploy/glm-serve --replicas=1`, or Start in the console later).
 # - Recreate: one 8-GPU node never holds two copies.
-# - offline: no egress at all (network-policies.yaml), no Hugging Face access, weights mounted read-only.
-# - Kill (console or README fallback) removes the allow policy, scales this to 0 and deletes the pod with grace 0.
+# - offline: no egress at all (network-policies.yaml), no Hugging Face access, the workspace mounted read-only.
+# - Promote (console) sets MODEL_PATH in ConfigMap glm-serve to a run's model folder and restarts the pod.
+# - Kill removes the allow policy, scales this to 0 and deletes the pod with grace 0.
 #
 # vLLM version: pinned to the newest release when this was written. GLM-5.x support (MoE + DSA sparse attention, FP8)
 # was NOT verified against this tag: smoke-test it on your GPU node and adjust VLLM_ARGS (ConfigMap glm-serve), e.g. the
 # reasoning parser for GLM's thinking output, before relying on it.
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: glm-serve, namespace: lab-model, labels: { app: glm-serve } }
+metadata: { name: glm-serve, namespace: lab, labels: { app: glm-serve } }
 spec:
   replicas: 0
   strategy: { type: Recreate }
@@ -39,7 +40,7 @@ spec:
             - { name: XDG_CACHE_HOME, value: /tmp/cache }
           ports: [{ containerPort: 8000, name: http }]
           volumeMounts:
-            - { name: models, mountPath: /models, readOnly: true }
+            - { name: workspace, mountPath: /workspace, readOnly: true }
             - { name: shm, mountPath: /dev/shm }                       # NCCL between the 8 GPUs
             - { name: tmp, mountPath: /tmp }
           resources:
@@ -54,13 +55,13 @@ spec:
           readinessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 10 }
           livenessProbe: { httpGet: { path: /health, port: http }, periodSeconds: 30, failureThreshold: 6 }
       volumes:
-        - { name: models, persistentVolumeClaim: { claimName: models, readOnly: true } }
+        - { name: workspace, persistentVolumeClaim: { claimName: workspace, readOnly: true } }
         - { name: shm, emptyDir: { medium: Memory, sizeLimit: 64Gi } }
         - { name: tmp, emptyDir: { sizeLimit: 50Gi } }
 ---
 apiVersion: v1
 kind: Service
-metadata: { name: glm-serve, namespace: lab-model }
+metadata: { name: glm-serve, namespace: lab }
 spec:
   selector: { app: glm-serve }
   ports: [{ name: http, port: 8000, targetPort: http }]      # always :8000 for clients, whatever the engine listens on

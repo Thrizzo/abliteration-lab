@@ -1,0 +1,11 @@
+# The shared workspace: models/ (downloads), runs/ (one folder per run, with its edited model in runs/<run>/model),
+# data/ (prompt sets), gguf/, serving/ (promotion history), writeups/. Mounted at /workspace by the console, every Job
+# and (read-only) glm-serve, so a path means the same thing everywhere.
+# GLM-5.3 as FP8 is ~750 GB per copy: 4 TiB holds the base, the promoted run, the previous one and a candidate.
+# Overlays set the storage class: node-local NVMe on the GPU node (onprem) or fast shared RWX storage (cloud).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: workspace, namespace: lab }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 4Ti } }

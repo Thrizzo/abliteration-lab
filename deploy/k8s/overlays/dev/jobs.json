@@ -1,0 +1,15 @@
+{
+  "_comment": "Dev (no GPU): every stage runs on the CPU of the one node; GLM-Edge-1.5B needs ~7 GB in float32 for scan / validate. glm-serve is Ollama: the deploy stage uploads GGUFs to it, Promote publishes one run's GGUF as glm-abl.",
+  "image": "ghcr.io/thrizzo/redteam-llm-lab:latest",
+  "imagePullPolicy": "IfNotPresent",
+  "imagePullSecrets": [],
+  "workspaceClaim": "workspace",
+  "ttlSecondsAfterFinished": 86400,
+  "env": { "OLLAMA_HOST": "http://glm-serve.lab.svc:8000" },
+  "classes": {
+    "light": { "resources": { "requests": { "cpu": "250m", "memory": "1Gi" }, "limits": { "memory": "4Gi" } } },
+    "cpu": { "resources": { "requests": { "cpu": "1", "memory": "2Gi" }, "limits": { "memory": "12Gi" } } },
+    "gpu": { "resources": { "requests": { "cpu": "2", "memory": "4Gi" }, "limits": { "memory": "12Gi" } } }
+  },
+  "serving": { "mode": "ollama", "deployment": "glm-serve", "configmap": "glm-serve", "servedName": "glm-abl", "exclusiveGpu": false }
+}

@@ -2,7 +2,7 @@
 # around it is the real thing: Caddy login, Service, network policies, the console ServiceAccount.
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: console, namespace: lab-control }
+metadata: { name: console, namespace: lab }
 spec:
   template:
     spec:

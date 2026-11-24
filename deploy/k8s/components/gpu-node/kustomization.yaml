@@ -10,7 +10,7 @@ patches:
     patch: |-
       apiVersion: apps/v1
       kind: Deployment
-      metadata: { name: glm-serve, namespace: lab-model }
+      metadata: { name: glm-serve, namespace: lab }
       spec:
         template:
           spec:

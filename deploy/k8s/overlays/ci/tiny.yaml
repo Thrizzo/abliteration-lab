@@ -1,31 +1,25 @@
 # Fit a GitHub-hosted runner (4 vCPU, 16 GB): small requests and 1 Gi volumes.
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: { name: models, namespace: lab-model }
+metadata: { name: workspace, namespace: lab }
 spec:
   resources: { requests: { storage: 1Gi } }
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: { name: workspace, namespace: lab-control }
+metadata: { name: ollama, namespace: lab-copilot }
 spec:
   resources: { requests: { storage: 1Gi } }
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: { name: ollama, namespace: lab-control }
-spec:
-  resources: { requests: { storage: 1Gi } }
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata: { name: n8n-data, namespace: lab-control }
+metadata: { name: n8n-data, namespace: lab-copilot }
 spec:
   resources: { requests: { storage: 1Gi } }
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: console, namespace: lab-control }
+metadata: { name: console, namespace: lab }
 spec:
   template:
     spec:
@@ -35,7 +29,7 @@ spec:
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: ollama, namespace: lab-control }
+metadata: { name: ollama, namespace: lab-copilot }
 spec:
   template:
     spec:
@@ -45,7 +39,7 @@ spec:
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: n8n, namespace: lab-control }
+metadata: { name: n8n, namespace: lab-copilot }
 spec:
   template:
     spec:
@@ -55,7 +49,7 @@ spec:
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: glm-serve, namespace: lab-model }
+metadata: { name: glm-serve, namespace: lab }
 spec:
   template:
     spec:
@@ -65,7 +59,7 @@ spec:
 ---
 apiVersion: apps/v1
 kind: StatefulSet
-metadata: { name: qdrant, namespace: lab-control }
+metadata: { name: qdrant, namespace: lab-copilot }
 spec:
   template:
     spec:

@@ -23,6 +23,7 @@
     <span title="Ollama"><span class="dot" id="dotOll"></span>ollama</span>
     <button class="btn sm" id="dataToggle">datasets</button>
     <button class="btn sm" id="sbomToggle">SBOM</button>
+    <button class="btn sm" id="serveToggle" style="display:none">serving</button>
     <button class="btn sm" id="logToggle">log</button>
   </div>
 </header>
@@ -139,6 +140,14 @@
   <div class="card"><h3>Project modules <small>the pipeline's own Python files and the third-party packages they use</small></h3><div id="sbomModules"></div></div>
   <div class="card"><h3>Packages</h3><div class="row"><input type="text" id="sbomQ" placeholder="filter packages" style="max-width:300px"><label class="small"><input type="checkbox" id="sbomVulnOnly"> only with advisories</label></div><div id="sbomPackages"></div></div>
   <div class="card"><h3>Other components</h3><div id="sbomExtra"></div></div>
+</div></section>
+
+<!-- ============================================================ serving panel (Kubernetes only) -->
+<section class="panel" id="servePanel"><div class="inner">
+  <div class="row" style="justify-content:space-between"><div><h2>Serving</h2><div class="small">Which run's abliterated model glm-serve gives the pentest copilot. Promote a finished run after reading its validation; Rollback returns to the run before. Every change is kept in <span class="mono">serving/history.json</span>.</div></div><button class="btn sm" id="serveClose">close</button></div>
+  <div class="card"><div id="serveNow"></div><div class="row"><button class="btn" id="serveRollback">Rollback</button><span class="small" id="serveInfo"></span></div></div>
+  <div class="card"><h3>Runs with an edited model</h3><div id="serveRuns"></div></div>
+  <div class="card"><h3>History</h3><div id="serveHist"></div></div>
 </div></section>
 
 <script src="/static/guide.js"></script>

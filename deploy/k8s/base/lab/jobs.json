@@ -1,0 +1,23 @@
+{
+  "_comment": "How the console runs pipeline stages as Jobs (app/k8sjobs.py). Classes: light = download, cpu = apply (weight edit) and deploy (GGUF), gpu = everything that loads the model (scan, measure, validate, continue, all). This base version is for a GPU node serving with vLLM; each overlay ships its own copy.",
+  "image": "ghcr.io/thrizzo/redteam-llm-lab:latest",
+  "imagePullPolicy": "IfNotPresent",
+  "imagePullSecrets": ["ghcr"],
+  "workspaceClaim": "workspace",
+  "ttlSecondsAfterFinished": 86400,
+  "env": {},
+  "classes": {
+    "light": { "resources": { "requests": { "cpu": "1", "memory": "4Gi" }, "limits": { "memory": "16Gi" } } },
+    "cpu": { "resources": { "requests": { "cpu": "8", "memory": "32Gi" }, "limits": { "memory": "128Gi" } } },
+    "gpu": {
+      "resources": { "requests": { "cpu": "16", "memory": "128Gi", "nvidia.com/gpu": 8 }, "limits": { "memory": "512Gi", "nvidia.com/gpu": 8 } },
+      "nodeSelector": { "redteam-llm-lab/gpu-node": "true" },
+      "tolerations": [
+        { "key": "redteam-llm-lab/gpu-node", "operator": "Exists", "effect": "NoSchedule" },
+        { "key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule" }
+      ],
+      "activeDeadlineSeconds": 259200
+    }
+  },
+  "serving": { "mode": "vllm", "deployment": "glm-serve", "configmap": "glm-serve", "servedName": "glm-abl", "exclusiveGpu": true }
+}

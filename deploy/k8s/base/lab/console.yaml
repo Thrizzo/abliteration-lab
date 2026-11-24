@@ -1,23 +1,18 @@
-# The console: today's lab app (abliteration GUI) plus a Caddy sidecar that does the login.
-# The app binds 127.0.0.1:8787 and is only reachable through Caddy on :8080 (basic auth, Secret "basic-auth").
+# The console: the lab app (abliteration GUI) plus a Caddy sidecar that does the login.
+# - The app binds 127.0.0.1:8787 and is only reachable through Caddy on :8080 (basic auth, Secret "basic-auth").
+# - ABL_RUNNER=k8s: every pipeline stage runs as a Job in this namespace (app/k8sjobs.py, settings: ConfigMap lab-jobs),
+#   on the same workspace volume, so the GUI shows runs, charts and logs exactly as with a local run.
 apiVersion: v1
 kind: ServiceAccount
-metadata: { name: console, namespace: lab-control }
-# Its Kubernetes permissions (kill / isolate the model server) are in ../model/console-rbac.yaml, scoped to lab-model.
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata: { name: workspace, namespace: lab-control }
-spec:
-  accessModes: [ReadWriteOnce]
-  resources: { requests: { storage: 200Gi } }     # runs, datasets, uploaded writeups, audit log; small models in dev
+metadata: { name: console, namespace: lab }
+# Its permissions (run Jobs, read their logs, Promote, Kill / Isolate glm-serve) are in console-rbac.yaml.
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: console, namespace: lab-control, labels: { app: console } }
+metadata: { name: console, namespace: lab, labels: { app: console } }
 spec:
   replicas: 1
-  strategy: { type: Recreate }                    # one writer on the workspace volume
+  strategy: { type: Recreate }                    # one console per workspace
   selector: { matchLabels: { app: console } }
   template:
     metadata:
@@ -25,7 +20,7 @@ spec:
     spec:
       serviceAccountName: console
       imagePullSecrets: [{ name: ghcr }]          # the image is private: see deploy/k8s/README.md
-      terminationGracePeriodSeconds: 60
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -39,17 +34,21 @@ spec:
           imagePullPolicy: Always
           env:
             - { name: ABL_HOST, value: "127.0.0.1" }                         # only Caddy (same pod) reaches it
-            - { name: OLLAMA_HOST, value: "http://ollama.lab-control.svc:11434" }
-            - { name: QDRANT_URL, value: "http://qdrant.lab-control.svc:6333" }
+            - { name: ABL_RUNNER, value: k8s }
+            - { name: LAB_JOBS_SETTINGS, value: /etc/lab/jobs.json }
+            - { name: OLLAMA_HOST, value: "http://ollama.lab-copilot.svc:11434" }
+            - { name: QDRANT_URL, value: "http://qdrant.lab-copilot.svc:6333" }
             - { name: RAG_COLLECTION, value: writeups }
             - { name: RAG_EMBED_MODEL, value: nomic-embed-text }
-            - { name: N8N_URL, value: "http://n8n.lab-control.svc:5678" }
-            - { name: GLM_SERVE_URL, value: "http://glm-serve.lab-model.svc:8000" }
+            - { name: N8N_URL, value: "http://n8n.lab-copilot.svc:5678" }
+            - { name: GLM_SERVE_URL, value: "http://glm-serve.lab.svc:8000" }
             - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf, key: token, optional: true } } }
-          volumeMounts: [{ name: workspace, mountPath: /workspace }]
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: lab-jobs, mountPath: /etc/lab, readOnly: true }
           resources:
             requests: { cpu: "1", memory: 4Gi }
-            limits: { memory: 16Gi }              # small models run in-process (GLM-Edge-1.5B: ~7 GB in float32)
+            limits: { memory: 16Gi }              # the in-process layer lab loads small models (GLM-Edge-1.5B: ~7 GB in float32)
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
@@ -87,12 +86,13 @@ spec:
           readinessProbe: { tcpSocket: { port: 8080 }, periodSeconds: 10 }
       volumes:
         - { name: workspace, persistentVolumeClaim: { claimName: workspace } }
+        - { name: lab-jobs, configMap: { name: lab-jobs } }
         - { name: caddyfile, configMap: { name: console-caddy } }
         - { name: caddy-tmp, emptyDir: { sizeLimit: 64Mi } }
 ---
 apiVersion: v1
 kind: Service
-metadata: { name: console, namespace: lab-control }
+metadata: { name: console, namespace: lab }
 spec:
   selector: { app: console }
   ports: [{ name: http, port: 8080, targetPort: http }]

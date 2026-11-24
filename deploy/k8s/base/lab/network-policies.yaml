@@ -1,0 +1,93 @@
+# lab: deny everything, then open exactly what is used. Policies select pods by label, never by name.
+#
+# Kubernetes network policies only ever ALLOW: a "deny all" policy added next to an allow policy changes nothing.
+# So Isolate works by DELETING glm-serve-allow (default-deny stays), and Release / Start re-create it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: lab }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-dns, namespace: lab }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+# console: reached only by the ingress controller (adjust the namespaces to where yours runs) on the login port.
+# It talks to the copilot services, to glm-serve, and to 443/6443 for the Kubernetes API (Jobs, Promote, Kill).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: console, namespace: lab }
+spec:
+  podSelector: { matchLabels: { lab-role: console } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - { key: kubernetes.io/metadata.name, operator: In, values: [kube-system, ingress-nginx, traefik] }
+      ports: [{ port: 8080, protocol: TCP }]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: lab-copilot } }
+          podSelector: { matchLabels: { lab-role: n8n } }
+      ports: [{ port: 5678, protocol: TCP }]
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: lab-copilot } }
+          podSelector: { matchLabels: { lab-role: qdrant } }
+      ports: [{ port: 6333, protocol: TCP }]
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: lab-copilot } }
+          podSelector: { matchLabels: { lab-role: ollama } }
+      ports: [{ port: 11434, protocol: TCP }]
+    - to: [{ podSelector: { matchLabels: { lab-role: glm-serve } } }]
+      ports: [{ port: 8000, protocol: TCP }, { port: 11434, protocol: TCP }]
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0 } }]
+      ports: [{ port: 443, protocol: TCP }, { port: 6443, protocol: TCP }]
+---
+# The one opening into the model server: the console, n8n (copilot operator) and Jobs that publish to it (deploy).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: glm-serve-allow, namespace: lab }
+spec:
+  podSelector: { matchLabels: { lab-role: glm-serve } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { lab-role: console } }
+        - podSelector: { matchLabels: { lab-egress-model: "true" } }
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: lab-copilot } }
+          podSelector: { matchLabels: { lab-role: n8n } }
+      ports: [{ port: 8000, protocol: TCP }, { port: 11434, protocol: TCP }]   # vLLM; Ollama in the dev overlay
+---
+# Pipeline Jobs get only what their stage needs (labels set by the console, app/k8sjobs.py):
+#   lab-egress-internet  download / all: Hugging Face on 443 (model and prompt datasets)
+#   lab-egress-model     deploy / continue / all without --no-ollama: the GGUF upload to glm-serve
+# scan, measure, apply and validate get neither: they run offline on the workspace volume.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: jobs-internet, namespace: lab }
+spec:
+  podSelector: { matchLabels: { app: lab-job, lab-egress-internet: "true" } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0 } }]
+      ports: [{ port: 443, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: jobs-model, namespace: lab }
+spec:
+  podSelector: { matchLabels: { app: lab-job, lab-egress-model: "true" } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { lab-role: glm-serve } } }]
+      ports: [{ port: 8000, protocol: TCP }, { port: 11434, protocol: TCP }]

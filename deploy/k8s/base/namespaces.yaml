@@ -1,13 +1,14 @@
-# Two namespaces on purpose:
-#   lab-control  everything you talk to (console, n8n, Qdrant, judge/embeddings)
-#   lab-model    the abliterated model server and its weights. The console's kill/isolate permissions are scoped to this
-#                namespace, so nothing else that matters should run here. (Phase 2 adds the abliteration Jobs: they need
-#                the same weights volume, and a PersistentVolumeClaim cannot be shared across namespaces.)
-# Pod Security: baseline is enforced; restricted is reported as warnings (Ollama and n8n images need small exceptions).
+# Two namespaces:
+#   lab          everything that touches the model weights: the console (lab app + login), the abliteration Jobs it
+#                starts, glm-serve (the abliterated model server) and the workspace volume they share. A
+#                PersistentVolumeClaim belongs to one namespace, and all of these read or write the same weights.
+#   lab-copilot  the copilot's services: n8n (engine), Qdrant (retrieval), Ollama (judge + embeddings)
+# The console's Kill / Isolate / Job permissions are limited to lab.
+# Pod Security: baseline is enforced; restricted is reported as warnings (Ollama and vLLM run as root).
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: lab-control
+  name: lab
   labels:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: restricted
@@ -15,7 +16,7 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: lab-model
+  name: lab-copilot
   labels:
     pod-security.kubernetes.io/enforce: baseline
     pod-security.kubernetes.io/warn: restricted

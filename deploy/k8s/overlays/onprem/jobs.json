@@ -1,0 +1,32 @@
+{
+  "_comment": "On-prem: the workspace is node-local on the GPU node, so every stage runs there. light = download, cpu = apply / deploy, gpu = scan / measure / validate / continue / all. One GPU node: GPU stages wait until glm-serve is stopped (exclusiveGpu).",
+  "image": "ghcr.io/thrizzo/redteam-llm-lab:latest",
+  "imagePullPolicy": "IfNotPresent",
+  "imagePullSecrets": ["ghcr"],
+  "workspaceClaim": "workspace",
+  "ttlSecondsAfterFinished": 86400,
+  "env": {},
+  "classes": {
+    "light": {
+      "resources": { "requests": { "cpu": "1", "memory": "4Gi" }, "limits": { "memory": "16Gi" } },
+      "nodeSelector": { "redteam-llm-lab/gpu-node": "true" },
+      "tolerations": [ { "key": "redteam-llm-lab/gpu-node", "operator": "Exists", "effect": "NoSchedule" } ]
+    },
+    "cpu": {
+      "resources": { "requests": { "cpu": "8", "memory": "32Gi" }, "limits": { "memory": "128Gi" } },
+      "nodeSelector": { "redteam-llm-lab/gpu-node": "true" },
+      "tolerations": [ { "key": "redteam-llm-lab/gpu-node", "operator": "Exists", "effect": "NoSchedule" } ]
+    },
+    "gpu": {
+      "resources": { "requests": { "cpu": "16", "memory": "128Gi", "nvidia.com/gpu": 8 }, "limits": { "memory": "512Gi", "nvidia.com/gpu": 8 } },
+      "nodeSelector": { "redteam-llm-lab/gpu-node": "true" },
+      "tolerations": [
+        { "key": "redteam-llm-lab/gpu-node", "operator": "Exists", "effect": "NoSchedule" },
+        { "key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule" }
+      ],
+      "runtimeClassName": "nvidia",
+      "activeDeadlineSeconds": 259200
+    }
+  },
+  "serving": { "mode": "vllm", "deployment": "glm-serve", "configmap": "glm-serve", "servedName": "glm-abl", "exclusiveGpu": true }
+}

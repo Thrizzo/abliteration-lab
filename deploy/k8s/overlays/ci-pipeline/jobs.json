@@ -1,0 +1,15 @@
+{
+  "_comment": "CI: the image built from this commit, tiny CPU classes, glm-serve is Ollama.",
+  "image": "ghcr.io/thrizzo/redteam-llm-lab:ci",
+  "imagePullPolicy": "IfNotPresent",
+  "imagePullSecrets": [],
+  "workspaceClaim": "workspace",
+  "ttlSecondsAfterFinished": 3600,
+  "env": { "OLLAMA_HOST": "http://glm-serve.lab.svc:8000" },
+  "classes": {
+    "light": { "resources": { "requests": { "cpu": "100m", "memory": "256Mi" }, "limits": { "memory": "3Gi" } } },
+    "cpu": { "resources": { "requests": { "cpu": "250m", "memory": "512Mi" }, "limits": { "memory": "4Gi" } } },
+    "gpu": { "resources": { "requests": { "cpu": "250m", "memory": "512Mi" }, "limits": { "memory": "4Gi" } } }
+  },
+  "serving": { "mode": "ollama", "deployment": "glm-serve", "configmap": "glm-serve", "servedName": "glm-abl", "exclusiveGpu": false }
+}

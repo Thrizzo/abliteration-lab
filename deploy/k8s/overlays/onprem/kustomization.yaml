@@ -1,6 +1,6 @@
 # On-prem cluster (e.g. RKE2) with your own 8×H200/B200-class node and NVIDIA GPU Operator.
 #   kubectl apply -k deploy/k8s/overlays/onprem
-# Edit the values marked EDIT in patches.yaml first (storage class, host name, ingress class).
+# Edit the values marked EDIT in patches.yaml and jobs.json first (storage class, host name, ingress class).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -9,3 +9,11 @@ components:
   - ../../components/gpu-node
 patches:
   - path: patches.yaml
+configMapGenerator:
+  - name: lab-jobs
+    namespace: lab
+    behavior: replace
+    files:
+      - jobs.json
+generatorOptions:
+  disableNameSuffixHash: true

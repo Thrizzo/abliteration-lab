@@ -1,7 +1,7 @@
 # Qdrant: the writeup store for retrieval (copilot.ingest fills it, n8n reads it). Cluster-internal only.
 apiVersion: apps/v1
 kind: StatefulSet
-metadata: { name: qdrant, namespace: lab-control, labels: { app: qdrant } }
+metadata: { name: qdrant, namespace: lab-copilot, labels: { app: qdrant } }
 spec:
   replicas: 1
   serviceName: qdrant
@@ -41,7 +41,7 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: { name: qdrant, namespace: lab-control }
+metadata: { name: qdrant, namespace: lab-copilot }
 spec:
   selector: { app: qdrant }
   ports: [{ name: http, port: 6333, targetPort: http }]

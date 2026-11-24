@@ -1,10 +1,19 @@
-# Kubernetes manifests (deploy/k8s) on a throwaway kind cluster with Calico, so network policies are enforced:
-# deploy, network policies, login, RBAC, Isolate and Kill. See deploy/k8s/tests/e2e.sh.
+# Kubernetes deployment (deploy/k8s) on throwaway kind clusters with Calico, so network policies are enforced.
+#   kind      fast: stub console; deploy, network policies, login, RBAC, Isolate and Kill (deploy/k8s/tests/e2e.sh)
+#   pipeline  the real console image built from this commit (CPU torch); every pipeline stage as a Job on a tiny GLM,
+#             then Promote / Rollback (deploy/k8s/tests/pipeline-e2e.sh)
 name: k8s e2e
 
 on:
   push:
-    paths: ["deploy/k8s/**", ".github/workflows/k8s-e2e.yml"]
+    paths:
+      - "deploy/k8s/**"
+      - "deploy/Dockerfile"
+      - "deploy/requirements.txt"
+      - "deploy/entrypoint.sh"
+      - "app/**"
+      - "abliterate/**"
+      - ".github/workflows/k8s-e2e.yml"
   workflow_dispatch: {}
 
 permissions:
@@ -43,8 +52,52 @@ jobs:
         if: failure()
         run: |
           kubectl get pods -A -o wide
-          kubectl -n lab-control describe pods | tail -n 150
-          kubectl -n lab-model describe pods | tail -n 80
+          kubectl -n lab describe pods | tail -n 150
+          kubectl -n lab-copilot describe pods | tail -n 80
           kubectl get events -A --sort-by=.lastTimestamp | tail -n 60
-          for d in console n8n ollama; do echo "--- $d"; kubectl -n lab-control logs deploy/$d --all-containers --tail=40 || true; done
-          kubectl -n lab-model logs deploy/glm-serve --tail=40 || true
+          kubectl -n lab logs deploy/console --all-containers --tail=40 || true
+          for d in n8n ollama; do echo "--- $d"; kubectl -n lab-copilot logs deploy/$d --tail=40 || true; done
+          kubectl -n lab logs deploy/glm-serve --tail=40 || true
+
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Build the console image (CPU torch)
+        run: docker build -f deploy/Dockerfile --build-arg TORCH_FLAVOR=cpu -t ghcr.io/thrizzo/redteam-llm-lab:ci .
+
+      - name: Install kind
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSLo "$HOME/bin/kind" https://github.com/kubernetes-sigs/kind/releases/download/v0.27.0/kind-linux-amd64
+          chmod +x "$HOME/bin/kind"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Create the cluster, install Calico, load the image
+        run: |
+          kind create cluster --name lab --config deploy/k8s/tests/kind-config.yaml --wait 0s
+          kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.1/manifests/calico.yaml
+          kubectl -n kube-system rollout status daemonset/calico-node --timeout=300s
+          kubectl wait --for=condition=Ready nodes --all --timeout=300s
+          kind load docker-image ghcr.io/thrizzo/redteam-llm-lab:ci --name lab
+          docker image ls ghcr.io/thrizzo/redteam-llm-lab:ci
+
+      - name: Pipeline end-to-end test
+        run: bash deploy/k8s/tests/pipeline-e2e.sh
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods,jobs -A -o wide
+          kubectl -n lab describe pods | tail -n 200
+          kubectl get events -A --sort-by=.lastTimestamp | tail -n 60
+          kubectl -n lab logs deploy/console -c app --tail=80 || true
+          for p in $(kubectl -n lab get pods -l app=lab-job -o name); do echo "--- $p"; kubectl -n lab logs "$p" --tail=40 || true; done
+          kubectl -n lab logs deploy/glm-serve --tail=60 || true

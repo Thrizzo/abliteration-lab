@@ -1,19 +1,19 @@
 # n8n: the copilot engine (deploy/n8n/). Not on the Ingress: open the editor with
-#   kubectl -n lab-control port-forward svc/n8n 5678:5678      ->  http://localhost:5678
+#   kubectl -n lab-copilot port-forward svc/n8n 5678:5678      ->  http://localhost:5678
 # Credentials to create in n8n (same as the compose stack, other host names):
-#   Ollama (judge, embeddings)  http://ollama.lab-control.svc:11434
-#   Qdrant                      http://qdrant.lab-control.svc:6333
-#   operator model              http://glm-serve.lab-model.svc:8000   (vLLM: OpenAI credential, Base URL + /v1; dev: Ollama)
+#   Ollama (judge, embeddings)  http://ollama.lab-copilot.svc:11434
+#   Qdrant                      http://qdrant.lab-copilot.svc:6333
+#   operator model              http://glm-serve.lab.svc:8000   (vLLM: OpenAI credential, Base URL + /v1; dev: Ollama)
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: { name: n8n-data, namespace: lab-control }
+metadata: { name: n8n-data, namespace: lab-copilot }
 spec:
   accessModes: [ReadWriteOnce]
   resources: { requests: { storage: 10Gi } }
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: { name: n8n, namespace: lab-control, labels: { app: n8n } }
+metadata: { name: n8n, namespace: lab-copilot, labels: { app: n8n } }
 spec:
   replicas: 1
   strategy: { type: Recreate }                    # SQLite on the volume: one writer
@@ -67,7 +67,7 @@ spec:
 ---
 apiVersion: v1
 kind: Service
-metadata: { name: n8n, namespace: lab-control }
+metadata: { name: n8n, namespace: lab-copilot }
 spec:
   selector: { app: n8n }
   ports: [{ name: http, port: 5678, targetPort: http }]

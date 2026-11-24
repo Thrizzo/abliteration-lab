@@ -234,7 +234,10 @@ def step_deploy(run, args, project, model_dir, out_dir, slug, prompts):
     # quantization of an f16 file, which only older Ollama versions (< 0.40) support
     direct = args.quantize in DP.CONVERTER_TYPES
     outtype = args.quantize if direct else "f16"
-    base_g, abl_g = os.path.join(gguf_dir, f"{slug}-base-{outtype}.gguf"), os.path.join(gguf_dir, f"{slug}-abl-{outtype}.gguf")
+    # the base is the same for every run; the abliterated one is named per run, so a re-run never ships an older edit
+    # (the converter skips files that exist)
+    run_tag = os.path.basename(os.path.normpath(run.run_dir))
+    base_g, abl_g = os.path.join(gguf_dir, f"{slug}-base-{outtype}.gguf"), os.path.join(gguf_dir, f"{slug}-abl-{run_tag}-{outtype}.gguf")
     run.event("gguf", "start", outtype=outtype)
     DP.convert_gguf(project, out_dir, abl_g, run.log, allow_code=args.trust_remote_code, outtype=outtype)
     run.event("gguf", "progress", which="abl")
@@ -284,6 +287,8 @@ def main(argv=None):
     ap.add_argument("--trust-remote-code", action="store_true"); ap.add_argument("--hf-token")
     ap.add_argument("--skip-verify", action="store_true", help="no reload/generation after the edit (huge models)")
     ap.add_argument("--no-ollama", action="store_true"); ap.add_argument("--quantize", default="q8_0")
+    ap.add_argument("--out-dir", help="where the edited model goes (default: out/<slug>-abliterated; a resumed run keeps its own). "
+                                        "The Kubernetes console passes <run>/model, so every run keeps its own copy for Promote / Rollback")
     args = ap.parse_args(argv)
     project = os.path.abspath(args.project)
     os.chdir(project)
@@ -309,9 +314,10 @@ def main(argv=None):
     try:
         model_dir = step_download(run, model_repo, os.path.join(project, "models"), args.hf_token)
         info = step_inspect(run, model_dir)
-        out_dir = os.path.join(project, "out", f"{slug}-abliterated")
+        out_dir = os.path.abspath(args.out_dir) if args.out_dir else (run.meta.get("out_dir") or os.path.join(project, "out", f"{slug}-abliterated"))
         run.update_meta(model_dir=model_dir, out_dir=out_dir)
         if args.stage == "download":
+            D.ensure_local(os.path.join(project, "data"), run.log)     # the prompt sets too: later stages may have no internet
             run.update_meta(status="done"); return
         prompts = D.load_prompts(os.path.join(project, "data"), args.n_train, args.n_test)
         run.event("data", "done", n_train=len(prompts[0]), n_test=len(prompts[1]))

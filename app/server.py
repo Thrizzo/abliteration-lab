@@ -37,6 +37,8 @@ from abliterate import platform as PL  # noqa: E402
 CODE = os.path.dirname(HERE)                                    # where abliterate/, run_pipeline.py live
 PROJECT = os.path.abspath(os.environ.get("ABL_PROJECT") or CODE)   # where models/, runs/, data/ live
 OLLAMA = PL.ollama_host()
+# Kubernetes (deploy/k8s): every pipeline stage runs as a Job next to the console, on the shared workspace volume
+K8S = os.environ.get("ABL_RUNNER") == "k8s"
 NOTEBOOK_STAGES = {"setup": "1 · setup (torch, packages, llama.cpp)", "data": "3 · dataset audit + local copies",
                    "abl": "4 · measure, scan, choose, apply, validate", "apply": "4.6-4.8 · apply the chosen layer + validate",
                    "validate": "4.8 · validate the saved model", "ollama": "7 · GGUF, Ollama import, A/B test", "main": "2-4 + 7 · the whole pipeline"}
@@ -150,7 +152,26 @@ class Pipeline:
             return {"events": self.events[start:], "next": len(self.events), "running": self.running(), "run_id": self.status()["run_id"]}
 
 
-pipeline = Pipeline()
+def _ollama_publish(name, gguf, model_dir):
+    """Serving in the dev overlay: one run's GGUF published to glm-serve (Ollama) under a stable name."""
+    from abliterate import deploy as DP
+    tpl = ""
+    for fn in ("chat_template.jinja", "tokenizer_config.json"):
+        p = os.path.join(model_dir or "", fn)
+        if os.path.isfile(p):
+            tpl += open(p, encoding="utf-8").read()
+    DP.ollama_create(name, gguf, tpl, None, print)
+
+
+if K8S:
+    import k8sjobs  # noqa: E402
+    _k8s_settings = k8sjobs.load_settings()
+    _k8s = k8sjobs.K8s(namespace=_k8s_settings.get("namespace"))
+    pipeline = k8sjobs.JobPipeline(PROJECT, CODE, _k8s_settings, _k8s, http_error=HTTPException, run_id_of=rundata.run_id)
+    serving = k8sjobs.Serving(PROJECT, _k8s_settings, _k8s, http_error=HTTPException, publish=_ollama_publish)
+else:
+    pipeline = Pipeline()
+    serving = None
 PY = PL.pipeline_python(PROJECT)
 
 
@@ -233,7 +254,8 @@ def env():
             "notebook_engine": os.name == "nt", "disk_free_gb": round(disk.free / 1e9, 1), "python": PY, "ollama_host": OLLAMA,
             "venv": os.path.isfile(PY), "venv_gguf": os.path.isfile(PL.gguf_python(PROJECT)),
             "llama_cpp": os.path.isfile(os.path.join(PL.llama_cpp_dir(PROJECT), "convert_hf_to_gguf.py")), "data": os.path.isfile(p("data", "harmful_test.jsonl")),
-            "ollama": oll, "notebook_stages": NOTEBOOK_STAGES, "settings": rundata.load(p("abliteration_settings.json"), {})}
+            "ollama": oll, "notebook_stages": NOTEBOOK_STAGES, "settings": rundata.load(p("abliteration_settings.json"), {}),
+            "runner": "k8s" if K8S else "local"}
 
 
 @app.get("/api/models")
@@ -381,6 +403,33 @@ def pipeline_start(s: Start):
         if on:
             cmd.append(flag)
     return pipeline.start(cmd, "abliterate", s.stage, run_dir)
+
+
+# ------------------------------------------------------------------------- API: serving (Kubernetes only)
+class Promote(BaseModel):
+    run_id: str
+
+
+def _serving():
+    if not serving:
+        raise HTTPException(404, "serving (Promote / Rollback) exists in the Kubernetes deployment only")
+    return serving
+
+
+@app.get("/api/serving")
+def serving_status():
+    return _serving().status()
+
+
+@app.post("/api/serving/promote")
+def serving_promote(b: Promote):
+    run_dir_of(b.run_id)                                     # validates the id
+    return _serving().promote(b.run_id)
+
+
+@app.post("/api/serving/rollback")
+def serving_rollback():
+    return _serving().rollback()
 
 
 @app.post("/api/pipeline/stop")
@@ -603,10 +652,18 @@ def sbom_file(name: str):
     return FileResponse(path, media_type="application/json", filename=name)
 
 
+@app.on_event("startup")
+def _startup():
+    """Kubernetes: a Job that kept running while the console restarted is followed again."""
+    if K8S:
+        pipeline.attach()
+
+
 @app.on_event("shutdown")
 def _shutdown():
-    """docker stop / pod termination: end the pipeline child cleanly instead of leaving it to SIGKILL."""
-    if pipeline.running():
+    """docker stop / pod termination: end the pipeline child cleanly instead of leaving it to SIGKILL.
+    A Kubernetes Job is not a child: it keeps running and the next console re-attaches."""
+    if pipeline.running() and getattr(pipeline, "proc", None):
         pipeline.proc.terminate()
         try:
             pipeline.proc.wait(timeout=30)

@@ -12,18 +12,18 @@ patches:
   - path: tiny.yaml
 configMapGenerator:
   - name: ollama-models
-    namespace: lab-control
+    namespace: lab-copilot
     behavior: replace
     literals: [OLLAMA_PULL=]
 generatorOptions:
   disableNameSuffixHash: true
 secretGenerator:
   - name: basic-auth
-    namespace: lab-control
+    namespace: lab
     literals:
       - user=ci
       - hash=$2b$10$VJt/mXFY99jLajdn2EX9fea6mqH7iziQINYuyeKAzOT77t/twjrcC   # bcrypt of "ci-only-password"
   - name: n8n
-    namespace: lab-control
+    namespace: lab-copilot
     literals:
       - encryption-key=ci-only-not-a-secret
