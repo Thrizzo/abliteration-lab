@@ -42,6 +42,11 @@ opened:
   ```
 - **The console image:** `ghcr.io/thrizzo/redteam-llm-lab` is private. Create a pull secret with a GitHub token that has
   `read:packages` (below), or make the package public.
+  - **Exception, dev on Rancher Desktop with the dockerd engine:** Kubernetes uses images built by Docker on the same
+    machine, and the dev overlay doesn't force a pull. The image `docker compose ... up -d --build` built for the compose
+    stack is used as is, with no pull secret.
+  - **Kubernetes in Rancher Desktop:** enable it in Preferences → Kubernetes. Its k3s enforces network policies and ships
+    Traefik, which is the base's ingress class.
 
 ## Deploy
 

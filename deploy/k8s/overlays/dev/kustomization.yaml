@@ -11,7 +11,9 @@ patches:
   - path: sizes.yaml
   - target: { kind: Deployment, name: glm-serve }
     path: glm-serve-ollama.yaml
-  # the lab app imports the models it abliterates into glm-serve (its Compare stage talks to OLLAMA_HOST)
+  # the lab app imports the models it abliterates into glm-serve (its Compare stage talks to OLLAMA_HOST).
+  # IfNotPresent: on Rancher Desktop with the dockerd engine, Kubernetes uses the image `docker compose ... --build`
+  # already built locally (same tag), so no GHCR pull secret is needed.
   - patch: |-
       apiVersion: apps/v1
       kind: Deployment
@@ -21,5 +23,6 @@ patches:
           spec:
             containers:
               - name: app
+                imagePullPolicy: IfNotPresent
                 env:
                   - { name: OLLAMA_HOST, value: "http://glm-serve.lab-model.svc:8000" }
