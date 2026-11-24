@@ -1,0 +1,3 @@
+# one term per line; matched case-insensitively on word boundaries in every source
+AcmeCorp
+Project Falcon

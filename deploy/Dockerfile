@@ -33,6 +33,7 @@ RUN /opt/venv-gguf/bin/python /opt/llama.cpp/convert_hf_to_gguf.py --help >/dev/
 WORKDIR /app
 COPY abliterate /app/abliterate
 COPY app /app/app
+COPY copilot /app/copilot
 COPY abliteration_pipeline.ipynb run_pipeline.py build_gui.py README.md /app/
 COPY deploy/entrypoint.sh /app/deploy/entrypoint.sh
 RUN chmod +x /app/deploy/entrypoint.sh && mkdir -p /workspace && useradd -m -u 1000 abl && chown -R abl:abl /app /workspace
