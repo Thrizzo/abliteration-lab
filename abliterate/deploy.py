@@ -1,10 +1,13 @@
 """GGUF conversion (llama.cpp converter in its own environment), Ollama import over the HTTP API (works when Ollama is
 another container: the GGUF is uploaded as a blob, no CLI needed), A/B test over the API."""
+import contextlib
 import hashlib
 import http.client
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +34,65 @@ def check_model_folder(path):
 
 CONVERTER_TYPES = ("f16", "bf16", "q8_0")     # what convert_hf_to_gguf.py can write directly; k-quants need llama-quantize
 
+# loader bookkeeping transformers v5 writes into tokenizer_config.json; 4.x would hand it to the tokenizer as settings
+_V5_LOADER_KEYS = ("backend", "is_local", "local_files_only")
+
+
+def v4_tokenizer_config(cfg):
+    """tokenizer_config.json as transformers 4.x reads it, or None if it needs no change. llama.cpp pins transformers 4.x
+    for its converter, and v5 saves this file differently: PreTrainedTokenizerFast is called TokenizersBackend, and
+    additional_special_tokens became a list in extra_special_tokens, where 4.x expects a dict."""
+    out = {k: v for k, v in cfg.items() if k not in _V5_LOADER_KEYS}
+    if out.get("tokenizer_class") == "TokenizersBackend":
+        out["tokenizer_class"] = "PreTrainedTokenizerFast"
+    extra = out.get("extra_special_tokens")
+    if isinstance(extra, list):
+        del out["extra_special_tokens"]
+        add = list(out.get("additional_special_tokens") or [])
+        out["additional_special_tokens"] = add + [t for t in extra if t not in add]
+    return None if out == cfg else out
+
+
+def _link(src, dst):
+    """symlink; a hard link where symlinks need a privilege (Windows); a copy only as the last resort"""
+    try:
+        os.symlink(os.path.abspath(src), dst)
+    except OSError:
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copyfile(src, dst)
+
+
+@contextlib.contextmanager
+def converter_view(folder, workdir, log=print):
+    """The model folder as the converter can read it. If transformers v5 saved its tokenizer, the converter gets a
+    temporary view in workdir: links to the folder's files, plus tokenizer_config.json in the 4.x format. The folder
+    itself is never changed."""
+    try:
+        with open(os.path.join(folder, "tokenizer_config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        v4 = v4_tokenizer_config(cfg) if isinstance(cfg, dict) else None
+    except (OSError, ValueError):
+        v4 = None
+    if v4 is None:
+        yield folder
+        return
+    parent = tempfile.mkdtemp(prefix=".convert-", dir=workdir)
+    view = os.path.join(parent, os.path.basename(os.path.normpath(folder)))     # the converter names the model after it
+    try:
+        os.makedirs(view)
+        for fn in os.listdir(folder):
+            src = os.path.join(folder, fn)
+            if fn != "tokenizer_config.json" and os.path.isfile(src):
+                _link(src, os.path.join(view, fn))
+        with open(os.path.join(view, "tokenizer_config.json"), "w", encoding="utf-8") as f:
+            json.dump(v4, f, ensure_ascii=False, indent=2)
+        log("gguf: tokenizer saved by transformers v5 - the converter reads a 4.x copy of tokenizer_config.json")
+        yield view
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
 
 def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=False, outtype="f16"):
     py, conv = P.gguf_python(project), os.path.join(P.llama_cpp_dir(project), "convert_hf_to_gguf.py")
@@ -44,8 +106,9 @@ def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=Fa
         raise RuntimeError(f"{folder} contains code files {risky} / auto_map {auto_map}; pass --allow-code to convert anyway")
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
     env = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-    r = subprocess.run([py, conv, folder, "--outtype", outtype, "--outfile", outfile], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", env=env)
+    with converter_view(folder, os.path.dirname(os.path.abspath(outfile)), log) as src:
+        r = subprocess.run([py, conv, src, "--outtype", outtype, "--outfile", outfile], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=env)
     tail = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-6:]
     for line in tail:
         log("  " + line)
@@ -55,6 +118,24 @@ def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=Fa
         raise RuntimeError(f"converter failed (exit {r.returncode}): {tail[-1] if tail else ''}")
     log(f"gguf: {outfile} ({os.path.getsize(outfile) / 1e9:.1f} GB)")
     return outfile
+
+
+def chat_template_text(model_dir):
+    """The model's chat template: chat_template.jinja (newer saves), or the chat_template entry of tokenizer_config.json
+    (older ones; of a list of named templates, "default"). Only the template, never the rest of tokenizer_config.json:
+    GLM-Edge lists [gMASK] among its special tokens there, which would pick the GLM-4 template for it."""
+    p = os.path.join(model_dir or "", "chat_template.jinja")
+    if os.path.isfile(p):
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    try:
+        with open(os.path.join(model_dir or "", "tokenizer_config.json"), encoding="utf-8") as f:
+            ct = json.load(f).get("chat_template")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    if isinstance(ct, list):
+        ct = next((t.get("template") for t in ct if isinstance(t, dict) and t.get("name") == "default"), None)
+    return ct if isinstance(ct, str) else ""
 
 
 def template_for(chat_template_text):

@@ -17,10 +17,18 @@ check() { local name=$1; shift; if "$@"; then ok "$name"; else bad "$name"; fi; 
 console() { kubectl -n lab exec deploy/console -c app -- "$@"; }
 console_stdin() { kubectl -n lab exec -i deploy/console -c app -- "$@"; }
 API() { curl -sS -u ci:ci-only-password -H 'Content-Type: application/json' "http://127.0.0.1:18080/api$1" "${@:2}"; }
+# POST to the console API: true on HTTP 2xx, otherwise prints the status and the answer
+post_ok() {
+  local out code
+  out=$(API "$1" -d "$2" -w '\n%{http_code}') || { echo "  POST $1 failed" >&2; return 1; }
+  code=${out##*$'\n'}
+  [ "${code:0:1}" = 2 ] || { echo "  POST $1 -> HTTP $code: ${out%$'\n'*}" >&2; return 1; }
+}
 
 # start a stage through the console; wait until it is no longer running; echo "<run_id> <exit_code>"
+# a stage that fails prints the end of its log (stderr), so the CI log shows why
 run_stage() {
-  local body=$1 st i
+  local body=$1 st i code
   st=$(API /pipeline/start -d "$body") || { echo "start failed: $st" >&2; echo "- -1"; return; }
   if ! jq -e .running >/dev/null <<<"$st"; then echo "start refused: $st" >&2; echo "- -1"; return; fi
   for i in $(seq 1 450); do
@@ -28,10 +36,27 @@ run_stage() {
     [ "$(jq -r .running <<<"$st")" = false ] && break
     sleep 2
   done
-  echo "$(jq -r .run_id <<<"$st") $(jq -r .exit_code <<<"$st")"
+  code=$(jq -r .exit_code <<<"$st")
+  if [ "$code" != 0 ]; then
+    echo "  stage exited with $code; end of its log:" >&2
+    API '/pipeline/log?start=0' | jq -r '.lines[-25:][]' | sed 's/^/  | /' >&2
+  fi
+  echo "$(jq -r .run_id <<<"$st") $code"
 }
 served_digest() { console curl -s http://glm-serve.lab.svc:8000/api/tags | jq -r '.models[] | select(.name == "glm-abl:latest") | .digest'; }
-wait_serving_idle() { local i; for i in $(seq 1 120); do [ "$(API /serving | jq -r .busy)" = null ] && return 0; sleep 2; done; return 1; }
+# wait until a promote / rollback has finished; false if it timed out or reported an error
+serving_done() {
+  local i st
+  for i in $(seq 1 120); do
+    st=$(API /serving)
+    if [ "$(jq -r .busy <<<"$st")" = null ]; then
+      [ "$(jq -r .error <<<"$st")" = null ] && return 0
+      echo "  serving error: $(jq -r .error <<<"$st")" >&2; return 1
+    fi
+    sleep 2
+  done
+  echo "  serving still busy: $(jq -r .busy <<<"$st")" >&2; return 1
+}
 
 echo "== deploy (ci-pipeline overlay)"
 kubectl apply -k deploy/k8s/overlays/ci-pipeline >/dev/null
@@ -71,8 +96,8 @@ check "deploy Job: model server yes, internet no" test "$(label deploy lab-egres
 check "Jobs run without a ServiceAccount token" test "$(kubectl -n lab get jobs -l app=lab-job -o jsonpath='{.items[*].spec.template.spec.automountServiceAccountToken}' | tr ' ' '\n' | sort -u)" = false
 
 echo "== 3/4. Promote, a second run, Rollback"
-API /serving/promote -d "{\"run_id\": \"$RUN1\"}" >/dev/null
-check "promote run 1 finished" wait_serving_idle
+check "promote run 1 accepted" post_ok /serving/promote "{\"run_id\": \"$RUN1\"}"
+check "promote run 1 finished without error" serving_done
 check "serving reports run 1" test "$(API /serving | jq -r .current.run_id)" = "$RUN1"
 D1=$(served_digest)
 check "glm-serve serves glm-abl after promote" test -n "$D1"
@@ -83,14 +108,15 @@ check "second run applied (layer 2)" test "$code" = 0
 read -r _ code < <(run_stage "{\"engine\": \"abliterate\", \"stage\": \"deploy\", \"run_id\": \"$RUN2\"}")
 check "second run deployed" test "$code" = 0
 check "run 1's model folder is still there" console test -f "/workspace/runs/abliterate_$RUN1/model/config.json"
-API /serving/promote -d "{\"run_id\": \"$RUN2\"}" >/dev/null
-check "promote run 2 finished" wait_serving_idle
+check "promote run 2 accepted" post_ok /serving/promote "{\"run_id\": \"$RUN2\"}"
+check "promote run 2 finished without error" serving_done
 D2=$(served_digest)
-check "glm-serve's model changed with run 2 (per-run GGUF)" test -n "$D2" -a "$D2" != "$D1"
-API /serving/rollback -d '{}' >/dev/null
-check "rollback finished" wait_serving_idle
+check "glm-serve's model changed with run 2 (per-run GGUF)" test -n "$D2" -a -n "$D1" -a "$D2" != "$D1"
+check "rollback accepted" post_ok /serving/rollback '{}'
+check "rollback finished without error" serving_done
 check "serving reports run 1 again" test "$(API /serving | jq -r .current.run_id)" = "$RUN1"
-check "glm-serve serves run 1's exact model again" test "$(served_digest)" = "$D1"
+D3=$(served_digest)
+check "glm-serve serves run 1's exact model again" test -n "$D3" -a "$D3" = "$D1"
 check "history: promote, promote, rollback" test "$(API /serving | jq -r '[.history[].action] | reverse | join(",")')" = "promote,promote,rollback"
 
 echo "== 5. Stop"

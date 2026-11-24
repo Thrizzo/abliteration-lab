@@ -155,12 +155,7 @@ class Pipeline:
 def _ollama_publish(name, gguf, model_dir):
     """Serving in the dev overlay: one run's GGUF published to glm-serve (Ollama) under a stable name."""
     from abliterate import deploy as DP
-    tpl = ""
-    for fn in ("chat_template.jinja", "tokenizer_config.json"):
-        p = os.path.join(model_dir or "", fn)
-        if os.path.isfile(p):
-            tpl += open(p, encoding="utf-8").read()
-    DP.ollama_create(name, gguf, tpl, None, print)
+    DP.ollama_create(name, gguf, DP.chat_template_text(model_dir), None, print)
 
 
 if K8S:

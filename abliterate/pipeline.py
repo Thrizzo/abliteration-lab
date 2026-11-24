@@ -243,11 +243,7 @@ def step_deploy(run, args, project, model_dir, out_dir, slug, prompts):
     run.event("gguf", "progress", which="abl")
     DP.convert_gguf(project, model_dir, base_g, run.log, allow_code=args.trust_remote_code, outtype=outtype)
     run.event("gguf", "done", base=base_g, abl=abl_g)
-    tpl = ""
-    for fn in ("chat_template.jinja", "tokenizer_config.json"):
-        p = os.path.join(model_dir, fn)
-        if os.path.isfile(p):
-            tpl += open(p, encoding="utf-8").read()
+    tpl = DP.chat_template_text(model_dir)
     names = {"base": f"{slug}-base", "abl": f"{slug}-abl"}
     run.event("ollama", "start", names=names, host=DP.P.ollama_host())
     for tag, gguf in (("base", base_g), ("abl", abl_g)):

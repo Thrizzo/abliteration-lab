@@ -73,6 +73,12 @@ jobs:
       - name: Build the console image (CPU torch)
         run: docker build -f deploy/Dockerfile --build-arg TORCH_FLAVOR=cpu -t ghcr.io/thrizzo/redteam-llm-lab:ci .
 
+      - name: Unit tests (inside the built image)
+        run: |
+          run() { docker run --rm --entrypoint /opt/venv/bin/python -w /app ghcr.io/thrizzo/redteam-llm-lab:ci "$@"; }
+          run -m unittest discover -s abliterate/tests -t . -v
+          run -m unittest discover -s app/tests -v
+
       - name: Install kind
         run: |
           mkdir -p "$HOME/bin"
