@@ -87,6 +87,7 @@ check "validate Job exit 0" test "$code" = 0
 read -r _ code < <(run_stage "{\"engine\": \"abliterate\", \"stage\": \"deploy\", \"run_id\": \"$RUN1\"}")
 check "deploy Job exit 0 (GGUF + import into glm-serve)" test "$code" = 0
 check "run 1 has its own GGUF" console bash -c "ls /workspace/gguf/ | grep -q 'abl-abliterate_$RUN1'"
+check "run 1 has its Ollama A/B report" console test -f "/workspace/runs/abliterate_$RUN1/ollama_ab.json"
 
 echo "== 2. Job hygiene"
 label() { kubectl -n lab get jobs -l "lab-stage=$1" -o jsonpath="{.items[0].metadata.labels['$2']}"; }

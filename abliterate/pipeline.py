@@ -261,8 +261,11 @@ def step_deploy(run, args, project, model_dir, out_dir, slug, prompts):
     run.save("ollama_ab.json", ab)
     with open(os.path.join(project, "runs", "ollama_ab_latest.json"), "w", encoding="utf-8") as f:
         json.dump(ab, f, ensure_ascii=False, indent=2)
-    run.log(f"ollama A/B: base {ab['n_ref_base']}/{len(harmful)} | abliterated {ab['n_ref_abl']}/{len(harmful)} refusals")
-    run.event("ollama", "done", names=names, n_ref_base=ab["n_ref_base"], n_ref_abl=ab["n_ref_abl"], template_ok=ok)
+    looped = f"; looped (no answer): base {ab['n_loop_base']}, abliterated {ab['n_loop_abl']} of {len(harmful) + len(normal)} prompts" \
+        if ab["n_loop_base"] or ab["n_loop_abl"] else ""
+    run.log(f"ollama A/B: base {ab['n_ref_base']}/{len(harmful)} | abliterated {ab['n_ref_abl']}/{len(harmful)} refusals{looped}")
+    run.event("ollama", "done", names=names, n_ref_base=ab["n_ref_base"], n_ref_abl=ab["n_ref_abl"], n_loop_base=ab["n_loop_base"],
+              n_loop_abl=ab["n_loop_abl"], template_ok=ok)
     return names
 
 

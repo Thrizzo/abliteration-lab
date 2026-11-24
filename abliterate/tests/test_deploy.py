@@ -2,7 +2,7 @@
 - the GGUF converter (llama.cpp pins transformers 4.x) reads model folders whose tokenizer transformers v5 saved,
   and gets GLM-Edge's real context length; the folder itself is never changed;
 - the Ollama template is chosen from the chat template alone;
-- Ollama's error text reaches the exception.
+- Ollama's error text reaches the exception; an answer Ollama stops for looping is an A/B result, not a crash.
 
     python -m unittest discover -s abliterate/tests -t .
 """
@@ -221,28 +221,65 @@ class ChatTemplate(unittest.TestCase):
         self.assertEqual(DP.chat_template_text(None), "")
 
 
+def fake_ollama(test, chat):
+    """A local HTTP server standing in for Ollama: chat(body) -> (status, json answer). Sets OLLAMA_HOST for the test."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            status, answer = chat(req)
+            body = json.dumps(answer).encode()
+            self.send_response(status); self.send_header("Content-Length", str(len(body))); self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    test.addCleanup(srv.shutdown)
+    patch = mock.patch.dict(os.environ, {"OLLAMA_HOST": f"http://127.0.0.1:{srv.server_port}"})
+    patch.start()
+    test.addCleanup(patch.stop)
+
+
+REPEAT = (500, {"error": "prediction aborted, token repeat limit reached"})
+
+
 class OllamaErrors(unittest.TestCase):
     def test_http_error_carries_ollamas_reason(self):
-        class Handler(BaseHTTPRequestHandler):
-            def do_POST(self):
-                self.rfile.read(int(self.headers.get("Content-Length", 0)))
-                body = b'{"error":"model runner has unexpectedly stopped"}'
-                self.send_response(500); self.send_header("Content-Length", str(len(body))); self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *a):
-                pass
-
-        srv = HTTPServer(("127.0.0.1", 0), Handler)
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
-        self.addCleanup(srv.shutdown)
-        with mock.patch.dict(os.environ, {"OLLAMA_HOST": f"http://127.0.0.1:{srv.server_port}"}):
-            with self.assertRaises(urllib.error.HTTPError) as cm:
-                DP.api_post("/api/chat", {"model": "m"})
+        fake_ollama(self, lambda req: (500, {"error": "model runner has unexpectedly stopped"}))
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            DP.api_post("/api/chat", {"model": "m"})
         self.assertEqual(cm.exception.code, 500)
         self.assertIn("model runner has unexpectedly stopped", str(cm.exception))
         self.assertIn(b"unexpectedly stopped", cm.exception.read())     # callers can still read the body
 
+
+class AbTest(unittest.TestCase):
+    HARMFUL = ["harmful one", "harmful two"]
+    NORMAL = ["normal one"]
+
+    def test_a_looping_answer_is_recorded_not_fatal(self):
+        def chat(req):
+            prompt = req["messages"][0]["content"]
+            if req["model"] == "abl" and prompt == "harmful one":
+                return REPEAT
+            if req["model"] == "base" and prompt.startswith("harmful"):
+                return 200, {"message": {"content": "I cannot help with that."}}
+            return 200, {"message": {"content": "Sure, here it is."}}
+        fake_ollama(self, chat)
+        lines = []
+        ab = DP.ab_test("base", "abl", self.HARMFUL, self.NORMAL, lines.append)
+        self.assertEqual(ab["results"]["abl"][0], DP.LOOPED)
+        self.assertEqual((ab["n_ref_base"], ab["n_ref_abl"]), (2, 0))
+        self.assertEqual((ab["n_loop_base"], ab["n_loop_abl"]), (0, 1))
+        self.assertIn("abl LOOPED", lines[0])
+        self.assertFalse(DP.is_refusal(DP.LOOPED))     # a loop must never count as a refusal
+
+    def test_other_ollama_errors_still_fail(self):
+        fake_ollama(self, lambda req: (500, {"error": "model runner has unexpectedly stopped"}))
+        with self.assertRaises(urllib.error.HTTPError):
+            DP.ab_test("base", "abl", self.HARMFUL, self.NORMAL, lambda m: None)
 
 if __name__ == "__main__":
     unittest.main()

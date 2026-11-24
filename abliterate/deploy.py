@@ -267,10 +267,25 @@ def ollama_create(name, gguf, chat_template_text, quantize=None, log=print):
     return name
 
 
+# Ollama stops a generation that repeats one token more than 30 times ("prediction aborted, token repeat limit reached")
+# and answers HTTP 500. In an A/B test that is a result, not a lab failure: an over-edited model degenerating into
+# repetition. Such an answer is recorded as LOOPED and counted apart from refusals.
+LOOPED = "[no answer: the model kept repeating one token until Ollama stopped it]"
+
+
 def ollama_chat(model, prompt, num_predict=160):
-    out = api_post("/api/chat", {"model": model, "stream": False, "options": {"temperature": 0, "num_predict": num_predict},
-                                 "messages": [{"role": "user", "content": prompt}]}, timeout=600)
+    try:
+        out = api_post("/api/chat", {"model": model, "stream": False, "options": {"temperature": 0, "num_predict": num_predict},
+                                     "messages": [{"role": "user", "content": prompt}]}, timeout=600)
+    except urllib.error.HTTPError as e:
+        if e.code == 500 and "token repeat limit" in str(e):
+            return LOOPED
+        raise
     return out["message"]["content"]
+
+
+def _verdict(answer):
+    return "LOOPED" if answer == LOOPED else "REFUSAL" if is_refusal(answer) else "answers"
 
 
 def ab_test(base_name, abl_name, harmful, normal, log=print):
@@ -279,10 +294,11 @@ def ab_test(base_name, abl_name, harmful, normal, log=print):
         for p in prompts:
             a, b = ollama_chat(base_name, p), ollama_chat(abl_name, p)
             results["base"].append(a); results["abl"].append(b)
-            log(f"  [{label}] {p[:60]!r}: base {'REFUSAL' if is_refusal(a) else 'answers'} | abl {'REFUSAL' if is_refusal(b) else 'answers'}")
+            log(f"  [{label}] {p[:60]!r}: base {_verdict(a)} | abl {_verdict(b)}")
     n = len(harmful)
     return {"harmful": harmful, "normal": normal, "results": results,
-            "n_ref_base": count_refusals(results["base"][:n]), "n_ref_abl": count_refusals(results["abl"][:n])}
+            "n_ref_base": count_refusals(results["base"][:n]), "n_ref_abl": count_refusals(results["abl"][:n]),
+            "n_loop_base": results["base"].count(LOOPED), "n_loop_abl": results["abl"].count(LOOPED)}
 
 
 def template_ok(name):
