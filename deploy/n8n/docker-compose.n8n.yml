@@ -12,7 +12,9 @@
 #     run --rm app python -m copilot.ingest --src /workspace/writeups
 services:
   n8n:
-    image: docker.n8n.io/n8nio/n8n:2.48.7   # pin; bump deliberately and re-import if node versions change
+    # pinned; bump deliberately and re-import the workflow if node versions change. Docker Hub by default: the same
+    # official image is on n8n's own registry (N8N_IMAGE=docker.n8n.io/n8nio/n8n:2.48.7) if Docker Hub is blocked for you
+    image: ${N8N_IMAGE:-n8nio/n8n:2.48.7}
     restart: unless-stopped
     environment:
       # --- reach the models in the Ollama container (same compose network) ---
