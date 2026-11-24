@@ -133,7 +133,7 @@ The **serving** button in the console's header (Kubernetes only) lists the runs 
 - **Rollback** returns to the run promoted before.
 - **History:** every change is recorded in `/workspace/serving/history.json`.
 
-Start the vLLM server (the console buttons for Start / Kill / Isolate come in phase 4):
+Start the vLLM server with **Start** in the kill switch (next section), or by hand:
 
 ```bash
 kubectl -n lab scale deploy/glm-serve --replicas=1
@@ -144,7 +144,36 @@ kubectl -n lab scale deploy/glm-serve --replicas=1
 - **Re-applying an overlay** resets `glm-serve` to its manifest replicas (0 on GPU overlays), and resets `MODEL_PATH`
   to its default. Promote again afterwards, or keep the overlay's ConfigMap value in sync.
 
-**Kill / Isolate by hand.** These are the same calls the console's ServiceAccount is allowed:
+## Kill switch
+
+The console's header shows the model server's state (**model running**, **isolated**, **killed**, ...). Click it, or
+**serving**, for the buttons. Each action takes well under a second.
+
+| Button | What happens | The model afterwards |
+| --- | --- | --- |
+| **Kill** (asks first) | 1. delete `glm-serve-allow` (the cut)<br>2. scale `glm-serve` to 0<br>3. delete its pod with grace period 0<br>4. check no pod is left | gone; nothing restarts it |
+| **Isolate** | delete `glm-serve-allow` | keeps running, GPU memory included; nothing reaches it, and it reaches nothing |
+| **Release** | recreate `glm-serve-allow` from the console's copy | reachable again |
+| **Start** | recreate the policy, scale to 1 | loading (GLM-5.3 takes minutes); refused while a GPU Job holds the only GPU node |
+
+- **Steps:** Kill runs every step even when one fails, and shows each step's result and time.
+- **Open connections:** depending on the network plugin, a response already streaming when you press Isolate can
+  finish. Kill ends it.
+- **The console's copy of the policy** is kept in the console pod (an `emptyDir`), not on the workspace. Jobs and, in
+  dev, the model server can write the workspace, and Release creates whatever the copy says. A new console pod copies
+  the policy when it starts; if the policy was already gone then, Release refuses: re-apply the overlay.
+- **Audit:** every Kill, Isolate, Release and Start, and every Promote and Rollback, refused attempts included, goes to
+  `/workspace/audit/YYYY-MM-DD.jsonl` with its steps, timings, reason and who asked. A copy goes to the console's
+  container log, which Jobs can't change:
+  ```bash
+  kubectl -n lab logs deploy/console -c app | grep ^AUDIT
+  ```
+  "Who" is the login user (one shared account) and the address the login proxy saw. Behind an Ingress that address is
+  the ingress controller's; the `X-Forwarded-For` chain it sent is recorded too.
+- **Cross-site requests:** a browser sends the login along with requests that other web pages make. The console refuses
+  POSTs from another origin, so a page elsewhere can't press Kill or Release.
+
+**By hand,** when the console is down. These are the same calls its ServiceAccount may make:
 
 | Action | Commands |
 | --- | --- |
@@ -174,6 +203,8 @@ kind cluster with Calico.
   - Promote;
   - a second run whose served model must differ;
   - Rollback to the first run's exact model;
-  - Stop.
+  - Stop;
+  - the kill switch through the login: cross-site and body-less POSTs refused, Isolate and Release, Kill timed until
+    the container is gone from the node, Start, and the audit entries with the login user.
 
 Not covered by CI: GPUs, vLLM with real weights, GLM-5.x itself.

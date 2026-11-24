@@ -1,6 +1,6 @@
 # Design: GLM-5.3 on Kubernetes, from abliteration to the copilot
 
-Status: phases 0 to 2 are built (`deploy/k8s/`, `app/k8sjobs.py`, tested on kind with Calico in CI); the rest is the plan.
+Status: phases 0, 1, 2 and 4 are built (`deploy/k8s/`, `app/k8sjobs.py`, tested on kind with Calico in CI); the rest is the plan.
 Section 10 is the build order.
 
 ## 1. What this adds
@@ -236,8 +236,10 @@ sequenceDiagram
   - **Model:** Deployment status and readiness, plus vLLM's `/metrics` (running requests, tokens per second) every 5 s.
   - **Kill / Isolate:** the request, each API answer, and the time until the pod is gone.
   - **Uploads:** ingest progress.
-- **Audit:** every event is also appended to `workspace/audit/YYYY-MM-DD.jsonl` with the session's source IP. With one
-  shared login, that is the only "who".
+- **Audit (built for Kill / Isolate / Release / Start and Promote / Rollback):** every event is also appended to
+  `workspace/audit/YYYY-MM-DD.jsonl` with who asked: the login user, and the address and `X-Forwarded-For` chain the
+  login proxy saw. With one shared login, the address is the only "who". A copy goes to the console's container log,
+  which the Jobs, sharing the workspace, can't change.
 
 ## 8. Kill and Isolate
 
@@ -266,7 +268,9 @@ sequenceDiagram
 **Isolate**
 - **What it does:** deletes `glm-serve-allow`. The model keeps running, GPU memory included, so you can inspect it, but
   nothing reaches it and it reaches nothing.
-- **Release:** recreates the policy from the console's copy of it.
+- **Release:** recreates the policy from the console's copy of it. The copy is kept in the console pod (an emptyDir),
+  not on the workspace: Jobs and, in dev, the model server can write the workspace, and Release creates whatever the
+  copy says. It must name the policy and a non-empty pod selector.
 - **Caveat:** network plugins differ on connections that are already open when the policy goes. The e2e test checks it on
   your plugin, and Kill is the hard stop.
 
@@ -317,7 +321,8 @@ kubectl -n lab delete pod -l app=glm-serve --grace-period=0 --force
 - **Weights never leave the cluster.** A read-only Hugging Face token lives only in the download Job, and no pod can push
   anywhere.
 - **Console:** basic auth and TLS on the Ingress; an IP allowlist annotation is recommended. The n8n editor stays off the
-  Ingress (port-forward).
+  Ingress (port-forward). The browser sends the basic-auth login with requests other sites make, so the console refuses
+  POSTs from another origin (CSRF); otherwise a page elsewhere could press Kill or Release.
 - **Secrets:** all as Kubernetes Secrets (Sealed Secrets or External Secrets optional):
   - the htpasswd file;
   - the n8n encryption key and API key;
@@ -333,7 +338,7 @@ kubectl -n lab delete pod -l app=glm-serve --grace-period=0 --force
 | 1 ✅ | Kustomize base, `onprem` and `cloud` overlays. They contain:<br>namespaces, PVCs, RBAC, network policies, Ingress;<br>n8n, Qdrant, Ollama;<br>glm-serve at 0 replicas | `kubectl apply --dry-run=server`, kind |
 | 2 ✅ | Abliteration stages as Jobs with live logs, run registry, Promote and Rollback | kind: the real console image, every stage on a tiny GLM |
 | 3 | n8n webhook trigger, OpenAI-compatible operator node, console polling into the live feed, free prompts to vLLM | real n8n, vLLM stand-in |
-| 4 | Kill and Isolate with RBAC and audit | kind with Calico: time to kill, isolation cuts traffic |
+| 4 ✅ | Kill, Isolate, Release and Start in the console, with audit | kind with Calico: the real console through its login; time until the container is gone from the node, isolation cuts traffic, audit |
 | 5 | Knowledge uploads incl. PDF, list and delete | unit tests, live ingest |
 | 6 | GLM-5.3: download, measure, edit, evaluate, promote | your 8×H200 node, on-prem or cloud |
 
