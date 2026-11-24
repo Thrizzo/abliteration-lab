@@ -1,4 +1,7 @@
-# Abliteration Lab
+# Red Team LLM Lab
+
+Abliteration of GLM chat models, plus a pentest-lab copilot in n8n that runs the abliterated model behind a
+deterministic policy gate and a regular judge model.
 
 Remove the refusal behaviour from GLM chat models, watch how it is done layer by layer, and compare the model before and
 after. Built as a learning tool and as a proof of concept for the whole GLM family, from GLM-Edge-1.5B on a single
@@ -46,11 +49,11 @@ algebra, and the same procedure transfers unchanged from a 1.5B dense model to a
 | Path | What it is |
 |---|---|
 | `abliterate/` | The pipeline for every GLM family: `arch.py` detects the block structure and which tensors write into the residual stream (post-norm blocks, MoE experts, FP8 block scales), `hooks.py` measures and ablates with plain PyTorch hooks (works with `device_map=auto` and on the CPU), `edit.py` edits safetensors shard by shard without loading the model, `validate.py` runs the six checks, `deploy.py` converts to GGUF and imports into Ollama over its HTTP API, `pipeline.py` is the CLI and writes `events.jsonl` for the app. |
-| `app/` | **Abliteration Lab**, a local web app (FastAPI, vanilla JS). One flow: **Model → Abliterate → Compare**, plus header panels for the **datasets** (view, search, edit, remove rows with an audit trail), the **SBOM** (CycloneDX of both Python environments, advisories, the project's own modules, Ollama, llama.cpp, driver, models, datasets) and the process **log**. |
+| `app/` | **The abliteration app**, a local web app (FastAPI, vanilla JS). One flow: **Model → Abliterate → Compare**, plus header panels for the **datasets** (view, search, edit, remove rows with an audit trail), the **SBOM** (CycloneDX of both Python environments, advisories, the project's own modules, Ollama, llama.cpp, driver, models, datasets) and the process **log**. |
 | `deploy/` | `Dockerfile`, `docker-compose.yml` (+ `docker-compose.gpu.yml`), `Caddyfile` (basic auth), `.env.example`, `k8s/abliteration.yaml`. |
 | `deploy/n8n/` | **Pentest lab copilot** in n8n: the abliterated model only suggests a command, a deterministic policy gate (scope, denylist, injection aimed at the judge) and a regular judge model decide, read-only recon auto-runs, everything else waits for a human. Retrieval over your writeups via Qdrant. See [deploy/n8n/README.md](deploy/n8n/README.md). |
 | `copilot/` | Writeup tooling for the copilot: scrubbed ingestion into Qdrant (RAG), QLoRA training pairs and a trainer that only touches read-side matrices (the abliteration cannot be undone through the adapter), and an eval harness. See [copilot/README.md](copilot/README.md). |
-| `.github/workflows/docker-image.yml` | Builds and publishes `ghcr.io/thrizzo/abliteration-lab`. |
+| `.github/workflows/docker-image.yml` | Builds and publishes `ghcr.io/thrizzo/redteam-llm-lab`. |
 | `abliteration_pipeline.ipynb`, `run_pipeline.py` | The original notebook (GLM-Edge only, TransformerLens) and its headless runner, kept as the reference implementation. Windows only. |
 | `gui/`, `build_gui.py` | A standalone single-file walkthrough page built from a run folder. |
 
@@ -76,8 +79,8 @@ hand it to containers: the stack runs on the CPU, see [Without a GPU](#without-a
 and pulls, plus the models: roughly 25 GB per 4B model (base copy, edited copy, two GGUFs), hundreds of GB for the large ones.
 
 ```bash
-git clone https://github.com/Thrizzo/abliteration-lab.git
-cd abliteration-lab
+git clone https://github.com/Thrizzo/redteam-llm-lab.git
+cd redteam-llm-lab
 cp deploy/.env.example deploy/.env
 mkdir -p workspace          # WORKSPACE=../workspace in .env is resolved from deploy/, i.e. this folder
 ```
@@ -95,7 +98,7 @@ docker compose -f deploy/docker-compose.yml --env-file deploy/.env pull app
 docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env up -d
 ```
 
-`pull app` fetches `ghcr.io/thrizzo/abliteration-lab`; without it, `up -d` builds the image locally from `deploy/Dockerfile`
+`pull app` fetches `ghcr.io/thrizzo/redteam-llm-lab`; without it, `up -d` builds the image locally from `deploy/Dockerfile`
 (about 15 minutes, the torch CUDA wheels alone are several GB), and `up -d --build` forces a rebuild. `ollama/ollama` and
 `caddy` are pulled either way.
 
@@ -139,16 +142,16 @@ configured through environment variables that the native install, a custom `dock
 override: `ABL_PROJECT` (workspace), `OLLAMA_HOST`, `ABL_HOST` / `ABL_PORT`, `ABL_PYTHON`, `ABL_GGUF_PY`, `ABL_LLAMA_CPP`
 (see `abliterate/platform.py`); inside the compose stack they are fixed by the Dockerfile and compose file.
 
-**Offline / air-gapped**: on a connected machine `docker pull ghcr.io/thrizzo/abliteration-lab:latest && docker save
-ghcr.io/thrizzo/abliteration-lab:latest ollama/ollama:latest caddy:2 -o abliteration-lab-image.tar`, then
-`docker load -i abliteration-lab-image.tar` on the target and run the compose commands without `pull`.
+**Offline / air-gapped**: on a connected machine `docker pull ghcr.io/thrizzo/redteam-llm-lab:latest && docker save
+ghcr.io/thrizzo/redteam-llm-lab:latest ollama/ollama:latest caddy:2 -o redteam-llm-lab-image.tar`, then
+`docker load -i redteam-llm-lab-image.tar` on the target and run the compose commands without `pull`.
 
 ### Rancher Desktop
 
 The image is a plain OCI image.
 
 - *moby (dockerd) backend*: the commands above work unchanged.
-- *containerd backend*: `nerdctl compose -f deploy/docker-compose.yml up -d` (and `nerdctl load -i abliteration-lab-image.tar`
+- *containerd backend*: `nerdctl compose -f deploy/docker-compose.yml up -d` (and `nerdctl load -i redteam-llm-lab-image.tar`
   for the exported image).
 - On **Windows** Rancher Desktop does not pass the GPU into containers, whatever driver the host has: leave
   `docker-compose.gpu.yml` out and the whole pipeline runs on the CPU (next section). On a Linux host with the NVIDIA

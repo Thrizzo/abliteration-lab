@@ -1,4 +1,4 @@
-/* Abliteration Lab: Model -> Abliterate -> Compare. */
+/* Red Team LLM Lab: Model -> Abliterate -> Compare. */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const fmt = (x, d=1) => (x==null||isNaN(x)) ? '–' : Number(x).toFixed(d);

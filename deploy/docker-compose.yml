@@ -1,4 +1,4 @@
-# Abliteration Lab: app + Ollama + Caddy (basic auth).
+# Red Team LLM Lab: app + Ollama + Caddy (basic auth).
 #   cp deploy/.env.example deploy/.env             # set WORKSPACE and CADDY_HASH
 #   mkdir -p <WORKSPACE>
 #   GPU host (Docker Desktop, Linux + NVIDIA container toolkit):
@@ -9,7 +9,7 @@
 services:
   app:
     build: { context: .., dockerfile: deploy/Dockerfile }
-    image: ghcr.io/thrizzo/abliteration-lab:latest   # `docker compose pull app` to use the published image instead of building
+    image: ghcr.io/thrizzo/redteam-llm-lab:latest   # `docker compose pull app` to use the published image instead of building
     init: true
     stop_grace_period: 60s
     environment:

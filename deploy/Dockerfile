@@ -1,4 +1,4 @@
-# Abliteration Lab - app + pipeline in one image. GPU via the NVIDIA container runtime (--gpus all / nvidia.com/gpu).
+# Red Team LLM Lab - app + pipeline in one image. GPU via the NVIDIA container runtime (--gpus all / nvidia.com/gpu).
 # The torch cu128 wheels bundle the CUDA libraries, so a plain Python base image is enough; the host driver is injected at run time.
 # Pin the base by digest for fully reproducible builds: FROM python:3.12-slim-bookworm@sha256:<digest>
 FROM python:3.12-slim-bookworm AS base

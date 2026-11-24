@@ -226,7 +226,7 @@ class SbomJob:
                               "affects": [{"ref": f"{pk['env']}:{pk['name']}@{pk['version']}"}]})
         bom = {"bomFormat": "CycloneDX", "specVersion": "1.5", "serialNumber": f"urn:uuid:{uuid.uuid4()}", "version": 1,
                "metadata": {"timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                            "component": {"type": "application", "name": "abliteration-lab", "version": "1.0"}},
+                            "component": {"type": "application", "name": "redteam-llm-lab", "version": "1.0"}},
                "components": comps + extra, "vulnerabilities": vulns}
         os.makedirs(self.dir, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

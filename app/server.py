@@ -1,4 +1,4 @@
-r"""Abliteration Lab - local app server.
+r"""Red Team LLM Lab - local app server (abliteration).
 
     .\.venv\Scripts\python.exe app\server.py --open                        (from the project folder)
     .\.venv\Scripts\python.exe app\server.py --project C:\path\to\Abliteration --port 8787
@@ -60,7 +60,7 @@ def run_dir_of(run_id):
     return os.path.join("runs", f"abliterate_{run_id}")
 
 
-app = FastAPI(title="Abliteration Lab")
+app = FastAPI(title="Red Team LLM Lab")
 lab = Lab(PROJECT)
 datasets = Datasets(os.path.join(PROJECT, "data"))
 sbom = SbomJob(PROJECT)
@@ -639,7 +639,7 @@ def main():
     datasets.dir = os.path.join(PROJECT, "data")
     sbom.project, sbom.dir = PROJECT, os.path.join(PROJECT, "sbom")
     import uvicorn
-    print(f"Abliteration Lab: code {CODE}, project {PROJECT}, python {PY}, ollama {OLLAMA} -> http://{a.host}:{a.port}")
+    print(f"Red Team LLM Lab: code {CODE}, project {PROJECT}, python {PY}, ollama {OLLAMA} -> http://{a.host}:{a.port}")
     if a.open:
         threading.Timer(1.0, lambda: webbrowser.open(f"http://localhost:{a.port}")).start()
     uvicorn.run(app, host=a.host, port=a.port, log_level="warning")
