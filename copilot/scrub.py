@@ -60,6 +60,13 @@ CRED_PATTERNS = [
     # key=value style secrets
     (re.compile(r"(?i)\b(password|passwd|pwd|pass|passphrase|secret|api[_-]?key|access[_-]?token|token)"
                 r"(\s*[:=]\s*|\s+is\s+)([\"']?)([^\s\"']{3,})\3"), r"\1\2\3<SECRET>\3"),
+    # the same in prose: "VPN password Summer2026!", "pw hunter2", "the password for svc_x is Backup#2024",
+    # "Password (local admin): P@ss1". Only values with a digit or a symbol, so "reset the password before ..." and
+    # "the password policy is strict" stay readable; a trailing comma or full stop stays too.
+    (re.compile(r"(?i)\b(password|passwd|pwd|pw|passphrase)(\s+)([\"']?)(?=[^\s\"']*[0-9!@#$%^&*+=?~])"
+                r"([^\s\"']{3,}?)\3(?=[.,;:)]*(?:\s|$))"), r"\1\2\3<SECRET>\3"),
+    (re.compile(r"(?i)\b(password|passwd|pwd|pw|passphrase)\b([^\n]{0,40}?(?:\s(?:is|was)\s+|[:=]\s*))([\"']?)"
+                r"(?=[^\s\"']*[0-9!@#$%^&*+=?~])([^\s\"']{3,}?)\3(?=[.,;:)]*(?:\s|$))"), r"\1\2\3<SECRET>\3"),
     # tool flags that carry a password
     (re.compile(r"(?i)(--password[= ])([\"']?)[^\s\"']+\2"), r"\1\2<SECRET>\2"),
     (re.compile(r"(?i)(/p:)(\S+)"), r"\1<SECRET>"),

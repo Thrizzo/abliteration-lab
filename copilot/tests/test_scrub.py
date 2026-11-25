@@ -51,6 +51,24 @@ class EngagementLeaks(unittest.TestCase):
     def test_cidr_suffix_kept(self):
         self.assertRegex(self.out, r"<IP_\d+>/24")
 
+    def test_passwords_in_prose(self):
+        # Notes say it every way, not only "password: x". A value with a digit or a symbol is taken for a secret.
+        cases = {
+            "Kickoff call: VPN password Summer2026! and the scope.": "Summer2026",
+            "pw hunter2, then the share.": "hunter2",
+            "The SMB password for svc_backup is Backup#2024.": "Backup#2024",
+            "passphrase 'Tr0ub4dor&3' on the key": "Tr0ub4dor",
+            "Password (local admin): P@ssw0rd123": "P@ssw0rd",
+        }
+        for text, secret in cases.items():
+            out, _ = scrub(text, "engagement")
+            self.assertNotIn(secret, out, out)
+            self.assertIn("<SECRET>", out, out)
+        self.assertIn("pw <SECRET>, then", scrub("pw hunter2, then the share.", "engagement")[0])   # the comma stays
+        for text in ("Reset the password before the retest.", "The password policy requires 12 characters.",
+                     "Pass the hash with crackmapexec.", "password expires in 90 days"):
+            self.assertEqual(scrub(text, "engagement")[0], text)                                    # prose stays readable
+
 
 class PublicSources(unittest.TestCase):
     def test_htb_keeps_lab_context(self):
