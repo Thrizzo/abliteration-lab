@@ -337,11 +337,12 @@ function Invoke-Preflight {
     $mem = 0.0
     $cpu = 0.0
     foreach ($i in $items) { $mem += ConvertTo-GiB "$($i.status.allocatable.memory)"; $cpu += ConvertTo-Cpu "$($i.status.allocatable.cpu)" }
-    if ($cpu -ge 3) { Ok "CPUs for pods: $cpu" } else { Bad "CPUs for pods: $cpu (the stack and one Job request 3: let Rancher Desktop / WSL use more)" }
+    # dev requests: the stack 2.05 CPU / 5.1 GiB, the largest Job 1 CPU / 2 GiB, k3s's own pods about 0.2 CPU
+    if ($cpu -ge 3.5) { Ok "CPUs for pods: $cpu" } else { Bad "CPUs for pods: $cpu (the stack and a pipeline Job request ~3.3: let Rancher Desktop / WSL use more)" }
     if ($mem -lt 5.5) { Bad "memory for pods: $mem GiB (the stack requests 5 GiB: pods would stay Pending)" }
     else {
         Ok "memory for pods: $mem GiB"
-        if ($mem -lt 7.5) { Note 'a Job requests 2 GiB more: Jobs may wait for memory' }
+        if ($mem -lt 7.5) { Note 'a pipeline Job requests 2 GiB more: Jobs may wait for memory' }
         if ($mem -lt 14) { Note 'the judge (qwen3:8b) and a CPU scan of GLM-Edge-1.5B together need ~16 GB: %UserProfile%\.wslconfig, [wsl2] memory=16GB' }
     }
     $script:HasTraefik = [bool](kcJson @('-n', 'kube-system', 'get', 'svc', 'traefik', '-o', 'json'))
@@ -677,9 +678,23 @@ function Invoke-Stage([hashtable]$Body, [int]$Minutes = 20) {
     $st = Api 'POST' '/pipeline/start' $Body
     if (-not $st.Json -or -not $st.Json.running) { Note "start refused: HTTP $($st.Code) $($st.Text)"; return @{ Run = ''; Code = -1 } }
     $until = (Get-Date).AddMinutes($Minutes)
+    $logAt = 0
+    $tail = @()
+    $stuckSince = $null
     do {
         Start-Sleep -Seconds 3
         $s = (Api 'GET' '/pipeline/status').Json
+        $l = (Api 'GET' "/pipeline/log?start=$logAt").Json  # only the lines since the last look
+        if ($l) { $tail = @(@($tail) + @($l.lines) | Select-Object -Last 5); $logAt = [int]$l.next }
+        $why = @($tail | Where-Object { "$_" -match 'Unschedulable' }) | Select-Object -Last 1
+        if (-not $why) { $stuckSince = $null }
+        elseif (-not $stuckSince) { $stuckSince = Get-Date }
+        elseif (((Get-Date) - $stuckSince).TotalSeconds -gt 120) {   # no room on the node: say why instead of waiting
+            Note "the Job cannot be scheduled: $why"
+            Note 'give Rancher Desktop / WSL more CPUs or memory, or lower the requests in the overlay''s jobs.json'
+            $null = Api 'POST' '/pipeline/stop'
+            return @{ Run = "$($s.run_id)"; Code = -2 }
+        }
     } while ($s -and $s.running -and (Get-Date) -lt $until)
     $code = -1
     if ($s -and $null -ne $s.exit_code) { $code = [int]$s.exit_code }
