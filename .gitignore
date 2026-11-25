@@ -15,3 +15,7 @@ out/
 runs/
 sbom/
 deploy/.env
+
+# Python bytecode from running the app and the tests
+__pycache__/
+*.py[cod]
