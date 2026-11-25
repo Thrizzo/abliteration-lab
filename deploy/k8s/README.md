@@ -257,8 +257,9 @@ The **knowledge** button in the console's header opens the writeups the copilot 
 - **Trust:** uploaded text stays untrusted. The workflow hands it only to the operator, with addresses masked, never to
   the judge, and the policy gate stays the boundary.
 - **Logged:** uploads, ingest results and deletes go to the audit log and the live feed.
-- **Ingress:** the console's login (Caddy) accepts bodies up to 50 MB. With ingress-nginx, raise its 1 MB default:
-  `nginx.ingress.kubernetes.io/proxy-body-size: 50m`.
+- **Body size, 50 MB end to end:** the console's login (Caddy) accepts up to 50 MB, and the base Ingress sets
+  `nginx.ingress.kubernetes.io/proxy-body-size: 50m` for ingress-nginx (its default is 1 MB). Traefik, the class the
+  overlays use (Rancher Desktop's default), sets no body limit unless a buffering middleware adds one.
 - **Without the GUI:** the same ingest for a whole folder is `python -m copilot.ingest --src /workspace/writeups`
   (copilot/README.md).
 
