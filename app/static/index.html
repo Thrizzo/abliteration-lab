@@ -25,6 +25,7 @@
     <button class="btn sm" id="dataToggle">datasets</button>
     <button class="btn sm" id="sbomToggle">SBOM</button>
     <button class="btn sm" id="copilotToggle" style="display:none">copilot</button>
+    <button class="btn sm" id="knowledgeToggle" style="display:none">knowledge</button>
     <button class="btn sm" id="serveToggle" style="display:none">serving</button>
     <button class="btn sm" id="logToggle">log</button>
   </div>
@@ -188,6 +189,16 @@
       </div>
     </div>
   </div>
+</div></section>
+<section class="panel" id="knowledgePanel"><div class="inner">
+  <div class="row" style="justify-content:space-between"><div><h2>Knowledge</h2><div class="small">Writeups the copilot retrieves from. Uploaded text stays untrusted: it reaches only the operator, with addresses masked, never the judge, and the policy gate stays the boundary. Files are kept under <span class="mono">writeups/&lt;source&gt;/</span>; uploading a file again replaces its chunks.</div></div><button class="btn sm" id="knowledgeClose">close</button></div>
+  <div class="card"><h3>Add a document</h3>
+    <div class="row"><input type="file" id="knFile" accept=".md,.markdown,.txt,.rst,.html,.htm,.pdf" aria-label="document"><select id="knSource" aria-label="source"></select></div>
+    <div class="small" id="knSourceInfo"></div>
+    <div class="row"><button class="btn" id="knPreview">Preview</button><button class="btn primary" id="knUpload">Upload</button><span class="small" id="knInfo"></span></div>
+    <div id="knPreviewOut"></div>
+  </div>
+  <div class="card"><div class="row" style="justify-content:space-between;margin-top:0"><h3>Documents</h3><span class="small" id="knStore"></span></div><div id="knDocs"></div></div>
 </div></section>
 
 <script src="/static/guide.js"></script>

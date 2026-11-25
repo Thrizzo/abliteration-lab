@@ -15,6 +15,9 @@
 #      sets n8n up and the console picks up its Secret without a restart; every branch (approval / policy / judge /
 #      scope) arrives as one event per stage; Stop cancels a waiting run; the webhook needs the secret; the console's
 #      n8n key can only read and stop executions; a free prompt streams from glm-serve; feed and audit record it all
+#   8. knowledge uploads through the login into real Qdrant: markdown and PDF indexed, a scanned PDF refused, the
+#      engagement preview's redactions; a copilot run retrieves them; delete empties store and folder, and the next
+#      run finds nothing; no deletes outside the writeups folder; audited
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
 pass=0; fail=0
@@ -227,6 +230,36 @@ check "feed: Jobs, the kill switch, Promote, copilot runs and model events" test
 check "audit: the copilot run's start and stop by user ci" test "$(API /control | jq -r --arg id "$RID" '[.audit[] | select(.source == "copilot" and .run_id == $id) | "\(.stage):\(.who.user)"] | sort | join(",")')" = "end:ci,start:ci,stop:ci"
 check "audit: the free prompt and its answer" test "$(API /control | jq -r '[.audit[] | select(.source == "model" and .stage == "prompt")][0].data.prompt')" = "Say hello."
 kill $PF2 2>/dev/null
+
+echo "== 8. Knowledge uploads (real Qdrant, the stand-in's embeddings) and retrieval in a copilot run"
+# the file as the raw body, as the browser sends it; echo the answer, or the HTTP status with -w
+upload() { curl -sS -u ci:ci-only-password -H 'Content-Type: application/octet-stream' --data-binary "@$3" "http://127.0.0.1:18080/api/knowledge/$1?$2"; }
+upload_code() { curl -s -o /dev/null -w '%{http_code}' -u ci:ci-only-password -H 'Content-Type: application/octet-stream' --data-binary "@$2" "http://127.0.0.1:18080/api/knowledge/upload?$1"; }
+printf '# Lame (HTB, retired)\n\n## Recon\nnmap -sC -sV shows Samba 3.0.20 on 139/445.\n\n## Foothold\nSamba 3.0.20 usermap_script gives root.\n' > /tmp/lame.md
+printf 'Admin jane.doe@client-corp.com, Password: Summer2026!\n' > /tmp/notes.md
+python3 -c "import sys; sys.path.insert(0, '.'); from copilot.tests.pdf_fixture import make_pdf; open('/tmp/lame.pdf', 'wb').write(make_pdf([['Lame: smbclient -N -L //target'], ['usermap_script via Samba 3.0.20']])); open('/tmp/scan.pdf', 'wb').write(make_pdf([[]]))"
+indexed() { local i; for i in $(seq 1 120); do [ "$(API /knowledge | jq -r --arg d "$1" '.docs[] | select(.doc == $d) | .status')" = indexed ] && return 0; sleep 1; done; return 1; }
+retrieval_of() { jq -r '[.events[] | select(.stage == "retrieval")][0].message' <<<"$1"; }
+stop_if_waiting() { [ "$(jq -r .status <<<"$1")" = waiting ] && API "/copilot/runs/$(jq -r .id <<<"$1")/stop" -d '{}' >/dev/null; return 0; }
+check "knowledge is configured (Qdrant + embeddings)" test "$(API /knowledge | jq -r .configured)" = true
+check "upload a markdown writeup" test "$(upload upload 'source=htb&name=Lame.md' /tmp/lame.md | jq -r .doc)" = htb/Lame.md
+check "upload a PDF writeup" test "$(upload upload 'source=htb&name=Lame%20notes.pdf' /tmp/lame.pdf | jq -r .doc)" = htb/Lame-notes.pdf
+check "a PDF without a text layer is refused (422)" test "$(upload_code 'source=htb&name=scan.pdf' /tmp/scan.pdf)" = 422
+check "markdown ingested into Qdrant" indexed htb/Lame.md
+check "PDF ingested (text read in the limited process)" indexed htb/Lame-notes.pdf
+check "chunk counts listed: $(API /knowledge | jq -c '[.docs[] | {(.doc): .chunks}] | add')" test "$(API /knowledge | jq '[.docs[].chunks] | add')" -ge 2
+check "engagement preview shows the redactions, stores nothing" test "$(upload preview 'source=engagement&name=notes.md' /tmp/notes.md | jq -r '.redactions | keys | join(",")')/$(API /knowledge | jq '.docs | length')" = "EMAIL,SECRET/2"
+K=$(copilot_run "Enumerate SMB on the box" 10.10.10.5 waiting done error)
+stop_if_waiting "$K"
+check "a copilot run retrieves the uploads ($(retrieval_of "$K"))" test "$(retrieval_of "$K" | cut -c1-4)" = "ok ("
+check "delete the markdown writeup" test "$(API /knowledge/delete -d '{"doc": "htb/Lame.md"}' | jq -r .deleted)" = true
+check "delete the PDF" test "$(API /knowledge/delete -d '{"doc": "htb/Lame-notes.pdf"}' | jq -r .deleted)" = true
+check "nothing left in the store or the folder" test "$(API /knowledge | jq '.docs | length')" = 0
+K2=$(copilot_run "Enumerate SMB on the box" 10.10.10.5 waiting done error)
+stop_if_waiting "$K2"
+check "the next run finds no references ($(retrieval_of "$K2"))" test "$(retrieval_of "$K2")" = "no matches"
+check "a path outside the writeups folder can't be deleted" test "$(curl -s -o /dev/null -w '%{http_code}' -u ci:ci-only-password -H 'Content-Type: application/json' -d '{"doc": "../serving/history.json"}' http://127.0.0.1:18080/api/knowledge/delete)" = 400
+check "audit: upload, ingest and delete by user ci" test "$(API /control | jq -r '[.audit[] | select(.source == "knowledge" and .data.doc == "htb/Lame.md") | "\(.stage):\(.who.user)"] | unique | join(",")')" = "delete:ci,ingest:ci,upload:ci"
 
 kill $PF 2>/dev/null
 echo

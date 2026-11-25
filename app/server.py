@@ -30,6 +30,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 import rundata  # noqa: E402
 import copilot_runs as CR  # noqa: E402
+import knowledge as KN  # noqa: E402
 from lab import Lab  # noqa: E402
 from datasets import Datasets, FILES as DATA_FILES  # noqa: E402
 from sbom import SbomJob  # noqa: E402
@@ -210,6 +211,11 @@ copilot = CR.CopilotRuns(os.environ.get("N8N_URL"), os.environ.get("COPILOT_SECR
 model_chat = CR.ModelChat(os.environ.get("GLM_SERVE_URL"),
                           (_k8s_settings.get("serving") or {}).get("servedName", "glm-abl") if K8S else os.environ.get("GLM_SERVE_MODEL", "glm-abl"),
                           FEED, audit=audit)
+# knowledge uploads for the copilot's retrieval: embedded with the copilot's Ollama (RAG_OLLAMA_URL; in dev OLLAMA_HOST
+# points at glm-serve instead) into the Qdrant collection n8n searches
+knowledge = KN.Knowledge(PROJECT, os.environ.get("QDRANT_URL"), os.environ.get("RAG_COLLECTION", "writeups"),
+                         os.environ.get("RAG_OLLAMA_URL") or os.environ.get("OLLAMA_HOST"),
+                         os.environ.get("RAG_EMBED_MODEL", "nomic-embed-text"), FEED, audit=audit, http_error=HTTPException)
 PY = PL.pipeline_python(PROJECT)
 
 
@@ -560,6 +566,49 @@ def model_chat_stream(b: Prompt, request: Request):
     who = _who(request)
     return StreamingResponse((json.dumps(ev) + "\n" for ev in model_chat.stream(b.prompt, b.max_tokens, who)),
                              media_type="application/x-ndjson")
+
+
+# ------------------------------------------------------------------------- API: knowledge uploads (retrieval)
+async def _upload_body(request):
+    """The raw request body (the file itself), refused past the 50 MB cap while it is still arriving."""
+    cap = KN.MAX_BYTES
+    n = request.headers.get("content-length")
+    if n and n.isdigit() and int(n) > cap:
+        raise HTTPException(413, f"larger than {cap // (1024 * 1024)} MB")
+    buf = bytearray()
+    async for part in request.stream():
+        buf += part
+        if len(buf) > cap:
+            raise HTTPException(413, f"larger than {cap // (1024 * 1024)} MB")
+    return bytes(buf)
+
+
+@app.get("/api/knowledge")
+def knowledge_list():
+    return knowledge.list()
+
+
+@app.post("/api/knowledge/preview")
+async def knowledge_preview(request: Request, source: str, name: str):
+    """What ingesting would do (redactions, chunks), without storing or embedding anything. Body: the file."""
+    data = await _upload_body(request)
+    return await run_in_threadpool(knowledge.preview, source, name, data)
+
+
+@app.post("/api/knowledge/upload")
+async def knowledge_upload(request: Request, source: str, name: str):
+    """Stores the file under workspace/writeups/<source>/ and ingests it in the background. Body: the file."""
+    data = await _upload_body(request)
+    return await run_in_threadpool(knowledge.upload, source, name, data, _who(request))
+
+
+class DocRef(BaseModel):
+    doc: str = Field(min_length=1, max_length=400)
+
+
+@app.post("/api/knowledge/delete")
+def knowledge_delete(b: DocRef, request: Request):
+    return knowledge.delete(b.doc, _who(request))
 
 
 @app.post("/api/pipeline/stop")

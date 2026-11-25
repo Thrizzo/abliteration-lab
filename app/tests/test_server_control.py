@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -171,6 +172,56 @@ class TestCopilotHTTP(unittest.TestCase):
         self.assertEqual([(e["source"], e["stage"]) for e in feed], [("model", "prompt")])
         self.assertEqual(feed[0]["data"]["who"]["user"], "admin")
         self.assertEqual(call(s.app, "POST", "/api/model/chat", {}, {"prompt": ""})[0], 422)
+
+@unittest.skipUnless(HAVE_FASTAPI, "the console's dependencies are not installed here")
+class TestKnowledgeHTTP(unittest.TestCase):
+    """Uploads as the browser sends them: the file as the raw body, source and name in the query."""
+
+    @classmethod
+    def setUpClass(cls):
+        TestControlHTTP.setUpClass()
+        cls.server = TestControlHTTP.server
+        import model_standin
+        import test_knowledge
+        from http.server import ThreadingHTTPServer
+        import threading
+        cls.emb = ThreadingHTTPServer(("127.0.0.1", 0), model_standin.H)
+        threading.Thread(target=cls.emb.serve_forever, daemon=True).start()
+        cls.qdrant = test_knowledge.FakeQdrant()
+        k = cls.server.knowledge
+        k.qdrant_url, k.ollama_url = cls.qdrant.url, f"http://127.0.0.1:{cls.emb.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.emb.shutdown()
+        cls.qdrant.close()
+
+    def test_preview_upload_list_delete(self):
+        app = self.server.app
+        notes = b"# Notes\n\nadmin is jane.doe@client-corp.com\n"
+        st, p = call(app, "POST", "/api/knowledge/preview?source=engagement&name=notes.md", {}, notes)
+        self.assertEqual(st, 200, p)
+        self.assertNotIn("jane.doe", p["scrubbed"])
+        st, up = call(app, "POST", "/api/knowledge/upload?source=htb&name=Lame.md", {"x-lab-user": "admin"},
+                      b"# Lame\n\nsmbclient -N -L //target\n")
+        self.assertEqual((st, up["doc"]), (200, "htb/Lame.md"))
+        for _ in range(200):
+            d = [x for x in call(app, "GET", "/api/knowledge")[1]["docs"] if x["doc"] == "htb/Lame.md"]
+            if d and d[0]["status"] == "indexed":
+                break
+            time.sleep(0.02)
+        self.assertEqual(d[0]["chunks"], 1)
+        st, out = call(app, "POST", "/api/knowledge/delete", {}, {"doc": "htb/Lame.md"})
+        self.assertEqual((st, out["deleted"]), (200, True))
+        self.assertEqual(self.qdrant.docs(), {})
+
+    def test_refusals(self):
+        app = self.server.app
+        big = str(64 * 1024 * 1024)
+        self.assertEqual(call(app, "POST", "/api/knowledge/upload?source=htb&name=x.md", {"content-length": big}, b"x")[0], 413)
+        self.assertEqual(call(app, "POST", "/api/knowledge/upload", {}, b"x")[0], 422)                  # no source / name
+        self.assertEqual(call(app, "POST", "/api/knowledge/upload?source=htb&name=x.md", {"origin": "https://evil.example"}, b"x")[0], 403)
+        self.assertEqual(call(app, "POST", "/api/knowledge/delete", {}, {"doc": "../app/server.py"})[0], 400)
 
 if __name__ == "__main__":
     unittest.main()

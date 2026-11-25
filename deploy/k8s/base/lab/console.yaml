@@ -42,6 +42,9 @@ spec:
             - { name: QDRANT_URL, value: "http://qdrant.lab-copilot.svc:6333" }
             - { name: RAG_COLLECTION, value: writeups }
             - { name: RAG_EMBED_MODEL, value: nomic-embed-text }
+            # knowledge uploads are embedded by the copilot's Ollama, with the model n8n searches with (in dev,
+            # OLLAMA_HOST points at glm-serve for the Compare stage instead)
+            - { name: RAG_OLLAMA_URL, value: "http://ollama.lab-copilot.svc:11434" }
             - { name: N8N_URL, value: "http://n8n.lab-copilot.svc:5678" }
             - { name: GLM_SERVE_URL, value: "http://glm-serve.lab.svc:8000" }
             - { name: HF_TOKEN, valueFrom: { secretKeyRef: { name: hf, key: token, optional: true } } }

@@ -14,7 +14,7 @@ on:
       - "app/**"
       - "abliterate/**"
       - "deploy/n8n/**"
-      - "copilot/operator_contract.json"
+      - "copilot/**"
       - ".github/workflows/k8s-e2e.yml"
   workflow_dispatch: {}
 
@@ -85,6 +85,7 @@ jobs:
         run: |
           run() { docker run --rm --entrypoint /opt/venv/bin/python -w /app ghcr.io/thrizzo/redteam-llm-lab:ci "$@"; }
           run -m unittest discover -s abliterate/tests -t . -v
+          run -m unittest discover -s copilot/tests -t . -v
           run -m unittest discover -s app/tests -v
 
       - name: Install kind

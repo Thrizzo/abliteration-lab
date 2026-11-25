@@ -608,3 +608,74 @@ const cpClose=()=>{ $('#copilotPanel').classList.remove('open'); clearInterval(C
 $('#copilotClose').onclick=cpClose;
 ['#dataToggle','#sbomToggle','#serveToggle'].forEach(b=>$(b).addEventListener('click', cpClose));
 cpLoad();
+
+// ------------------------------------------------------------------ knowledge uploads (the copilot's retrieval)
+const KN = {info:null, previewed:null, t:null};
+const fileKey = f => f ? `${f.name}|${f.size}|${f.lastModified}` : '';
+const fmtBytes = n => n==null ? '' : (n >= 1048576 ? (n/1048576).toFixed(1)+' MB' : (n >= 1024 ? Math.round(n/1024)+' KB' : n+' B'));
+const KN_BADGE = {indexed:'pass', queued:'warn', ingesting:'warn', error:'fail', 'not indexed':'ghost'};
+function knGate(){
+  const f=$('#knFile').files[0], src=$('#knSource').value;
+  const needPreview = src==='engagement' && KN.previewed!==fileKey(f)+'|'+src;
+  $('#knUpload').disabled = !f || needPreview || !(KN.info && KN.info.configured);
+  $('#knPreview').disabled = !f;
+  $('#knSourceInfo').textContent = ((KN.info && KN.info.sources) || {})[src] || '';
+  $('#knInfo').textContent = needPreview && f ? 'engagement notes: preview the redactions first' : '';
+}
+async function knLoad(){
+  let k; try{ k=await api('/knowledge'); }catch(e){ return false; }
+  KN.info=k;
+  if(!k.configured){ $('#knowledgeToggle').style.display='none'; return false; }       // no vector store here
+  $('#knowledgeToggle').style.display='';
+  const sel=$('#knSource');
+  if(!sel.options.length) sel.innerHTML=Object.keys(k.sources).map(s=>`<option value="${escA(s)}">${esc(s)}</option>`).join('');
+  $('#knStore').innerHTML = k.qdrant_error ? `<span class="vuln">vector store: ${esc(k.qdrant_error)}</span>` : `collection <span class="mono">${esc(k.collection)}</span>`;
+  const docs=k.docs||[];
+  $('#knDocs').innerHTML = docs.length ? `<div style="overflow-x:auto"><table><tr><th>document</th><th>title</th><th class="num">chunks</th><th class="num">size</th><th>status</th><th></th></tr>${docs.map(d=>{
+      const st = d.status==='ingesting' && d.progress && d.progress[1] ? `ingesting ${d.progress[0]}/${d.progress[1]}` : d.status;
+      return `<tr><td class="mono">${esc(d.doc)}${d.file?'':' <span class="small">(vectors only)</span>'}</td><td>${esc(d.title)}</td><td class="num">${d.chunks}</td><td class="num">${esc(fmtBytes(d.size))}</td><td><span class="badge ${KN_BADGE[d.status]||'ghost'}" title="${escA(d.error||'')}">${esc(st)}</span>${d.error?` <span class="small vuln">${esc(d.error)}</span>`:''}</td><td><button class="btn sm danger" data-kndel="${escA(d.doc)}" ${['queued','ingesting'].includes(d.status)?'disabled':''}>Delete</button></td></tr>`; }).join('')}</table></div>`
+    : '<div class="empty">No documents yet. Retrieval runs without references until there are some.</div>';
+  $('#knDocs').querySelectorAll('[data-kndel]').forEach(b=>b.onclick=async()=>{
+    const doc=b.dataset.kndel; if(!confirm(`Delete ${doc}? Its file and its chunks in the vector store are removed.`)) return;
+    try{ await api('/knowledge/delete', {doc}); toast(`${doc} deleted`); }catch(e){ toast(e.message, true); }
+    knLoad(); });
+  knGate();
+  clearTimeout(KN.t);
+  if(docs.some(d=>['queued','ingesting'].includes(d.status)) && $('#knowledgePanel').classList.contains('open')) KN.t=setTimeout(knLoad, 1500);
+  return true;
+}
+async function knSend(kind){
+  const f=$('#knFile').files[0], src=$('#knSource').value; if(!f) return;
+  if(KN.info && f.size > KN.info.max_bytes) return toast(`${f.name} is larger than ${fmtBytes(KN.info.max_bytes)}`, true);
+  const r=await fetch(`/api/knowledge/${kind}?source=${encodeURIComponent(src)}&name=${encodeURIComponent(f.name)}`, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:f});
+  let body; try{ body=await r.json(); }catch(e){ body={}; }
+  if(!r.ok) throw new Error(body.detail || r.statusText);
+  return body;
+}
+$('#knPreview').onclick=async()=>{
+  const out=$('#knPreviewOut'); out.innerHTML='<div class="small">reading…</div>';
+  try{
+    const p=await knSend('preview'), red=Object.entries(p.redactions||{});
+    out.innerHTML = `<div class="small" style="margin-top:8px"><b>${esc(p.doc)}</b>: ${p.chars.toLocaleString()} characters, ${p.chunks} chunk${p.chunks===1?'':'s'}</div>`
+      + (red.length ? `<table style="max-width:420px"><tr><th>redacted</th><th class="num">count</th></tr>${red.map(([k,v])=>`<tr><td class="mono">${esc(k)}</td><td class="num">${v}</td></tr>`).join('')}</table>` : '<div class="small">no redactions</div>')
+      + `<pre class="cp-answer" id="knPreviewText"></pre>` + (p.truncated ? '<div class="small">(first 30,000 characters)</div>' : '');
+    $('#knPreviewText').textContent = p.scrubbed!=null ? p.scrubbed : p.sample;
+    KN.previewed=fileKey($('#knFile').files[0])+'|'+p.source;
+  }catch(e){ out.innerHTML=''; toast(e.message, true); }
+  knGate();
+};
+$('#knUpload').onclick=async()=>{
+  $('#knUpload').disabled=true;
+  try{ const u=await knSend('upload'); toast(`${u.doc} uploaded: ingesting`); $('#knFile').value=''; $('#knPreviewOut').innerHTML=''; KN.previewed=null; }catch(e){ toast(e.message, true); }
+  knLoad();
+};
+$('#knFile').onchange=knGate; $('#knSource').onchange=knGate;
+$('#knowledgeToggle').onclick=()=>{
+  ['#dataPanel','#sbomPanel','#servePanel','#copilotPanel'].forEach(p=>$(p).classList.remove('open'));
+  cpClose(); clearInterval(serveT);                    // their pollers stop with their panels
+  $('#knowledgePanel').classList.add('open'); knLoad();
+};
+const knClose=()=>{ $('#knowledgePanel').classList.remove('open'); clearTimeout(KN.t); };
+$('#knowledgeClose').onclick=knClose;
+['#dataToggle','#sbomToggle','#serveToggle','#copilotToggle'].forEach(b=>$(b).addEventListener('click', knClose));
+knLoad();
