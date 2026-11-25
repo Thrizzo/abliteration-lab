@@ -63,6 +63,53 @@ The network policies deny everything that isn't explicitly opened:
   - **Kubernetes in Rancher Desktop:** enable it in Preferences → Kubernetes. Its k3s ships Traefik, the base's ingress
     class.
 
+## Rancher Desktop (Windows): set up and check with one script
+
+`tests/rancher-dev.ps1` does the Deploy steps below for the `dev` overlay, then checks the result. From a PowerShell
+window anywhere in the repository:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
+```
+
+- **Without switches** it runs `-Setup`, then `-Check`:
+  - **`-Setup`:**
+    - builds the console image into Rancher Desktop's container engine (docker with dockerd, nerdctl with
+      containerd: it picks the one Kubernetes uses);
+    - creates the namespaces and Secrets;
+    - applies the overlay and waits for every pod;
+    - connects n8n with `connect_console.py`.
+  - **`-Check`:**
+    - the login;
+    - `http://lab.localhost` through Traefik, including a 2 MB upload and the 50 MB limit;
+    - allowed and blocked traffic from probe pods;
+    - the console's access to the Kubernetes API;
+    - Isolate / Release / Kill / Start with their audit entries;
+    - the copilot's models;
+    - a knowledge upload that a copilot run retrieves;
+    - a free prompt.
+  - **`-Pipeline`** (optional, a few minutes): a tiny random GLM through every stage as Jobs, then Promote.
+  - **`-Teardown`:** deletes both namespaces with all their data, after asking.
+- **It asks for:**
+  - a console password the first time (only its bcrypt hash is stored, in Secret `lab/basic-auth`);
+  - an n8n login (a fresh n8n gets it as its owner account).
+
+  Re-running is safe: the build uses its cache, existing Secrets are kept, and n8n is updated in place.
+- **Needs:**
+  - Rancher Desktop with Kubernetes and Traefik on;
+  - Python 3 for the n8n step;
+  - `kubectl` context `rancher-desktop` (`-Context`). The script uses that context even when another one is current.
+- **Memory:** WSL gets half the host RAM by default. The stack is sized to start on 8 GB. The judge (`qwen3:8b`)
+  together with a CPU abliteration of GLM-Edge-1.5B needs about 16 GB:
+  - set `memory=16GB` under `[wsl2]` in `%UserProfile%\.wslconfig`;
+  - restart Rancher Desktop.
+
+  The judge (~5 GB) downloads in the background. Checks that need it are skipped until it is there.
+- **Output:** `ok`, `FAIL` or `skip` per step, and `rancher-dev-<time>.log` in the current folder. The log holds no
+  passwords or keys; paste it back when something fails.
+- **CI:** the `k3s` job runs the same script under PowerShell 7 on k3s (k3d), unattended. Windows PowerShell 5.1 itself
+  is not run in CI.
+
 ## Deploy
 
 1. **Namespaces and secrets** (once). Keep the single quotes around the hash, in bash and in PowerShell:
@@ -89,21 +136,20 @@ The network policies deny everything that isn't explicitly opened:
    kubectl apply -k deploy/k8s/overlays/dev
    ```
    Use `overlays/onprem` or `overlays/cloud` on a GPU cluster.
-4. **Open the console:** through the Ingress host, or without one:
+4. **Open the console:** through the Ingress host (`dev`: http://lab.localhost), or without one:
    ```bash
    kubectl -n lab port-forward svc/console 8080:8080
    ```
    http://localhost:8080, user and password from step 1.
-5. **Open n8n** (not on the Ingress):
+5. **Connect n8n** (not on the Ingress). One script sets up the copilot's credentials, the workflow, and the console's
+   access ([Copilot](#copilot-runs-free-prompts-live-feed)):
    ```bash
    kubectl -n lab-copilot port-forward svc/n8n 5678:5678
    ```
-   - **Credentials:**
-     - Ollama `http://ollama.lab-copilot.svc:11434` (judge, embeddings);
-     - Qdrant `http://qdrant.lab-copilot.svc:6333`;
-     - the operator model at `http://glm-serve.lab.svc:8000`, model `glm-abl`. In dev that is an Ollama credential with
-       that Base URL; on GPU overlays an OpenAI credential with Base URL `.../v1`.
-   - **Workflow:** import `deploy/n8n/workflows/pentest-copilot.json` and publish it.
+   ```bash
+   python deploy/n8n/connect_console.py --email <your n8n login> --apply-secret
+   ```
+   A fresh n8n needs `--setup-owner` as well. n8n's own UI is then at http://localhost:5678.
 
 ## Running abliteration
 
@@ -265,8 +311,8 @@ The **knowledge** button in the console's header opens the writeups the copilot 
 
 ## Tested in CI
 
-`.github/workflows/k8s-e2e.yml` runs on every push that touches `deploy/k8s`, `app` or `abliterate`, each time on a
-kind cluster with Calico.
+`.github/workflows/k8s-e2e.yml` runs on every push that touches `deploy/k8s`, `deploy/n8n`, `app`, `abliterate` or
+`copilot`. Network policies are enforced in all three jobs: Calico on kind, and k3s's own controller.
 
 - **`kind` (`tests/e2e.sh`):**
   - server-side dry run of every overlay;
@@ -276,7 +322,7 @@ kind cluster with Calico.
   - Isolate / Release and Kill / Start, performed as the console's ServiceAccount, including how long it takes until the
     model's container is gone from the node.
 - **`pipeline` (`tests/pipeline-e2e.sh`)** runs the n8n workflow's tests, builds the console image from the commit (CPU
-  torch) and runs the unit tests inside it (`abliterate/tests`, `app/tests`). Then it drives the console through its API on a tiny random GLM,
+  torch) and runs the unit tests inside it (`abliterate/tests`, `copilot/tests`, `app/tests`). Then it drives the console through its API on a tiny random GLM,
   saved by transformers v5 like newer checkpoints:
   - download, scan, apply, validate and deploy as Jobs;
   - each Job's network labels;
@@ -299,5 +345,17 @@ kind cluster with Calico.
     - a copilot run retrieves the uploads;
     - after delete, the store and the folder are empty and the next run finds nothing;
     - deletes outside the writeups folder are refused.
+- **`k3s`:** Rancher Desktop's Kubernetes, k3s in k3d, with Traefik, local-path storage and k3s's own network policy
+  controller. It runs `tests/rancher-dev.ps1 -Setup -Pipeline -Check` unattended under PowerShell 7, on the `ci-k3s`
+  overlay: `dev`, with only the embedding model pulled.
+  - PowerShell's parser checks the script first, and that it is plain ASCII as Windows PowerShell 5.1 needs.
+  - The script then:
+    - creates the Secrets;
+    - connects n8n;
+    - runs the pipeline on a tiny GLM;
+    - checks the login and the Ingress through Traefik, including the 50 MB limit;
+    - checks the network policies under k3s, the kill switch, a knowledge upload retrieved by a copilot run, and a
+      free prompt.
 
-Not covered by CI: GPUs, vLLM with real weights, GLM-5.x itself.
+Not covered by CI: GPUs, vLLM with real weights, GLM-5.x itself, Windows PowerShell 5.1 (the `k3s` job runs
+PowerShell 7).

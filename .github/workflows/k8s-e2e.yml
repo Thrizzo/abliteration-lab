@@ -1,7 +1,9 @@
-# Kubernetes deployment (deploy/k8s) on throwaway kind clusters with Calico, so network policies are enforced.
+# Kubernetes deployment (deploy/k8s) on throwaway clusters where network policies are enforced.
 #   kind      fast: stub console; deploy, network policies, login, RBAC, Isolate and Kill (deploy/k8s/tests/e2e.sh)
 #   pipeline  the real console image built from this commit (CPU torch); every pipeline stage as a Job on a tiny GLM,
 #             then Promote / Rollback, the kill switch, and copilot runs through real n8n (deploy/k8s/tests/pipeline-e2e.sh)
+#   k3s       Rancher Desktop's Kubernetes (k3s in k3d: Traefik, local-path storage, k3s's own network policy controller),
+#             set up and checked by the Windows script deploy/k8s/tests/rancher-dev.ps1 under PowerShell 7
 name: k8s e2e
 
 on:
@@ -116,3 +118,64 @@ jobs:
           kubectl -n lab logs deploy/console -c app --tail=80 || true
           for p in $(kubectl -n lab get pods -l app=lab-job -o name); do echo "--- $p"; kubectl -n lab logs "$p" --tail=40 || true; done
           kubectl -n lab logs deploy/glm-serve --tail=60 || true
+
+  k3s:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Parse rancher-dev.ps1 (PowerShell's own parser; ASCII only, for Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $tokens = $null; $errors = $null
+          $path = Join-Path $PWD 'deploy/k8s/tests/rancher-dev.ps1'
+          [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { $errors | ForEach-Object { "line $($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+          $bad = Select-String -Path $path -Pattern '[^\x00-\x7F]'
+          if ($bad) { $bad; 'non-ASCII: Windows PowerShell 5.1 reads scripts without a BOM as ANSI'; exit 1 }
+          "parsed: $($tokens.Count) tokens, no errors, ASCII only"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install k3d
+        run: |
+          curl -fsSLo k3d https://github.com/k3d-io/k3d/releases/download/v5.8.3/k3d-linux-amd64
+          chmod +x k3d && sudo mv k3d /usr/local/bin/k3d
+          k3d version
+
+      - name: Create a k3s cluster (Traefik on :8081, local-path storage, k3s's network policy controller)
+        run: |
+          k3d cluster create lab -p "8081:80@loadbalancer" --wait --timeout 300s
+          kubectl config current-context
+          kubectl get nodes -o wide
+          for i in $(seq 1 60); do kubectl -n kube-system get deploy traefik >/dev/null 2>&1 && break; sleep 5; done
+          kubectl -n kube-system rollout status deploy/traefik --timeout=300s
+
+      - name: Build the console image (CPU torch) and import it into k3s
+        run: |
+          docker build -f deploy/Dockerfile --build-arg TORCH_FLAVOR=cpu -t ghcr.io/thrizzo/redteam-llm-lab:latest .
+          k3d image import ghcr.io/thrizzo/redteam-llm-lab:latest -c lab
+
+      - name: rancher-dev.ps1 -Setup -Pipeline -Check, unattended (TEST-ONLY passwords)
+        shell: pwsh
+        env:
+          LAB_PASSWORD: ci-only-password
+          N8N_EMAIL: ci@example.com
+          N8N_PASSWORD: Ci-only-pass1
+        run: >-
+          ./deploy/k8s/tests/rancher-dev.ps1 -Setup -Pipeline -Check -SkipBuild -NonInteractive
+          -Context k3d-lab -Overlay deploy/k8s/overlays/ci-k3s -IngressUrl http://127.0.0.1:8081
+
+      - name: Diagnostics
+        if: failure()
+        run: |
+          kubectl get pods,jobs -A -o wide
+          kubectl -n lab describe pods | tail -n 150
+          kubectl get events -A --sort-by=.lastTimestamp | tail -n 60
+          kubectl -n lab logs deploy/console -c app --tail=80 || true
+          for d in ollama n8n; do echo "--- $d"; kubectl -n lab-copilot logs deploy/$d --tail=30 || true; done
+          kubectl get networkpolicies -A

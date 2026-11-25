@@ -19,3 +19,6 @@ deploy/.env
 # Python bytecode from running the app and the tests
 __pycache__/
 *.py[cod]
+
+# logs written by deploy/k8s/tests/rancher-dev.ps1 in the folder it was run from
+rancher-dev-*.log
