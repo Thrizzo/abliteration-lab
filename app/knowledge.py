@@ -24,6 +24,7 @@ from copilot import sources as SRC
 
 EXTS = SRC.TEXT_EXT | SRC.HTML_EXT | SRC.PDF_EXT
 MAX_BYTES = 50 * 1024 * 1024
+BUSY = ("queued", "ingesting", "deleting")          # a document in one of these takes no second upload or delete
 SOURCE_INFO = {
     "htb": "retired HTB / CTF writeups",
     "blog": "public blogs and PoCs",
@@ -112,17 +113,39 @@ class Knowledge:
         return text
 
     def _rel(self, rel):
-        """A document id the list showed: a path inside the writeups folder, never outside it."""
+        """A document id the list showed: a path inside the writeups folder, never outside it, and nothing the list
+        never shows (hidden files, upload leftovers, the scrubber's redact_terms.txt)."""
         rel = str(rel or "")
         parts = rel.split("/")
         if (not rel or len(rel) > 400 or "\\" in rel or "\x00" in rel or rel.startswith("/")
-                or any(p in ("", ".", "..") for p in parts)):
+                or any(p == "" or p.startswith(".") for p in parts)            # also . and ..
+                or parts[-1] == "redact_terms.txt" or rel.endswith(".part")):
             raise self.http_error(400, "not a document of the writeups folder")
         root = os.path.realpath(self.root)
         path = os.path.realpath(os.path.join(root, *parts))
         if not path.startswith(root + os.sep):
             raise self.http_error(400, "not a document of the writeups folder")
         return rel, path
+
+    def _busy(self, rel, status):
+        return self.http_error(409, f"{rel} is being {'deleted' if status == 'deleting' else 'ingested'} right now")
+
+    def _claim(self, rel, job):
+        """Check and claim a document in one step: one upload or delete per document at a time. Returns the entry it
+        replaced, for _unclaim."""
+        with self.lock:
+            cur = (self.jobs.get(rel) or {}).get("status")
+            if cur in BUSY:
+                raise self._busy(rel, cur)
+            prev, self.jobs[rel] = self.jobs.get(rel), job
+        return prev
+
+    def _unclaim(self, rel, prev):
+        with self.lock:
+            if prev is None:
+                self.jobs.pop(rel, None)
+            else:
+                self.jobs[rel] = prev
 
     # ---------------------------------------------------------------- actions
     def preview(self, source, filename, data):
@@ -142,21 +165,36 @@ class Knowledge:
         if not self.configured():
             raise self.http_error(409, "no vector store or embedding model configured (QDRANT_URL, RAG_OLLAMA_URL)")
         rel = f"{source}/{name}"
-        with self.lock:
-            if (self.jobs.get(rel) or {}).get("status") in ("queued", "ingesting"):
-                raise self.http_error(409, f"{rel} is being ingested right now")
+        with self.lock:                               # an early answer, before a PDF is parsed; _claim below decides
+            cur = (self.jobs.get(rel) or {}).get("status")
+        if cur in BUSY:
+            raise self._busy(rel, cur)
         text = self._text(name, data)                 # refuse what can't be read before anything is stored
-        path = os.path.join(self.root, source, name)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".part"
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
         sha = hashlib.sha256(data).hexdigest()
         job = {"status": "queued", "done": 0, "total": None, "chunks": None, "redactions": None, "error": None,
                "size": len(data), "sha256": sha, "uploaded": _now()}
-        with self.lock:
-            self.jobs[rel] = job
+        prev = self._claim(rel, job)                  # from here a second upload or a delete of rel gets 409
+        path = os.path.join(self.root, source, name)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=f".{name}.", suffix=".part")  # hidden, own name
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                    if hasattr(os, "fchmod"):         # mkstemp makes 0600; the folder's other readers need 0644
+                        os.fchmod(f.fileno(), 0o644)
+                os.replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except BaseException as e:                    # never leave the document claimed by an upload that failed
+            self._unclaim(rel, prev)
+            if isinstance(e, OSError):
+                raise self.http_error(500, f"could not store {rel}: {e}") from None
+            raise
         self._log("upload", f"knowledge upload {rel} ({len(data):,} bytes)", who,
                   data={"doc": rel, "source": source, "size": len(data), "sha256": sha})
         answer = {"doc": rel, **job}                  # a snapshot: the ingest thread updates job from here on
@@ -222,18 +260,20 @@ class Knowledge:
     def delete(self, rel, who=None):
         """The document's vectors first, then its file: if the store can't be reached, nothing is removed."""
         rel, path = self._rel(rel)
-        with self.lock:
-            if (self.jobs.get(rel) or {}).get("status") in ("queued", "ingesting"):
-                raise self.http_error(409, f"{rel} is being ingested right now")
-        if self.qdrant_url:
-            try:
-                self._qdrant().delete_doc(rel)
-            except ING.HTTPError as e:
-                if "HTTP 404" not in str(e):          # no collection yet: nothing to delete there
-                    raise self.http_error(502, f"the vector store refused: {str(e)[:200]}")
-        existed = os.path.isfile(path)
-        if existed:
-            os.remove(path)
+        prev = self._claim(rel, {"status": "deleting"})   # an upload of rel now waits for this delete (409)
+        try:
+            if self.qdrant_url:
+                try:
+                    self._qdrant().delete_doc(rel)
+                except ING.HTTPError as e:
+                    if "HTTP 404" not in str(e):      # no collection yet: nothing to delete there
+                        raise self.http_error(502, f"the vector store refused: {str(e)[:200]}")
+            existed = os.path.isfile(path)
+            if existed:
+                os.remove(path)
+        except BaseException:
+            self._unclaim(rel, prev)                  # the document stays as the list showed it
+            raise
         with self.lock:
             self.jobs.pop(rel, None)
         self._log("delete", f"knowledge delete {rel}" + ("" if existed else " (vectors only, no file)"), who, data={"doc": rel})

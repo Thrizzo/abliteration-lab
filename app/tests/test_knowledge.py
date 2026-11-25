@@ -8,6 +8,7 @@ the embeddings come from the model stand-in. PDF cases need pypdf (in the app im
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -214,6 +215,41 @@ class TestKnowledge(Base):
         self.assertEqual(self.wait("htb/Lame.md")["status"], "error")
         self.assertEqual(seen, ["ingesting", "ingesting"])
 
+    def test_one_upload_or_delete_per_document_at_a_time(self):
+        path = os.path.join(self.project, "writeups", "htb", "Lame.md")
+        self.kn.busy.acquire()                                                # hold the ingest: the upload stays queued
+        try:
+            self.kn.upload("htb", "Lame.md", WRITEUP.encode(), {"user": "admin"})
+            self.assertIn("being ingested", self.expect(409, self.kn.upload, "htb", "Lame.md", b"# other\n"))
+            self.assertIn("being ingested", self.expect(409, self.kn.delete, "htb/Lame.md"))
+        finally:
+            self.kn.busy.release()
+        self.assertEqual(self.wait("htb/Lame.md")["status"], "indexed")
+        with self.kn.lock:
+            self.kn.jobs["htb/Lame.md"] = {"status": "deleting"}               # as while a delete waits for the store
+        self.assertIn("being deleted", self.expect(409, self.kn.upload, "htb", "Lame.md", b"# other\n"))
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), WRITEUP)                               # the refused uploads changed nothing
+
+    def test_upload_leaves_one_readable_file(self):
+        self.kn.upload("htb", "Lame.md", WRITEUP.encode(), {"user": "admin"})
+        self.wait("htb/Lame.md")
+        d = os.path.join(self.project, "writeups", "htb")
+        self.assertEqual(os.listdir(d), ["Lame.md"])                          # its temporary file is gone
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(d, "Lame.md")).st_mode), 0o644)
+
+    def test_names_the_list_never_shows_cannot_be_deleted(self):
+        root = os.path.join(self.project, "writeups")
+        os.makedirs(os.path.join(root, "htb"))
+        for rel in ("redact_terms.txt", "htb/redact_terms.txt", "htb/.hidden.md", "htb/.Lame.md.x1.part", ".git/config"):
+            p = os.path.join(root, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w") as f:
+                f.write("client-corp\n")
+            self.expect(400, self.kn.delete, rel)
+            self.assertTrue(os.path.isfile(p), rel)
+        self.assertEqual(self.kn.list()["docs"], [])                          # and none of them is listed
+
     def test_engagement_preview_shows_the_redactions_and_stores_nothing(self):
         p = self.kn.preview("engagement", "notes.md", NOTES.encode())
         self.assertTrue(p["redactions"], p)
@@ -264,6 +300,7 @@ class TestKnowledge(Base):
         self.assertEqual(self.audit.recent(1)[0]["level"], "error")
         self.expect(502, self.kn.delete, "htb/Lame.md")                                        # nothing removed then
         self.assertTrue(os.path.isfile(os.path.join(self.project, "writeups", "htb", "Lame.md")))
+        self.assertEqual(self.wait("htb/Lame.md")["status"], "error")                         # as before the delete
 
     def test_not_configured(self):
         kn = KN.Knowledge(self.project, None, "writeups", None, "m", http_error=HTTPError)
