@@ -52,9 +52,12 @@ class TestPdfText(unittest.TestCase):
             sources.read_pdf(p)
 
     def test_memory_limit_fails_the_child_not_the_caller(self):
+        # The cap is set once the interpreter runs, so it counts what is already mapped. 1 MiB is below any CPython's
+        # own footprint and the child's next allocation fails everywhere; a 40 MiB cap is environment-dependent (a slim
+        # image's Python starts small enough to import pypdf and read this PDF within it).
         p = self.write("box.pdf", make_pdf([["hello"]]))
         with self.assertRaises(ValueError):                              # a clean error here, whatever the child hit
-            sources.read_pdf(p, {"memory": 40 * 1024 * 1024})            # too little to even load pypdf
+            sources.read_pdf(p, {"memory": 1024 * 1024})
         self.assertIn("hello", sources.read_pdf(p))                      # and the caller is unharmed
 
     def test_timeout(self):
