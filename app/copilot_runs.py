@@ -236,9 +236,9 @@ class CopilotRuns:
             else:
                 failures += 1
                 if failures >= self.max_failures:
-                    with self.lock:
-                        run["status"] = "lost"
                     self._emit(run, "error", f"n8n's execution API kept failing ({st}): {cut(ex, 200)}", "error")
+                    with self.lock:                  # the event first: whoever sees the run end also finds why
+                        run["status"] = "lost"
                     return
             waiting = run["status"] == "waiting"
             if waiting and time.time() - run["_waiting_since"] > self.max_waiting_s:
@@ -281,12 +281,13 @@ class CopilotRuns:
         if status in FINAL:
             if status == "error" and rd.get("error") and not any(e["stage"] == "error" and e["level"] == "error" for e in run["events"]):
                 self._emit(run, "error", cut((rd.get("error") or {}).get("message") or "the run failed", 300), "error")
-            with self.lock:
-                run["status"] = {"success": "done"}.get(status, status)
+            final = {"success": "done"}.get(status, status)
             res = run["result"] or {}
-            self._audit(run, "end", f"copilot run {run['id']} {run['status']}" + (f": {res.get('title')}" if res.get("title") else ""),
+            self._audit(run, "end", f"copilot run {run['id']} {final}" + (f": {res.get('title')}" if res.get("title") else ""),
                         run["who"], level="info" if status in ("success", "canceled") else "error",
                         data={"status": status, "title": res.get("title"), "command": res.get("command"), "allowed": res.get("allowed")})
+            with self.lock:                          # after the record: whoever sees the run ended finds its "end" logged
+                run["status"] = final
             return True
         with self.lock:
             run["status"] = "running"
@@ -298,13 +299,16 @@ class CopilotRuns:
             raise self.http_error(404, f"no copilot run {run_id} in this console")
         if run["status"] not in ("running", "waiting"):
             raise self.http_error(409, f"run {run_id} has already ended ({run['status']})")
+        # Recorded before n8n answers: the follower can see the run canceled, and log its "end", before this call returns.
+        self._audit(run, "stop", f"copilot run {run['id']}: stop requested", who or {})
         try:
             st, body = self._api("POST", f"/executions/{run['id']}/stop", {})
         except OSError as e:
+            self._audit(run, "stop", f"copilot run {run['id']}: not stopped, n8n is not reachable", who or {}, level="error")
             raise self.http_error(502, f"n8n is not reachable: {e}")
         if st not in (200, 201):
+            self._audit(run, "stop", f"copilot run {run['id']}: not stopped, n8n refused ({st})", who or {}, level="error")
             raise self.http_error(502, f"n8n refused to stop it ({st}): {cut(body, 200)}")
-        self._audit(run, "stop", f"copilot run {run['id']} stopped", who or {})
         return self.summary(run)
 
     # ---------------------------------------------------------------- views

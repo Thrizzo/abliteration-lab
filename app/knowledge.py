@@ -172,17 +172,18 @@ class Knowledge:
         with self.busy:
             self._set(rel, status="ingesting")
             doc = SRC.Document(path, rel, source, SRC._title(text, rel), text)
+            # Either way the record comes before the status: whoever sees the document indexed (or failed) finds it logged.
             try:
                 chunks, report = ING.ingest_document(
                     doc, self._terms(), ING.Ollama(self.ollama_url, self.embed_model), self._qdrant(), self.chunk_chars,
                     progress=lambda done, total: self._set(rel, done=done, total=total))
             except Exception as e:                    # noqa: BLE001  shown in the list and the feed
-                self._set(rel, status="error", error=str(e)[:300])
                 self._log("ingest", f"{rel}: ingest failed: {str(e)[:200]}", who, level="error", data={"doc": rel})
+                self._set(rel, status="error", error=str(e)[:300])
                 return
-            self._set(rel, status="done", chunks=len(chunks), redactions=report, total=len(chunks), done=len(chunks))
             self._log("ingest", f"{rel}: {len(chunks)} chunks in the vector store" + (f", redacted {report}" if report else ""),
                       who, data={"doc": rel, "chunks": len(chunks), "redactions": report})
+            self._set(rel, status="done", chunks=len(chunks), redactions=report, total=len(chunks), done=len(chunks))
 
     def list(self):
         files = {}

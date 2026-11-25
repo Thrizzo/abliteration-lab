@@ -255,6 +255,24 @@ class TestCopilotRuns(unittest.TestCase):
             self.runs.stop(out["id"], {})
         self.assertEqual(e.exception.status, 409)
 
+    def test_records_come_before_the_status_that_shows_them(self):
+        # Whoever sees a run ended must find its "end" in the audit and the feed. A stop is recorded before n8n answers,
+        # since the follower can see the run canceled, and record its end, before that answer is back.
+        seen, write = {}, self.audit.write
+
+        def spy(source, stage, *a, **kw):
+            if stage in ("stop", "end"):
+                seen[stage] = self.runs.get(kw["run_id"])["status"]
+            return write(source, stage, *a, **kw)
+
+        self.audit.write = spy
+        self.n8n.plan = [fixture("waiting")]
+        rid = self.runs.start("brute force ssh", "10.10.10.5", {"user": "admin"})["id"]
+        self.wait(rid, ("waiting",))
+        self.runs.stop(rid, {"user": "admin"})
+        self.wait(rid, ("canceled",))
+        self.assertEqual(seen, {"stop": "waiting", "end": "waiting"})
+
     def test_not_connected_wrong_secret_and_bad_input(self):
         with self.assertRaises(HTTPError) as e:
             self.runs.start("t", "two words", {})

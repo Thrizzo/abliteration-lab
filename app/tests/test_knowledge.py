@@ -198,6 +198,22 @@ class TestKnowledge(Base):
         self.assertEqual(audit, [("upload", "admin"), ("ingest", "admin"), ("upload", "admin"), ("ingest", "admin"), ("delete", "admin")])
         self.assertTrue(all(e["source"] == "knowledge" for e in self.feed.since(0)["events"]))
 
+    def test_ingest_is_recorded_before_the_list_shows_it(self):
+        seen, write = [], self.audit.write                    # whoever sees indexed (or error) must find the record
+
+        def spy(source, stage, *a, **kw):
+            if stage == "ingest":
+                seen.append(next(d["status"] for d in self.kn.list()["docs"] if d["doc"] == kw["data"]["doc"]))
+            return write(source, stage, *a, **kw)
+
+        self.audit.write = spy
+        self.kn.upload("htb", "Lame.md", WRITEUP.encode(), {"user": "admin"})
+        self.assertEqual(self.wait("htb/Lame.md")["status"], "indexed")
+        self.q.down = True
+        self.kn.upload("htb", "Lame.md", WRITEUP.encode(), {"user": "admin"})
+        self.assertEqual(self.wait("htb/Lame.md")["status"], "error")
+        self.assertEqual(seen, ["ingesting", "ingesting"])
+
     def test_engagement_preview_shows_the_redactions_and_stores_nothing(self):
         p = self.kn.preview("engagement", "notes.md", NOTES.encode())
         self.assertTrue(p["redactions"], p)
