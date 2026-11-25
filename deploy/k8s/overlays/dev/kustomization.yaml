@@ -2,7 +2,8 @@
 #   kubectl apply -k deploy/k8s/overlays/dev
 # Same namespaces, policies, RBAC and Kill / Isolate path as the GPU overlays; only the model server differs: glm-serve
 # runs Ollama (CPU) instead of vLLM, and Promote publishes a run's GGUF there as "glm-abl". Clients still use
-# glm-serve.lab.svc:8000 (in n8n: an Ollama credential with that Base URL, model glm-abl).
+# glm-serve.lab.svc:8000; Ollama's OpenAI-compatible API under /v1 is what n8n's operator calls (connect_console.py).
+# On Rancher Desktop (Windows), deploy/k8s/tests/rancher-dev.ps1 sets this overlay up and checks it.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
@@ -26,6 +27,12 @@ patches:
                 imagePullPolicy: IfNotPresent
                 env:
                   - { name: OLLAMA_HOST, value: "http://glm-serve.lab.svc:8000" }
+  # Browsers resolve *.localhost to this machine, and Rancher Desktop serves Traefik on localhost:80: http://lab.localhost
+  - target: { kind: Ingress, name: console }
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: lab.localhost
 configMapGenerator:
   - name: lab-jobs
     namespace: lab

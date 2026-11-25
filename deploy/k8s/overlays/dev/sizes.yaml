@@ -1,4 +1,6 @@
 # Small volumes and requests for a laptop-sized cluster (Rancher Desktop gives WSL 2 half the host RAM by default).
+# Requests decide where a pod fits, limits what it may use: with these, everything schedules on a 4-CPU, 8 GB node, Jobs
+# included. Loading the judge (qwen3:8b, ~5 GB) while a CPU stage scans GLM-Edge-1.5B (~7 GB) needs about 16 GB.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: { name: workspace, namespace: lab }
@@ -32,7 +34,7 @@ spec:
       containers:
         - name: ollama
           resources:
-            requests: { cpu: "1", memory: 6Gi }
+            requests: { cpu: 500m, memory: 2Gi }
             limits: { memory: 12Gi }
 ---
 apiVersion: apps/v1

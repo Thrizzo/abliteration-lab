@@ -51,8 +51,9 @@ configMapGenerator:
       - LAB_ALLOWLIST=10.10.10.0/24
       - LAB_AUTORUN_READONLY=true
       - LAB_AUTORUN_ACTIVE_RECON=false
-  # models the judge/embeddings Ollama pulls when it starts (space-separated; empty = pull nothing)
+  # models the judge/embeddings Ollama pulls when it starts, in this order (space-separated; empty = pull nothing).
+  # The embedding model (~270 MB) first: knowledge uploads work while the judge (~5 GB) is still downloading.
   - name: ollama-models
     namespace: lab-copilot
     literals:
-      - OLLAMA_PULL=qwen3:8b nomic-embed-text
+      - OLLAMA_PULL=nomic-embed-text qwen3:8b

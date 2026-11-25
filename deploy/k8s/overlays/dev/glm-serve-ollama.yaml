@@ -18,7 +18,7 @@
     volumeMounts:
       - { name: workspace, mountPath: /workspace }
     resources:
-      requests: { cpu: "1", memory: 2Gi }
+      requests: { cpu: 500m, memory: 1Gi }
       limits: { memory: 8Gi }
     securityContext:
       allowPrivilegeEscalation: false
