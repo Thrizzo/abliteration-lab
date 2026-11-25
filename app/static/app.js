@@ -666,7 +666,8 @@ $('#knPreview').onclick=async()=>{
 };
 $('#knUpload').onclick=async()=>{
   $('#knUpload').disabled=true;
-  try{ const u=await knSend('upload'); toast(`${u.doc} uploaded: ingesting`); $('#knFile').value=''; $('#knPreviewOut').innerHTML=''; KN.previewed=null; }catch(e){ toast(e.message, true); }
+  const sent=$('#knFile').files[0];   // a file picked while this one uploads stays picked
+  try{ const u=await knSend('upload'); toast(`${u.doc} uploaded: ingesting`); if($('#knFile').files[0]===sent){ $('#knFile').value=''; $('#knPreviewOut').innerHTML=''; KN.previewed=null; } }catch(e){ toast(e.message, true); }
   knLoad();
 };
 $('#knFile').onchange=knGate; $('#knSource').onchange=knGate;

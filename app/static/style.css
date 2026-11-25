@@ -237,4 +237,7 @@ body.wiz{display:block;overflow:auto}
 .cp-runrow:hover td{color:var(--accent)}
 #cpRuns{overflow-x:auto}
 /* the header holds more buttons in the Kubernetes console: below 1400 px the steps drop their subtitles */
-@media (max-width:1400px){ header .stages li small{display:none} }
+/* the header never scrolls sideways: step subtitles go first, then the indicators and buttons wrap to a second row */
+@media (max-width:1600px){ header .stages li small{display:none} }
+.wizhead{flex-wrap:wrap;row-gap:8px}
+.wizhead .sysmini{flex-wrap:wrap;justify-content:flex-end;row-gap:6px;margin-left:auto}
