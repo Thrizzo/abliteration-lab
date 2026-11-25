@@ -232,6 +232,36 @@ python deploy/n8n/connect_console.py --email <your n8n login> --apply-secret
   Only n8n's owner and the console's key can read executions, and both have the secret anyway. The console never shows
   that node's data.
 
+## Knowledge uploads
+
+The **knowledge** button in the console's header opens the writeups the copilot retrieves from. It appears once
+`QDRANT_URL` is set (in the base, `qdrant.lab-copilot`).
+
+- **Add a document:**
+  - **Types:** md, txt, rst, html or pdf, up to 50 MB.
+  - **Source:**
+    - `htb` and `blog`: public writeups;
+    - `engagement`: your client notes, scrubbed hard;
+    - `pwk`: course material, used for retrieval only, never for training.
+  - **Preview** shows what ingesting would do: the chunks, and for engagement notes the scrubber's redactions and the
+    scrubbed text. Engagement notes can only be uploaded after a preview.
+  - **Upload** stores the file under `/workspace/writeups/<source>/` and ingests it in the background. It is scrubbed,
+    chunked, then embedded by the copilot's Ollama (`RAG_OLLAMA_URL`, `nomic-embed-text`: the model n8n searches with)
+    into the `writeups` collection.
+  - **Uploading a file again** replaces its chunks.
+- **Documents:** each with its chunk count and status. **Delete** removes its vectors first, then the file; if the
+  vector store can't be reached, nothing is removed.
+- **PDF:** the text layer is read in a separate process that limits its own memory and CPU time, since PDFs from the
+  internet are untrusted and the console also hosts the kill switch. A PDF without a text layer (scanned) is refused;
+  OCR it first.
+- **Trust:** uploaded text stays untrusted. The workflow hands it only to the operator, with addresses masked, never to
+  the judge, and the policy gate stays the boundary.
+- **Logged:** uploads, ingest results and deletes go to the audit log and the live feed.
+- **Ingress:** the console's login (Caddy) accepts bodies up to 50 MB. With ingress-nginx, raise its 1 MB default:
+  `nginx.ingress.kubernetes.io/proxy-body-size: 50m`.
+- **Without the GUI:** the same ingest for a whole folder is `python -m copilot.ingest --src /workspace/writeups`
+  (copilot/README.md).
+
 ## Tested in CI
 
 `.github/workflows/k8s-e2e.yml` runs on every push that touches `deploy/k8s`, `app` or `abliterate`, each time on a
@@ -261,6 +291,12 @@ kind cluster with Calico.
     - Stop cancels a waiting run;
     - the webhook refuses calls without the secret, and the console's n8n key can't list workflows;
     - a free prompt streams from `glm-serve`;
-    - the feed and the audit log record all of it.
+    - the feed and the audit log record all of it;
+  - knowledge uploads into **real Qdrant**:
+    - markdown and PDF are indexed, and a scanned PDF is refused;
+    - the engagement preview shows its redactions;
+    - a copilot run retrieves the uploads;
+    - after delete, the store and the folder are empty and the next run finds nothing;
+    - deletes outside the writeups folder are refused.
 
 Not covered by CI: GPUs, vLLM with real weights, GLM-5.x itself.

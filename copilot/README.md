@@ -23,7 +23,9 @@ writeups/
   redact_terms.txt   one client name / domain / project per line, removed from every source
 ```
 
-Markdown, text and HTML are read. Convert PDFs to markdown first.
+Markdown, text, HTML and PDF are read. A PDF's text layer is extracted in a separate process that limits its own
+memory and CPU time (`copilot/pdftext.py`), since PDFs from the internet are untrusted input; scanned PDFs without a
+text layer are skipped with the reason (OCR them first).
 
 **PWK material.** Offsec's terms prohibit redistributing it. A private vector store on your own machine is personal use;
 model weights trained on it can reproduce passages, so a model you share would redistribute them. Hence RAG-only by

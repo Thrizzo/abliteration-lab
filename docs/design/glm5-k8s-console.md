@@ -1,7 +1,7 @@
 # Design: GLM-5.3 on Kubernetes, from abliteration to the copilot
 
-Status: phases 0 to 4 are built (`deploy/k8s/`, `app/k8sjobs.py`, `app/copilot_runs.py`, tested on kind with Calico in CI);
-knowledge uploads (5) and the GLM-5.3 run (6) are the plan.
+Status: phases 0 to 5 are built (`deploy/k8s/`, `app/k8sjobs.py`, `app/copilot_runs.py`, `app/knowledge.py`, tested on kind
+with Calico in CI); the GLM-5.3 run (6) is the plan.
 Section 10 is the build order.
 
 ## 1. What this adds
@@ -237,6 +237,16 @@ sequenceDiagram
 - **Ingress:** the request-size limit rises to 50 MB, for the upload path only.
 - **Trust:** uploaded text stays untrusted. It reaches only the operator, with addresses masked, never the judge, and the
   policy gate stays the boundary.
+- **Built (phase 5), with what building it required:**
+  - **Uploads are the raw request body** (`?source=&name=`): no multipart dependency, and the 50 MB cap applies while the
+    body is still arriving.
+  - **PDFs are parsed in their own process** (`copilot/pdftext.py`, `python -I`), which caps its own memory (2 GB) and CPU
+    time (120 s), with a 180 s timeout on top. A crafted PDF then fails that process, not the console that hosts the
+    kill switch.
+  - **Embeddings come from the copilot's Ollama** (`RAG_OLLAMA_URL`). In dev, the console's `OLLAMA_HOST` points at
+    `glm-serve` for the Compare stage, and the vectors must come from the model n8n searches with.
+  - **Delete removes the vectors first**, so an unreachable store never leaves vectors without their file.
+  - **A keyword index on `metadata.doc`**: deletes and the list filter on it.
 
 ## 7. Live feed
 
@@ -351,7 +361,7 @@ kubectl -n lab delete pod -l app=glm-serve --grace-period=0 --force
 | 2 ✅ | Abliteration stages as Jobs with live logs, run registry, Promote and Rollback | kind: the real console image, every stage on a tiny GLM |
 | 3 ✅ | n8n webhook trigger, OpenAI-compatible operator node, console polling into the live feed, free prompts to vLLM | kind: real n8n, a model stand-in for the operator, judge and embeddings, `glm-serve` for free prompts |
 | 4 ✅ | Kill, Isolate, Release and Start in the console, with audit | kind with Calico: the real console through its login; time until the container is gone from the node, isolation cuts traffic, audit |
-| 5 | Knowledge uploads incl. PDF, list and delete | unit tests, live ingest |
+| 5 ✅ | Knowledge uploads incl. PDF, list and delete | unit tests; kind: real Qdrant, retrieval in a copilot run through real n8n |
 | 6 | GLM-5.3: download, measure, edit, evaluate, promote | your 8×H200 node, on-prem or cloud |
 
 ## 11. Open questions
