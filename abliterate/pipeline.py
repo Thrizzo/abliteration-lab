@@ -315,10 +315,12 @@ def main(argv=None):
         info = step_inspect(run, model_dir)
         out_dir = os.path.abspath(args.out_dir) if args.out_dir else (run.meta.get("out_dir") or os.path.join(project, "out", f"{slug}-abliterated"))
         run.update_meta(model_dir=model_dir, out_dir=out_dir)
+        data_dir = os.path.join(project, "data")
         if args.stage == "download":
-            D.ensure_local(os.path.join(project, "data"), run.log)     # the prompt sets too: later stages may have no internet
-            run.update_meta(status="done"); return
-        prompts = D.load_prompts(os.path.join(project, "data"), args.n_train, args.n_test)
+            D.ensure_local(data_dir, run.log)     # the prompt sets too: later stages may have no internet
+            run.update_meta(status="done", data=D.provenance(data_dir)); return
+        prompts = D.load_prompts(data_dir, args.n_train, args.n_test)
+        run.update_meta(data=D.provenance(data_dir))           # the prompts this run measured on: source, revision, hash
         run.event("data", "done", n_train=len(prompts[0]), n_test=len(prompts[1]))
 
         import torch

@@ -16,6 +16,8 @@ services:
       OLLAMA_HOST: http://ollama:11434
       ABL_HOST: 0.0.0.0
       HF_TOKEN: ${HF_TOKEN:-}
+      ABL_HARMFUL_DATASET: ${ABL_HARMFUL_DATASET:-}     # empty: the defaults (abliterate/data.py)
+      ABL_HARMLESS_DATASET: ${ABL_HARMLESS_DATASET:-}
     volumes:
       - ${WORKSPACE:-../workspace}:/workspace     # relative to this file's folder; set an absolute path in .env to be safe
     depends_on: [ollama]

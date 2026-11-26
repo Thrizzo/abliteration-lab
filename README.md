@@ -282,12 +282,16 @@ scale; llama.cpp / Ollama support for GLM-5's attention may lag.
 - Models are loaded from safetensors without remote code unless `--trust-remote-code` is passed (legacy ChatGLM only). The
   GGUF converter refuses model folders that contain code files.
 - Datasets are local JSONL copies exported once from a pinned Hugging Face revision, with the revision and SHA-256 recorded in
-  `data/manifest.json`; every edit and removal is logged.
+  `data/manifest.json`; every edit and removal is logged. `ABL_HARMFUL_DATASET` / `ABL_HARMLESS_DATASET` select other
+  sources (`org/name[@revision][#column]`), e.g. for licence reasons. Switching exports again, keeps the old copy under
+  `data/replaced/`, and every run records what it measured on (`deploy/k8s/README.md`, "Running abliteration" and
+  "Licences for internal company use").
 - The SBOM panel lists all packages with licences and PyPI/OSV advisories; regenerate it after updating the environment.
 
 ## 8. Credits
 
 Method: Arditi, Obeso, Syed, Paleka, Panickssery, Gurnee, Nanda, *Refusal in Language Models Is Mediated by a Single Direction*
-(2024). Prompt sets: `mlabonne/harmful_behaviors` (AdvBench, Zou et al. 2023), `mlabonne/harmless_alpaca` (Stanford Alpaca).
+(2024). Prompt sets (defaults, selectable): `mlabonne/harmful_behaviors` (AdvBench, Zou et al. 2023), `mlabonne/harmless_alpaca`
+(Stanford Alpaca; for company use see "Licences for internal company use" in `deploy/k8s/README.md`).
 Models: Zhipu AI / THUDM GLM family (check each model's licence before redistributing anything derived from it). Tooling:
 Hugging Face transformers, llama.cpp, Ollama, Caddy.

@@ -91,6 +91,9 @@ check "download fetched the prompt datasets" console test -f /workspace/data/har
 read -r RUN1 code < <(run_stage "{\"engine\": \"abliterate\", \"stage\": \"scan\", \"model\": \"/workspace/src/tiny-glm\", $SMALL}")
 check "scan Job exit 0 (run $RUN1)" test "$code" = 0
 check "scan paused at the layer choice" test "$(API "/runs/$RUN1" | jq -r .meta.status)" = awaiting_choice
+check "the run records its prompt sets (source, pinned commit, unedited)" test "$(API "/runs/$RUN1" | jq -r '.meta.data as $d
+  | ($d["harmless_train.jsonl"].repo == "mlabonne/harmless_alpaca") and ($d["harmful_train.jsonl"].revision | test("^[0-9a-f]{40}$"))
+  and ($d["harmful_train.jsonl"].edited == false) and ($d["harmful_test.jsonl"].column == "text")')" = true
 check "GUI log shows the Job's output" bash -c "curl -sS -u ci:ci-only-password 'http://127.0.0.1:18080/api/pipeline/log?start=0' | jq -e '[.lines[] | select(test(\"paused after the scan\"))] | length > 0' >/dev/null"
 read -r _ code < <(run_stage "{\"engine\": \"abliterate\", \"stage\": \"apply\", \"run_id\": \"$RUN1\", \"layer\": 1}")
 check "apply Job exit 0" test "$code" = 0

@@ -163,6 +163,20 @@ The console works as it does locally (Model → Abliterate → Compare), but eve
 
   Only download Jobs may reach the internet: they fetch the model and the prompt datasets. Every other stage runs
   offline.
+- **Prompt datasets, selectable per environment:** by default the harmful prompts come from `mlabonne/harmful_behaviors`
+  (AdvBench) and the harmless ones from `mlabonne/harmless_alpaca`. Two variables in `jobs.json` choose other Hugging Face
+  datasets. Each takes `org/name`, optionally with `@revision` and `#column`:
+
+  ```json
+  "env": { "ABL_HARMLESS_DATASET": "databricks/databricks-dolly-15k#instruction" }
+  ```
+
+  `ABL_HARMFUL_DATASET` works the same way. The next download Job exports the changed source to `data/` and pins the
+  commit; a branch or tag is resolved to its commit. The previous copy, and the rows the dataset workbench removed from it,
+  move to `data/replaced/`. Every run records the source, commit, column, row count, SHA-256 and whether the copy was
+  edited (`run.json`, `data`). If the harmful dataset has no `test` split, the held-out prompts come from the end of its
+  `train` split. The other stages are offline: one that finds a changed source tells you to run download first, and
+  keeps the old copy. In Docker Compose, the same two variables go into `deploy/.env`.
 - **Every run keeps its own edited model** in `runs/<run>/model`, so earlier runs stay available for Rollback.
 - **Stop** deletes the Job. A console restart doesn't stop a Job; the new console re-attaches to it.
 - **One GPU node:** in vLLM mode GPU stages (scan, validate, ...) are refused while `glm-serve` runs. Stop it first, or
@@ -308,6 +322,26 @@ The **knowledge** button in the console's header opens the writeups the copilot 
   overlays use (Rancher Desktop's default), sets no body limit unless a buffering middleware adds one.
 - **Without the GUI:** the same ingest for a whole folder is `python -m copilot.ingest --src /workspace/writeups`
   (copilot/README.md).
+
+## Licences for internal company use
+
+For running the lab inside a company, on its own hardware, for its own red team. This is a checklist, not legal
+advice. Have legal confirm the points marked **check**.
+
+| Part | Licence | What it means internally |
+|---|---|---|
+| Rancher Desktop, k3s, Traefik, Qdrant, Ollama, Caddy, llama.cpp, vLLM, PyTorch, transformers, FastAPI | Apache-2.0 / MIT / BSD | Free. |
+| Docker Desktop | Paid subscription for companies with 250+ employees or $10M+ revenue | Not needed: the dev path uses Rancher Desktop, and Docker Engine on Linux is free. |
+| n8n Community Edition, self-hosted | Sustainable Use License | Free for internal business use. Offering it to customers, or running it as a service for others, needs a commercial licence. |
+| GLM-5.3 (target) | Modified MIT. Model-as-a-Service providers with more than $10B revenue need a security review by Z.AI before commercial use. | Internal red-team use is not MaaS. **Never offer the model, or the abliterated one, as an API to others** without that review. |
+| GLM-Edge 1.5B / 4B (dev tests) | GLM-4 licence: commercial use after a free registration with Zhipu, plus a "Built with GLM-Edge" notice | **check.** Register, or test with `THUDM/GLM-4-9B-0414` (MIT) instead. |
+| qwen3:8b (judge), nomic-embed-text (embeddings) | Apache-2.0 | Free. |
+| `mlabonne/harmful_behaviors` (AdvBench) | MIT | Free. |
+| `mlabonne/harmless_alpaca` (default harmless prompts) | Unclear: derived from Stanford Alpaca, whose data licence is disputed (CC BY-NC vs CC BY), and which contains OpenAI outputs | **check**, or select another source: `ABL_HARMLESS_DATASET=databricks/databricks-dolly-15k#instruction` (CC BY-SA 3.0, commercial use allowed). |
+| PWK / OSCP course material | Licensed to the student personally | Upload with source `pwk` only into a personal instance, never into a shared company one. |
+
+The real cost is GPU time for GLM-5.3, not licences. Each run also keeps its own edited model of 0.75 to 1.5 TB, so
+delete old runs you no longer need for Rollback.
 
 ## Tested in CI
 
