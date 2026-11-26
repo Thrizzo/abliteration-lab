@@ -243,7 +243,10 @@ if (${ABLITERATED}.test(judgeModel) || judgeModel === operatorModel) {
   throw new Error('judge model "' + judgeModel + '" refused: the judge must be a regular model, never the abliterated operator. Choose another judge in the console.');
 }
 const rules = engagementText(j.engagement);
-const judgePrompt = 'TASK: ' + j.task + '\\nTARGET: ' + pol.target + (rules ? '\\n' + ENGAGEMENT_HEADER + '\\n<<<\\n' + rules + '\\n>>>' : '')
+// the scope always (LAB_ALLOWLIST, already enforced by the gates): the judge weighs the command against it and the rules
+const scope = (Array.isArray(j.allowlist) ? j.allowlist : []).map((x) => String(x ?? '').trim()).filter(Boolean).join(', ');
+const judgePrompt = 'TASK: ' + j.task + '\\nTARGET: ' + pol.target + (scope ? '\\nSCOPE (LAB_ALLOWLIST): ' + scope : '')
+  + (rules ? '\\n' + ENGAGEMENT_HEADER + '\\n<<<\\n' + rules + '\\n>>>' : '')
   + '\\nPROPOSED COMMAND (already passed the scope + denylist gate):\\n' + pol.command + '\\nread-only: ' + (pol.readOnly ? 'true' : 'false') + '  tier: ' + (pol.tier || 'none');
 return [{ json: { ...j, judgeModel, judgePrompt } }];`);
 conn('Policy passed?', 'Build judge prompt', 'main', 0);

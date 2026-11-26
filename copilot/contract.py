@@ -3,7 +3,8 @@ operator_contract.json), so QLoRA training pairs and the eval talk to the operat
 
     operator_messages(task, target, references="", engagement=None)  ->  [system, user] chat messages, identical to the
                                                      n8n "Build operator prompt" node
-    judge_user(task, target, command, read_only, tier, engagement=None)  ->  the n8n "Build judge prompt" node's message
+    judge_user(task, target, command, read_only, tier, engagement=None, allowlist=None)  ->  the n8n "Build judge prompt"
+                                                     node's message
     engagement_text(engagement)                      ->  the console's engagement (scope, rules) as both prompts show it
     neutral(text)                                    ->  the address neutralizer of the n8n "Build reference context" node
     OUTPUT_KEYS                                      ->  the JSON object the operator must answer with
@@ -78,10 +79,13 @@ def operator_messages(task, target, references="", engagement=None):
             {"role": "user", "content": operator_user(task, target, references, engagement)}]
 
 
-def judge_user(task, target, command, read_only, tier, engagement=None):
-    """What the judge reads (its system prompt is JUDGE_SYSTEM): the vetted command, never the operator's free text."""
+def judge_user(task, target, command, read_only, tier, engagement=None, allowlist=None):
+    """What the judge reads (its system prompt is JUDGE_SYSTEM): the scope (LAB_ALLOWLIST), the rules of engagement and
+    the vetted command, never the operator's free text."""
     rules = engagement_text(engagement)
-    return (f"TASK: {task}\nTARGET: {target}" + (f"\n{ENGAGEMENT_HEADER}\n<<<\n{rules}\n>>>" if rules else "")
+    scope = ", ".join(s for s in (str(x if x is not None else "").strip() for x in (allowlist or [])) if s)
+    return (f"TASK: {task}\nTARGET: {target}" + (f"\nSCOPE (LAB_ALLOWLIST): {scope}" if scope else "")
+            + (f"\n{ENGAGEMENT_HEADER}\n<<<\n{rules}\n>>>" if rules else "")
             + f"\nPROPOSED COMMAND (already passed the scope + denylist gate):\n{command}\nread-only: "
             + ("true" if read_only else "false") + f"  tier: {tier or 'none'}")
 

@@ -283,9 +283,12 @@ for (const n of wf.nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   ok('judge: COPILOT_JUDGE_MODEL, else qwen3:8b', judgeFor('').judgeModel === 'qwen3:8b'
     && run('Build judge prompt', { json: { ...pgOk, judgeModel: '' }, env: { ...env, COPILOT_JUDGE_MODEL: 'llama3.1:8b' } })[0].json.judgeModel === 'llama3.1:8b');
   const jprompt = judgeFor('qwen3:8b').judgePrompt;
-  ok('judge prompt: task, target, rules, the vetted command, read-only and tier', /^TASK: Enumerate SMB\nTARGET: 10\.10\.11\.5\nRULES OF ENGAGEMENT[^\n]*\n<<<\nENGAGEMENT: ACME internal/.test(jprompt)
+  ok('judge prompt: task, target, the scope, rules, the vetted command, read-only and tier', /^TASK: Enumerate SMB\nTARGET: 10\.10\.11\.5\nSCOPE \(LAB_ALLOWLIST\): 10\.10\.11\.0\/24, box\.htb\nRULES OF ENGAGEMENT[^\n]*\n<<<\nENGAGEMENT: ACME internal/.test(jprompt)
     && jprompt.endsWith('>>>\nPROPOSED COMMAND (already passed the scope + denylist gate):\nnmap -sV 10.10.11.5\nread-only: true  tier: passive'), jprompt);
   ok('judge prompt: no references, no operator free text', !jprompt.includes('REFERENCE NOTES') && !jprompt.includes('smbclient'));
+  const noEng = run('Build judge prompt', { json: { ...pgOk, engagement: null, judgeModel: 'qwen3:8b' }, env })[0].json.judgePrompt;
+  ok('judge prompt: the scope even without an engagement (LAB_ALLOWLIST)', noEng.split('\n')[2] === 'SCOPE (LAB_ALLOWLIST): 10.10.11.0/24, box.htb'
+    && !noEng.includes('RULES OF ENGAGEMENT'), noEng);
 
   // the re-check after the judge: a window that closed while the models worked blocks the run
   const jpClosed = { ...judgeFor('qwen3:8b'), engagement: { ...E, window_end: '2020-01-01T00:00:00Z' } };

@@ -99,8 +99,8 @@ instead of guessing a scope.
    - The engagement's prohibited tools or flags (whole words, not patterns) and its window block a command.
    - It decides the auto-run tier: a tier auto-runs only if its `LAB_AUTORUN_*` variable and the engagement both allow
      it.
-7. **Judge (regular model).** It sees the vetted command and the rules of engagement, and answers `AUTHORIZE` or
-   `REJECT`. Only a clean first word counts, and the policy runs once more before anything executes. "Build judge prompt"
+7. **Judge (regular model).** It sees the vetted command, the scope (`LAB_ALLOWLIST`, in every run) and the rules of
+   engagement, and answers `AUTHORIZE` or `REJECT`. The operator's rationale and raw text never reach it. Only a clean first word counts, and the policy runs once more before anything executes. "Build judge prompt"
    refuses a judge whose name marks it as abliterated (`glm-abl`, `*-abl`, `*abliterated*`, `uncensored`) or that is the
    operator itself. The run then fails closed. It runs with thinking off (`think: false`). Ollama switches
    thinking on for qwen3 when a request leaves it unset, so every verdict would first generate a hidden reasoning trace:

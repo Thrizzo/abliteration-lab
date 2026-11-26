@@ -164,16 +164,17 @@
   <div class="row" style="justify-content:space-between"><div><h2>Copilot</h2><div class="small">The abliterated model suggests, the policy gate (scope, rules of engagement) and a regular judge decide, and what passes is staged for execution. Nothing runs from here: the workflow's Execute node is disabled and no lab runner is configured.</div></div><button class="btn sm" id="copilotClose">close</button></div>
   <div class="cp-top">
     <div class="card" id="cpModelsCard">
-      <div class="row cp-head"><h3>Models</h3><button class="btn sm" id="cpModelsRefresh" title="ask glm-serve and the copilot's Ollama again">refresh</button></div>
-      <label class="small" for="cpOpModel">Operator: the abliterated model that suggests (glm-serve)</label>
-      <select id="cpOpModel" class="cp-select"></select>
+      <div class="row cp-head"><h3>Models <small>the copilot is the n8n flow; it uses three</small></h3><button class="btn sm" id="cpModelsRefresh" title="ask glm-serve and the copilot's Ollama again">refresh</button></div>
+      <div class="cp-role"><span class="cp-num">1</span><b>Copilot model</b> <span class="small">abliterated · proposes the command · served by glm-serve</span></div>
+      <select id="cpOpModel" class="cp-select" aria-label="copilot model"></select>
       <div class="small" id="cpOpInfo"></div>
-      <label class="small" for="cpLoadRun">Load another abliterated run as the copilot (glm-serve switches to it)</label>
+      <label class="small" for="cpLoadRun">Which abliterated run glm-serve loads as the copilot model</label>
       <div class="cp-loadrow"><select id="cpLoadRun" class="cp-select"></select><button class="btn sm" id="cpLoad">Load</button></div>
       <div class="small" id="cpLoadInfo"></div>
-      <label class="small" for="cpJudgeModel">Judge: the regular model that can veto (the copilot's Ollama)</label>
-      <select id="cpJudgeModel" class="cp-select"></select>
+      <div class="cp-role"><span class="cp-num">2</span><b>Judge</b> <span class="small">regular model · approves or rejects the checked command against the RoE and the scope · the copilot's Ollama</span></div>
+      <select id="cpJudgeModel" class="cp-select" aria-label="judge model"></select>
       <div class="small" id="cpJudgeInfo"></div>
+      <div class="cp-role"><span class="cp-num">3</span><b>Search</b> <span class="small" id="cpEmbedInfo">embedding model · turns your writeups into vectors for retrieval · writes no text, so it is not a choice here</span></div>
     </div>
     <div class="card" id="cpEngCard">
       <div class="row cp-head"><h3>Engagement <small id="cpEngVer"></small></h3><label class="small cp-check"><input type="checkbox" id="engActive" checked> active: sent with every run</label></div>

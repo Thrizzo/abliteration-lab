@@ -248,6 +248,9 @@ body.wiz{display:block;overflow:auto}
 .cp-head{justify-content:space-between;margin-top:0}
 .cp-select{width:100%;margin:2px 0 4px}
 .cp-loadrow{display:flex;gap:8px;align-items:center}
+.cp-role{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin:14px 0 4px}
+.cp-role b{font-size:13px}
+.cp-num{flex:none;width:20px;height:20px;border-radius:50%;display:inline-grid;place-items:center;font:700 11px/1 var(--mono);background:var(--accent-dim);color:var(--accent);align-self:center}
 .cp-loadrow .cp-select{flex:1;min-width:0}
 #cpModelsCard label,#cpEngCard label{display:block;margin:8px 0 3px}
 .cp-check{display:inline-flex !important;align-items:center;gap:6px;cursor:pointer;margin:0 !important}

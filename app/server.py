@@ -554,8 +554,9 @@ def copilot_status():
 
 @app.get("/api/copilot/models")
 def copilot_model_list(fresh: bool = False):
-    """Operators (glm-serve) and judges (the copilot's Ollama, abliterated and embedding models left out)."""
-    return copilot_models.list(fresh)
+    """The copilot's three models: operators (glm-serve), judges (the copilot's Ollama, abliterated and embedding models
+    left out), and the embedding model retrieval searches with (fixed: RAG_EMBED_MODEL)."""
+    return {**copilot_models.list(fresh), "embeddings": {"model": knowledge.embed_model}}
 
 
 @app.post("/api/copilot/run")

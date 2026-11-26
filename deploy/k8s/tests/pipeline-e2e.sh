@@ -258,6 +258,7 @@ OP_PROMPT=$(ev "$E1" prompt .data.prompt)
 JUDGE_PROMPT=$(ev "$E1" judge_prompt .data.prompt)
 check "engagement run: the operator's prompt carries the rules" grep -q 'RULES: No DoS. Stop on PII.' <<<"$OP_PROMPT"
 check "engagement run: the judge's prompt carries the rules and the vetted command" bash -c 'grep -q "RULES OF ENGAGEMENT" <<<"$1" && grep -q "^nmap -sV -Pn 10.10.10.5$" <<<"$1"' _ "$JUDGE_PROMPT"
+check "engagement run: the judge's prompt names the scope (copilot.env's LAB_ALLOWLIST)" grep -qx 'SCOPE (LAB_ALLOWLIST): 10.10.10.0/24, 192.168.56.0/24' <<<"$JUDGE_PROMPT"
 check "engagement run: the models received exactly the prompts the console shows" test "$(seen | jq --arg o "$OP_PROMPT" --arg j "$JUDGE_PROMPT" '[.requests[] | select(.user == $o or .user == $j)] | length')" -ge 2
 check "engagement run: the result names engagement v1 and the models" test "$(jq -r '"\(.result.engagement.version) \(.result.operator_model) \(.result.judge_model)"' <<<"$E1")" = "1 glm-abl qwen3:8b"
 N=$(copilot_run "Enumerate services on the box" 10.10.10.100 done error)

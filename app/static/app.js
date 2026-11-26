@@ -532,7 +532,9 @@ async function cpModelsLoad(fresh){
   cpFillSelect($('#cpOpModel'), 'operator', m.operator.models||[], m.operator.default);
   cpFillSelect($('#cpJudgeModel'), 'judge', m.judge.models||[], m.judge.default);
   const ex = (m.judge.excluded||[]).map(x => `${esc(x.name)} (${esc(String(x.why).split(':')[0])})`).join(', ');
-  $('#cpJudgeInfo').innerHTML = (m.judge.error ? `<span class="vuln">${esc(m.judge.error)}</span>` : '') + (ex ? `left out: ${ex}` : '');
+  $('#cpJudgeInfo').innerHTML = (m.judge.error ? `<span class="vuln">${esc(m.judge.error)}</span>` : '') + (ex ? `not usable as judge: ${ex}` : '');
+  if(m.embeddings && m.embeddings.model)
+    $('#cpEmbedInfo').innerHTML = `<span class="mono">${esc(m.embeddings.model)}</span> · turns your writeups into vectors for retrieval · writes no text, so it is not a choice here`;
   try{ CP.serving=await api('/serving'); }catch(e){ CP.serving=null; }
   const sv=CP.serving, cur = sv && sv.current;
   $('#cpOpInfo').innerHTML = (m.operator.error ? `<span class="vuln">${esc(m.operator.error)}</span> · ` : '')

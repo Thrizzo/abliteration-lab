@@ -68,15 +68,17 @@ console.log(JSON.stringify({{ user: out.operatorPrompt, chain: op.parameters.tex
     @unittest.skipUnless(NODE, "node not installed")
     def test_n8n_judge_prompt_matches_python(self):
         for eng in ENGAGEMENTS:
-            for read_only, tier in ((True, "passive"), (False, None)):
+            for read_only, tier, allow in ((True, "passive", ["10.10.11.0/24", " box.htb "]), (False, None, []), (True, None, None)):
                 js = f"""
 const wf = require({json.dumps(WF)});
 const code = wf.nodes.find(n => n.name === 'Build judge prompt').parameters.jsCode;
-const $json = {{ task: 'Enumerate SMB', judgeModel: 'qwen3:8b', engagement: {json.dumps(eng)},
+const $json = {{ task: 'Enumerate SMB', judgeModel: 'qwen3:8b', engagement: {json.dumps(eng)}, allowlist: {json.dumps(allow)},
   policy: {{ target: '10.10.11.42', command: 'smbclient -N -L //10.10.11.42', readOnly: {json.dumps(read_only)}, tier: {json.dumps(tier)} }} }};
 console.log(JSON.stringify(new Function('$input','$json','$','$env', code)({{}}, $json, () => ({{}}), {{}})[0].json.judgePrompt));"""
-                self.assertEqual(json.loads(node_eval(js)),
-                                 judge_user("Enumerate SMB", "10.10.11.42", "smbclient -N -L //10.10.11.42", read_only, tier, eng), eng)
+                got = json.loads(node_eval(js))
+                self.assertEqual(got, judge_user("Enumerate SMB", "10.10.11.42", "smbclient -N -L //10.10.11.42", read_only, tier, eng, allow),
+                                 (eng, allow))
+                self.assertEqual("SCOPE (LAB_ALLOWLIST): 10.10.11.0/24, box.htb" in got, bool(allow))
 
     def test_engagement_text(self):
         self.assertEqual(engagement_text(None), "")
