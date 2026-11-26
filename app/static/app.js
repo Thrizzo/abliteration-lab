@@ -534,12 +534,30 @@ async function cpModelsLoad(fresh){
   const ex = (m.judge.excluded||[]).map(x => `${esc(x.name)} (${esc(String(x.why).split(':')[0])})`).join(', ');
   $('#cpJudgeInfo').innerHTML = (m.judge.error ? `<span class="vuln">${esc(m.judge.error)}</span>` : '') + (ex ? `left out: ${ex}` : '');
   try{ CP.serving=await api('/serving'); }catch(e){ CP.serving=null; }
-  const cur = CP.serving && CP.serving.current;
+  const sv=CP.serving, cur = sv && sv.current;
   $('#cpOpInfo').innerHTML = (m.operator.error ? `<span class="vuln">${esc(m.operator.error)}</span> · ` : '')
     + (cur ? `glm-serve serves run <span class="mono">${esc(cur.run_id)}</span>${cur.layer!=null?' (layer '+esc(cur.layer)+')':''}` : 'no run promoted yet')
-    + ` · <a href="#" id="cpToServing">change the run in Serving</a>`;
+    + ` · <a href="#" id="cpToServing">history and Rollback in Serving</a>`;
+  // loading a run = Promote (the same audited path as the Serving panel): vLLM restarts on that run's model,
+  // Ollama publishes its GGUF under the served name; the next copilot request uses it
+  const cands=(sv && sv.candidates)||[];
+  $('#cpLoadRun').innerHTML = cands.length ? cands.map(r=>{ const now=cur&&cur.run_id===r.run_id;
+      return `<option value="${escA(r.run_id)}"${now?' selected':''}${r.promotable||now?'':' disabled'}>${esc(r.run_id)} · ${esc(r.model||'')}${r.layer!=null?' · layer '+esc(r.layer):''} · ${esc(r.verdict||'not validated')}${now?' (serving now)':(r.promotable?'':' · '+esc(r.why||'not loadable'))}</option>`; }).join('')
+    : `<option value="">${sv ? 'no run has an edited model yet: run the pipeline first' : 'loading runs needs the Kubernetes deployment'}</option>`;
+  $('#cpLoad').disabled = !cands.some(r=>r.promotable) || !!(sv && sv.busy);
+  $('#cpLoadInfo').innerHTML = sv && sv.busy ? `<span class="badge warn">${esc(sv.busy)}</span> glm-serve is switching…` : (sv && sv.error ? `<span class="vuln">${esc(sv.error)}</span>` : '');
+  clearTimeout(CP.loadT);
+  if(sv && sv.busy && $('#copilotPanel').classList.contains('open')) CP.loadT=setTimeout(()=>cpModelsLoad(true), 3000);
   const toServe=$('#cpToServing'); if(toServe) toServe.onclick=(e)=>{ e.preventDefault(); $('#serveToggle').click(); };
 }
+$('#cpLoad').onclick=async()=>{
+  const id=$('#cpLoadRun').value, cur=CP.serving && CP.serving.current; if(!id) return;
+  if(cur && cur.run_id===id) return toast(`run ${id} is already the copilot`);
+  if(!confirm(`Load run ${id} as the copilot? glm-serve switches to it (vLLM restarts its pod); the next copilot request uses it. Recorded in the audit log; Rollback in Serving.`)) return;
+  $('#cpLoad').disabled=true;
+  try{ await api('/serving/promote', {run_id:id}); toast(`loading run ${id} as the copilot`); }catch(e){ toast(e.message, true); }
+  cpModelsLoad(true);
+};
 $('#cpOpModel').onchange=()=>cpStore.set('model.operator', $('#cpOpModel').value);
 $('#cpJudgeModel').onchange=()=>cpStore.set('model.judge', $('#cpJudgeModel').value);
 $('#cpModelsRefresh').onclick=()=>cpModelsLoad(true);
@@ -776,7 +794,7 @@ $('#copilotToggle').onclick=()=>{
   clearInterval(CP.feedT); CP.feedT=setInterval(cpFeedLoad, 1500);
   if(CP.run) cpShowRun(CP.run.id);
 };
-const cpClose=()=>{ $('#copilotPanel').classList.remove('open'); clearInterval(CP.feedT); clearTimeout(CP.runT); };
+const cpClose=()=>{ $('#copilotPanel').classList.remove('open'); clearInterval(CP.feedT); clearTimeout(CP.runT); clearTimeout(CP.loadT); };
 $('#copilotClose').onclick=cpClose;
 ['#dataToggle','#sbomToggle','#serveToggle'].forEach(b=>$(b).addEventListener('click', cpClose));
 cpSetMode(['copilot','manual','direct'].includes(cpStore.get('mode','copilot')) ? cpStore.get('mode','copilot') : 'copilot');

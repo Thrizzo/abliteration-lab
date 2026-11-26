@@ -269,7 +269,8 @@ python deploy/n8n/connect_console.py --email <your n8n login> --apply-secret
 - **Fresh n8n:** add `--setup-owner --password ...` to create the owner account.
 
 **Which model the copilot uses.** The *operator* is the abliterated model that suggests: whatever `glm-serve` serves.
-In vLLM mode that is the promoted run, as `glm-abl`; Promote another run in **Serving** to change it. The *judge* is a
+In vLLM mode that is the promoted run, as `glm-abl`. To change it, pick another run under **Load** in the **Models** card.
+That is Promote, so it is audited and Rollback in **Serving** undoes it. The *judge* is a
 regular model in the copilot's Ollama that can veto the operator (`qwen3:8b` by default). The **Models** card lists both
 from the servers themselves; the choice is remembered per browser and sent with every run. The judge is never an
 abliterated model: the list leaves out `glm-abl`, `*-abl`, `*abliterated*` and `uncensored` names and embedding models,
