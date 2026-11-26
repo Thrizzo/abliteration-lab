@@ -74,11 +74,12 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
-      - name: n8n workflow tests (generated workflow up to date, policy, Code nodes)
+      - name: n8n workflow tests (generated workflow up to date, policy, Code nodes, connect_console.py)
         run: |
           node deploy/n8n/build_workflow.js --check
           node deploy/n8n/policy.test.js
           node deploy/n8n/workflow.test.js
+          python3 -m unittest discover -s deploy/n8n -v
 
       - name: Build the console image (CPU torch)
         run: docker build -f deploy/Dockerfile --build-arg TORCH_FLAVOR=cpu -t ghcr.io/thrizzo/redteam-llm-lab:ci .

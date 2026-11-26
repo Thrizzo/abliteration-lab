@@ -5,7 +5,7 @@ A starting n8n (2.48.7, seen on a fresh database) goes through three phases: whi
 POST /rest/owner/setup gets a plain 404; only then does GET /healthz/readiness answer 200. CI once checked
 /rest/settings, saw the first 200 and got the 404 on the owner setup. The fake here plays those phases.
 
-    python -m unittest discover -s app/tests
+    python -m unittest discover -s deploy/n8n          (CI runs it next to the node tests: deploy/ is not in the image)
 """
 import importlib.util
 import io
@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SCRIPT = os.path.join(HERE, "..", "..", "deploy", "n8n", "connect_console.py")
+SCRIPT = os.path.join(HERE, "connect_console.py")
 _spec = importlib.util.spec_from_file_location("connect_console", SCRIPT)
 CC = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(CC)
