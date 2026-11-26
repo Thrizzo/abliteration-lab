@@ -188,6 +188,9 @@
         <div><label class="small" for="engOut">Out of scope (excluded)</label><textarea id="engOut" rows="3" class="mono" placeholder="e.g. 10.10.10.1"></textarea></div>
         <div><label class="small" for="engProhibited">Prohibited tools or flags, one per line</label><textarea id="engProhibited" rows="3" class="mono" placeholder="e.g. hydra&#10;-T5"></textarea></div>
         <div><label class="small" for="engStart">Window start</label><input type="datetime-local" id="engStart"><label class="small" for="engEnd">Window end</label><input type="datetime-local" id="engEnd"><div class="small" id="engTz"></div></div>
+        <div class="span2"><label class="small" for="engProtected">Protected data: files, folders, shares or tables, one per line (blocked in code)</label>
+          <textarea id="engProtected" rows="3" class="mono" placeholder="e.g. customers.csv&#10;/backup/&#10;HR$&#10;*.kdbx"></textarea>
+          <div class="small">A command that names one is blocked; a command that could fetch it without naming it (wget -r, smbclient mget, curl [1-9]) waits for you. Write names, not hosts: HR$ is that share on every host; /backup/ is exactly the folder backup, backup also covers backup.zip.</div></div>
         <div class="span2 cp-flags"><label class="small cp-check"><input type="checkbox" id="engAutoPassive"> auto-run passive recon</label><label class="small cp-check"><input type="checkbox" id="engAutoActive"> auto-run active recon</label><span class="small" id="engAutoCap"></span></div>
       </div>
       <div class="row"><input type="text" id="engNote" maxlength="300" placeholder="what changed (kept with the version)" class="cp-note"><button class="btn primary" id="engSave">Save as new version</button></div>

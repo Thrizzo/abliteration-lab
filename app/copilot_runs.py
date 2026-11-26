@@ -8,8 +8,9 @@ CopilotRuns  starts the n8n copilot through its webhook (shared secret, X-Lab-Se
              n8n's API (one event per finished node: scope, retrieval, the operator's prompt and answer, policy, the
              judge's prompt and verdict, the staged command, result) and can stop it. Two modes: copilot (the
              abliterated model proposes) and manual (the operator typed the command: same policy gate and judge).
-             Each run carries the chosen models and the active engagement (app/engagement.py). Nothing here executes
-             a command: the console shows the staged command, and the workflow's Execute node is disabled.
+             Each run carries the chosen models and the active engagement (app/engagement.py); a run whose policy
+             gate does not report checking all of its protected data (a workflow older than the console) is stopped.
+             Nothing here executes a command: the console shows the staged command, and the Execute node is disabled.
 CopilotModels the models a run can use: operators from glm-serve (/v1/models), judges from the copilot's Ollama
              (/api/tags) without abliterated or embedding models. The judge vetoes the abliterated operator, so it is
              never an abliterated model (n8n refuses one too).
@@ -89,11 +90,13 @@ def result_card(j):
     """What the console shows at the end of a run, from the workflow's result node (the console escapes it). "staged" is
     the command the Execute node would get: the policy-vetted one, only when every gate passed."""
     pol, prop = j.get("policy") or {}, j.get("proposal") or {}
+    allowed, auto = j.get("allowed") is True, j.get("autoRun") is True
     reasons = []
-    for r in ([j.get("scopeReason")] if j.get("scopeOk") is False else []) + list(pol.get("reasons") or []) + list(j.get("reasons") or []):
+    review = list(pol.get("dataReview") or []) if allowed and not auto else []     # why it waits while data is protected
+    for r in ([j.get("scopeReason")] if j.get("scopeOk") is False else []) + list(pol.get("reasons") or []) + list(j.get("reasons") or []) \
+            + review:
         if r and r not in reasons:
             reasons.append(r)
-    allowed, auto = j.get("allowed") is True, j.get("autoRun") is True
     if allowed and auto:
         nxt = "Handed to the Execute node, which is disabled: nothing ran."
     elif allowed:
@@ -150,6 +153,9 @@ def node_event(name, entry):
                 how = f"auto-run tier {pol.get('tier')}"
             elif pol.get("injectionSuspected"):
                 how = "needs a human: text aimed at the judge"
+            elif pol.get("dataReview"):
+                how = "needs a human: " + cut(pol["dataReview"][0], 160) + \
+                    (f" (+{len(pol['dataReview']) - 1} more)" if len(pol["dataReview"]) > 1 else "")
             elif pol.get("unverifiable"):
                 how = "needs a human: a target the gate cannot verify (" + "; ".join(cut(u, 60) for u in pol["unverifiable"][:2]) + ")"
             elif pol.get("namesInScopeHost") is False:
@@ -163,7 +169,10 @@ def node_event(name, entry):
             msg, level = "policy: blocked - " + "; ".join(cut(r, 160) for r in (pol.get("reasons") or [])[:3]), "warn"
         return "policy", msg, level, {k: pol.get(k) for k in ("allowed", "autoRun", "tier", "readOnly", "injectionSuspected", "unverifiable")} | \
             {"reasons": [cut(r, 300) for r in (pol.get("reasons") or [])[:8]], "prohibited": pol.get("prohibited") or [],
-             "command": cut(pol.get("command"), 2000)}
+             "command": cut(pol.get("command"), 2000), "protectedData": pol.get("protectedData") or [],
+             "dataReview": [cut(r, 300) for r in (pol.get("dataReview") or [])[:6]],
+             # entries the gate checked; an older workflow leaves it out (CopilotRuns.absorb stops such a run)
+             "protectedEntries": pol.get("protectedEntries")}
     if name == "Build judge prompt":
         prompt, model = str(j.get("judgePrompt") or ""), j.get("judgeModel") or "qwen3:8b"
         return "judge_prompt", f"prompt to the judge {cut(model, 80)} ({len(prompt)} characters)", "info", \
@@ -370,7 +379,12 @@ class CopilotRuns:
             hint = " (the webhook secret does not match: re-run connect_console.py)" if st in (401, 403) else \
                 " (is the workflow published?)" if st == 404 else ""
             raise self.http_error(502, f"n8n answered {st}{hint}: {cut(resp, 200)}")
-        eng = {"name": cut(engagement.get("name"), 120), "version": engagement.get("version")} if isinstance(engagement, dict) else None
+        eng = None
+        if isinstance(engagement, dict):
+            pd = engagement.get("protected_data")
+            # how many protected_data entries the run sent: its policy event must report as many (absorb)
+            eng = {"name": cut(engagement.get("name"), 120), "version": engagement.get("version"),
+                   "protected_data": len(pd) if isinstance(pd, list) else 0}
         run = {"id": str(eid), "task": cut(task, 2000), "target": target, "who": who, "started": now_iso(), "status": "running",
                "mode": mode, "command": cut(command, 2000) if mode == "manual" else None, "operator_model": operator_model,
                "judge_model": judge_model, "engagement": eng,
@@ -435,6 +449,8 @@ class CopilotRuns:
                         with self.lock:
                             run["result"] = data
                     self._emit(run, stage, message, level, data)
+                    if stage == "policy":
+                        self._enforced(run, data, status)
         with self.lock:
             prev, run["n8n_status"] = run["n8n_status"], status
         if status == "waiting":
@@ -455,6 +471,24 @@ class CopilotRuns:
             return True
         with self.lock:
             run["status"] = "running"
+        return False
+
+    def _enforced(self, run, data, status):
+        """A workflow older than the console drops protected_data without a word, and its gate passes what the list
+        names. The policy event reports how many entries the gate checked: a run that sent another number is stopped,
+        with the Stop button's n8n call. False when it was not enforced."""
+        sent = (run.get("engagement") or {}).get("protected_data") or 0
+        got = data.get("protectedEntries")
+        if not sent or got == sent:
+            return True
+        self._audit(run, "error", f"Protected data is not enforced by this workflow (it reported {got or 0} of {sent} entries): "
+                                  "re-import deploy/n8n/workflows/pentest-copilot.json", {"user": "console"}, level="error",
+                    data={"sent": sent, "reported": got})
+        if status not in FINAL:                     # an execution that has already ended has nothing left to stop
+            try:
+                self.stop(run["id"], {"user": "console"})
+            except Exception:                       # noqa: BLE001  409: it ended meanwhile; stop() audits every other failure
+                pass
         return False
 
     def stop(self, run_id, who=None):

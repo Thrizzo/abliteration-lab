@@ -15,6 +15,9 @@
 #      sets n8n up and the console picks up its Secret without a restart; every branch (approval / policy / judge /
 #      scope) arrives as one event per stage; Stop cancels a waiting run; the webhook needs the secret; the console's
 #      n8n key can only read and stop executions; a free prompt streams from glm-serve; feed and audit record it all
+#  7b. copilot v2 through the same n8n: model lists, the engagement's scope, prohibited tools and protected data
+#      enforced by the gates, manual commands, the exact prompts each model got; a protected file name is blocked in
+#      code, in fullwidth letters too, and a recursive wget waits for a human
 #   8. knowledge uploads through the login into real Qdrant: markdown and PDF indexed, a scanned PDF refused, the
 #      engagement preview's redactions; a copilot run retrieves them; delete empties store and folder, and the next
 #      run finds nothing; no deletes outside the writeups folder; audited
@@ -239,7 +242,7 @@ check "feed: Jobs, the kill switch, Promote, copilot runs and model events" test
 check "audit: the copilot run's start and stop by user ci" test "$(API /control | jq -r --arg id "$RID" '[.audit[] | select(.source == "copilot" and .run_id == $id) | "\(.stage):\(.who.user)"] | sort | join(",")')" = "end:ci,start:ci,stop:ci"
 check "audit: the free prompt and its answer" test "$(API /control | jq -r '[.audit[] | select(.source == "model" and .stage == "prompt")][0].data.prompt')" = "Say hello."
 
-echo "== 7b. Copilot v2: model choice, the engagement, manual commands, the prompts each model got"
+echo "== 7b. Copilot v2: model choice, the engagement and protected data, manual commands, the prompts each model got"
 stop_if_waiting() { [ "$(jq -r .status <<<"$1")" = waiting ] && API "/copilot/runs/$(jq -r .id <<<"$1")/stop" -d '{}' >/dev/null; return 0; }
 ev() { jq -r --arg s "$2" "[.events[] | select(.stage == \$s)][0]$3" <<<"$1"; }
 code_of() { curl -s -o /dev/null -w '%{http_code}' -u ci:ci-only-password -H 'Content-Type: application/json' -d "$2" "http://127.0.0.1:18080/api$1"; }
@@ -276,6 +279,24 @@ F=$(copilot_run "Enumerate services on the box" 10.10.10.100 waiting done error)
 stop_if_waiting "$F"
 check "engagement off: LAB_ALLOWLIST alone again (10.10.10.100 in scope)" test "$(ev "$F" scope .data.scopeOk)" = true
 check "audit: both engagement versions, saved by user ci" test "$(API /control | jq -r '[.audit[] | select(.stage == "engagement") | "\(.data.version):\(.who.user)"] | sort | join(",")')" = "1:ci,2:ci"
+# protected data: the judge eval's measured miss (curl of customers.csv under "do not download or copy it") is blocked
+# in code once the engagement lists the names
+ENG3=$(jq -c '. + {active: true, protected_data: ["customers.csv", "/backup/"]}' <<<"$ENG")
+check "save the engagement with protected data: version 3" test "$(API /engagement -d "$ENG3" | jq -r .version)" = 3
+PD=$(copilot_run_json '{"target":"10.10.10.5","mode":"manual","command":"curl -s http://10.10.10.5/backup/customers.csv -o customers.csv"}' done error)
+check "protected data: the measured miss is blocked by the policy gate, the judge never saw it ($(stages "$PD"))" test "$(ev "$PD" policy '.data.reasons[0]') / $(stages "$PD")" = "command names protected data: customers.csv, /backup/ / start,scope,proposal,policy,result,end"
+check "protected data: the gate reports both entries in force" test "$(ev "$PD" policy '.data.protectedData | join(",")') $(ev "$PD" policy .data.protectedEntries)" = "customers.csv,/backup/ 2"
+# the file name in fullwidth letters (U+FF43 ...): only the task runner's NFKC turns it into customers.csv; /backup/
+# alone would block it with a reason that names only /backup/
+FW=$(copilot_run_json '{"target":"10.10.10.5","mode":"manual","command":"curl -s http://10.10.10.5/backup/ｃｕｓｔｏｍｅｒｓ.csv"}' done error)
+check "protected data: NFKC works in the real task runner (fullwidth name blocked)" grep -q 'command names protected data: customers.csv' <<<"$(ev "$FW" policy '.data.reasons[0]')"
+BK=$(copilot_run_json '{"target":"10.10.10.5","mode":"manual","command":"wget -r -np http://10.10.10.5/files/"}' waiting done error)
+stop_if_waiting "$BK"
+check "protected data: a recursive wget waits for a human, with the reason" grep -q 'needs a human: bulk retrieval while data is protected: wget -r/-m/-p (recursion)' <<<"$(ev "$BK" policy .message)"
+E3=$(copilot_run "Enumerate services on the box" 10.10.10.5 waiting done error)
+stop_if_waiting "$E3"
+check "protected data: both prompts carry the line" bash -c 'for p in "$1" "$2"; do grep -qx "PROTECTED DATA (do not read, download or copy): customers.csv, /backup/" <<<"$p" || exit 1; done' _ "$(ev "$E3" prompt .data.prompt)" "$(ev "$E3" judge_prompt .data.prompt)"
+check "audit: engagement v3 records the protected data" test "$(API /control | jq -r '[.audit[] | select(.stage == "engagement" and .data.version == 3)][0].data.protected_data | join(",")')" = "customers.csv,/backup/"
 kill $PF2 2>/dev/null
 
 echo "== 8. Knowledge uploads (real Qdrant, the stand-in's embeddings) and retrieval in a copilot run"

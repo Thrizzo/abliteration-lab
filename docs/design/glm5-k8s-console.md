@@ -226,7 +226,7 @@ sequenceDiagram
 ```mermaid
 flowchart LR
   subgraph Console
-    E[Engagement v<sub>n</sub><br/>scope, exclusions, window,<br/>prohibited, rules] --> R[run request]
+    E[Engagement v<sub>n</sub><br/>scope, exclusions, window,<br/>prohibited, protected data, rules] --> R[run request]
     MD[models: operator, judge] --> R
     MC[manual command] --> R
   end
@@ -235,7 +235,7 @@ flowchart LR
   S -->|copilot| Q[Retrieval] --> OP[Build operator prompt] -->|prompt| M[(abliterated operator)]
   M -->|answer| P[Parse proposal]
   S -->|manual| MP[Manual proposal]
-  P --> G{Policy gate<br/>+ prohibited, window, tiers}
+  P --> G{Policy gate<br/>+ prohibited, protected data,<br/>window, tiers}
   MP --> G
   G --> JP[Build judge prompt<br/>refuses an abliterated judge] --> J[(regular judge)]
   J --> A[Apply decision + re-check] --> ST[staged command] --> X[Human approval / Execute: disabled]
@@ -249,9 +249,31 @@ flowchart LR
   - Execute stays disabled, and the staged command is display only.
 - **Why the rules reach the abliterated operator:** they come from the operator running the lab, so they are trusted text,
   and they make compliant proposals likelier. Enforcement does not depend on the model reading them: the prohibited list,
-  the scope, the exclusions and the window are code in the policy gate.
+  the protected data, the scope, the exclusions and the window are code in the policy gate.
 - **Why the rules reach the judge:** they let it veto what the code can't express, such as "no changes to production
   accounts". The judge stays veto-only, so a judge talked into AUTHORIZE still can't widen anything.
+- **Rules about hosts and data go into code.** Measured with the workflow's exact prompt, the default judge authorized
+  3 of 28 rule-breaking commands: two touched a host the rules put off limits, and one downloaded `customers.csv`
+  although the rules said not to download or copy personal data (`copilot/README.md`, "Judge eval"). A host belongs in
+  *Out of scope* and a file, folder, share or table in *Protected data*: the scope and policy gates enforce both, and
+  the judge keeps what code can't express.
+- **Protected data** is a list of names (`customers.csv`, `/backup/`, `HR$`, `*.kdbx`). The policy gate reads every
+  argument the way bash hands it to the program, folded and percent-decoded.
+  - A name in a data position (URL, share, remote path, SQL, positional argument) blocks.
+  - A name only in a local position (output file, wordlist, filter) and the names of a path entry apart wait for a
+    human. They never auto-run, but a human can approve them; a block cannot be approved, and blocks on wordlists,
+    accounts and exclusions were the red team's worst false positives.
+  - While the list has entries, bulk retrieval (`wget -r`, `mget`, curl globs, NSE crawlers, sqlmap dumps) and names
+    read at run time (list and config files, pipes) wait for a human as well.
+  - An empty list changes nothing. Each policy result reports how many entries it checked, and the console stops a run
+    whose workflow is too old to know the list.
+- **The console warns and suggests; it never decides:**
+  - it refuses entries the gate would read differently (hosts, schemes, drive letters, `%`), naming the form that works;
+  - it points out rules that name a host that is not excluded, and files, shares or tables the rules protect that
+    Protected data does not list, with one click to add them;
+  - it marks entries that are broad (`HR`) or read like a description (`HR share`).
+
+  Hints are worked out each time and never applied by themselves.
 - **Manual mode** exists for the operator's own commands. It is not a bypass: the same scope gate, policy gate and judge
   run, and only the abliterated model and retrieval are skipped.
 - **One file for the ceiling:** `copilot.env` feeds two ConfigMaps (`copilot-settings` for n8n, `copilot-scope` for the
@@ -265,7 +287,10 @@ flowchart LR
   - the run view filtered `run.json`, which hid the dataset provenance from the API;
   - while writing the judge eval's cases: `rpcclient ... -c 'setuserinfo2 jdoe 23 NewPass1!'` changes a password but
     counted as read-only, so it could have auto-run in the passive tier. rpcclient subcommands that create, delete, set,
-    add or change now count as active.
+    add or change now count as active;
+  - while red-teaming protected data: read-only tools that run a program, listen or change a share (`nc -e`, `nc -l`,
+    awk `system()`, sed's `e`, `xargs`, smbclient `!` and `put`, `smbmap -x`), one-dash `nmap -script`, and sqlmap's
+    dump and search options in the active tier all auto-ran. They now wait for a human, with or without protected data.
 - **The judge reads the scope too** (`SCOPE (LAB_ALLOWLIST): ...`, in every run), still never the operator's free text:
   that text is the likeliest carrier of an injection aimed at the judge.
 - **Measured, not assumed:** `copilot/eval_judge.py` runs labelled commands that pass every gate through a real judge

@@ -74,9 +74,11 @@ instead of guessing a scope.
        - the operator and judge model;
        - `mode: "manual"` with a typed `command`, which skips retrieval and the operator and goes through the same
          gates and judge;
-       - its **engagement**: scope statement, rules of engagement, scope, exclusions, window, prohibited tools and
-         auto-run tiers.
-     - **"Define task + target"** (a Code node) bounds and types all of that. Form runs can set none of it.
+       - its **engagement**: scope statement, rules of engagement, scope, exclusions, window, prohibited tools,
+         protected data (`protected_data`: files, folders, shares or tables) and auto-run tiers.
+     - **"Define task + target"** (a Code node) bounds and types all of that. Form runs can set none of it. Protected
+       data keeps 64 entries of up to 256 characters. The gate refuses an entry it cannot read, and then every command
+       waits for a human.
 2. **Scope gate (code).** The target must be in `LAB_ALLOWLIST` *before any model is called*. With an engagement it must
    also be in the engagement's scope, not excluded, and inside its window. An engagement narrows `LAB_ALLOWLIST` and
    never widens it. An out-of-scope run makes zero model or vector-store calls (verified live).
@@ -91,12 +93,35 @@ instead of guessing a scope.
 5. **Parse.** The model output is data. The JSON object is extracted, with a fenced block as fallback.
 6. **Policy gate (`policy.js`): the boundary.**
    - Every host the command names must be in scope. Hosts are read from URLs, `//unc` paths, `user@host`, bare names
-     (not file names like `common.txt`) and `localhost`.
+     (not file names like `common.txt`) and `localhost`. A file name whose extension the gate does not know as a file
+     (`vault.kdbx`, `ntds.dit`, `lsass.dmp`, `web.config`, `mail.pst`) counts as a host name, so such a command is
+     blocked as out of scope, with that misleading reason.
    - A denylist blocks destructive, exfil, pivot and anti-forensic patterns, and `nmap -iR`.
    - Commands it cannot verify never auto-run: placeholders, `$VAR`/`$(…)`, `-iL` files, integer/hex/octal IPs, IPv6.
    - Text aimed at the judge never auto-runs.
    - A line break separates commands, as `;` does: every line is classified.
    - The engagement's prohibited tools or flags (whole words, not patterns) and its window block a command.
+   - **Protected data** (the engagement's `protected_data`). The gate splits the command into the words bash hands each
+     program (quotes, escapes, `$'...'`, comments, redirections, heredocs), folds them (NFKC, case) and percent-decodes
+     them for up to three rounds.
+     - **Blocked:** a command that names a listed file, folder, share or table in a data position: a URL, a share or
+       remote path, an SQL string, a positional argument. The reason reads
+       `command names protected data: customers.csv, /backup/`.
+     - **Waits for a human:** a name only in a local position (output file, wordlist, key file, exclusion, a filter such
+       as `grep`), or the names of a path entry apart in one command (`//fs01/HR$ -D Payroll` for `HR$/Payroll`).
+     - **Waits for a human while the list has entries:** bulk retrieval, which fetches names the command does not spell
+       (`wget -r`, smbclient `mget`, curl `[1-9]` globs, NSE scripts beyond default, version and banner, sqlmap dumps),
+       and names read at run time (`-i` lists, config files, pipes, `<` files). The rules cover every program that can
+       auto-run; a test fails when a read-only tool has not been reviewed for them.
+     - An empty list changes nothing. The result adds `protectedData` (the entries hit, as written), `dataReview` (why
+       a human must look, at most 6 lines) and `protectedEntries` (how many entries the gate checked). The console stops
+       a run that reports another count than it sent: that is an older workflow, which drops the list.
+     - Both models read the list too, on a `PROTECTED DATA (do not read, download or copy)` line before the rules, cut
+       at 1000 characters. The gate enforces all of it.
+   - A read-only tool that runs a program, listens or changes a share never auto-runs: netcat `-e`, `-c` and `-l`, awk
+     `system()`, sed's `e`, `xargs`, smbclient `!` and its write commands, smbmap `-x`, `--upload` and `--delete`,
+     `ffuf -input-cmd`. nmap reads `-script` like `--script`, and so does the gate. sqlmap options that dump, search or
+     read files leave the active tier, also in the spellings sqlmap accepts for them (`--sea`, `-dump`, Unicode dashes).
    - It decides the auto-run tier: a tier auto-runs only if its `LAB_AUTORUN_*` variable and the engagement both allow
      it.
 7. **Judge (regular model).** It sees the vetted command, the scope (`LAB_ALLOWLIST`, in every run) and the rules of
@@ -118,6 +143,19 @@ instead of guessing a scope.
    - **Everything else** goes to the **Human approval** Wait node.
 10. **Execute** is `disabled` on import and posts to your own `LAB_RUNNER_URL`.
 
+## Runner contract
+
+There is no runner yet. The policy gate reads a command the way bash does, so the runner you connect must:
+- execute the staged command with `bash -c`, non-interactively, with default options;
+- start each command in a fresh HOME and working directory;
+- carry no `~/.wgetrc`, `~/.curlrc`, `~/.netrc` or smb configuration over from earlier commands;
+- leave `WGETRC` and `CURL_HOME` unset.
+
+Otherwise comments, quoting, `;` and line breaks can mean something else to the runner than to the gate, and a file one
+command wrote can change what the next one fetches. The gate judges each command on its own. While protected data is
+listed, it sends a command that writes a dotfile or sets one of those variables to a human, but it cannot see what such
+a file does to a later command.
+
 ## Files
 
 | File | What it is |
@@ -125,8 +163,9 @@ instead of guessing a scope.
 | `workflows/pentest-copilot.json` | The importable workflow (44 nodes). **Generated**, do not hand-edit. |
 | `connect_console.py` | One-shot setup: credentials, the workflow (published), and, for the Kubernetes console, an n8n API key limited to reading and stopping executions plus the console's Secret. Safe to re-run. It first waits (`--wait`, 300 s) until `/healthz/readiness` answers 200: while n8n migrates its database, every request gets 200 "n8n is starting up", and its routes appear only after that, so it can run right after a deploy. `python -m unittest discover -s deploy/n8n` tests the wait against a fake n8n that starts like the real one. |
 | `build_workflow.js` | Generator: embeds `policy.js` into the Code nodes and reads the prompts from `copilot/operator_contract.json`. Every Code node is parsed at build time; `--check` fails if the JSON is stale. |
-| `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 98 tests. |
-| `workflow.test.js` | Runs each Code node's actual code with mocked n8n globals (neutralizer, `$env` fail-closed, parse, veto-only judge, store-down detection, result-page escaping). Also checks the graph: blocked runs never reach approval or execution, console runs never reach a form page, and the operator calls chat completions (not the Responses API). |
+| `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 147 tests. |
+| `protected_corpus.json` | 107 commands with protected data listed, each with the outcome it must get (37 blocked, 38 for a human, 32 pass) and its reason. `policy.test.js` runs them through `decide()`, along with the 59 entry vectors the console shares (`copilot/tests/fixtures/protected_vectors.json`). |
+| `workflow.test.js` | Runs each Code node's actual code with mocked n8n globals (neutralizer, `$env` fail-closed, parse, veto-only judge, store-down detection, result-page escaping, the protected-data bounds and prompt line). Also checks the graph: blocked runs never reach approval or execution, console runs never reach a form page, and the operator calls chat completions (not the Responses API). |
 | `docker-compose.n8n.yml` | n8n + Qdrant overlay on the lab stack. n8n listens on localhost only; Qdrant has no published port. |
 | `../../copilot/` | Ingestion, scrubbing, QLoRA pairs, trainer and eval ([copilot/README.md](../../copilot/README.md)). |
 
@@ -181,12 +220,24 @@ instead of guessing a scope.
    - **No login:** the form has none of its own. n8n listens on localhost only, so that is fine on a single-user machine;
      otherwise set the Form Trigger's *Authentication* to Basic Auth.
 8. **Approval and execution.** Point the *Human approval* resume URL at Telegram, email or Slack. Only then enable *Execute*
-   and set `LAB_RUNNER_URL` to a command runner you control on the lab network.
+   and set `LAB_RUNNER_URL` to a command runner you control on the lab network, one that keeps the
+   [runner contract](#runner-contract).
 
 ## Verified here, and how
 
-- **Unit tests:** `policy.test.js` (66), `workflow.test.js` (46), `python -m unittest discover -s copilot/tests -t .` (34,
-  including checks that the JS and Python neutralizers and prompt renderings are identical).
+- **Unit tests:** `policy.test.js` (147), `workflow.test.js` (127), `python -m unittest discover -s copilot/tests -t .`
+  (54, including checks that the JS and Python neutralizers and prompt renderings are identical).
+- **Protected data:**
+  - every command in `protected_corpus.json` gets its outcome and reason, and every entry the console accepts among
+    the 59 shared vectors compiles in the gate to the same key;
+  - with an empty list, `decide()` returns what the gate returned before the field existed, apart from the three new
+    fields: compared for every corpus command and for all 49 judge-eval cases;
+  - with realistic lists for the three judge-eval engagements, only the three personal-data cases change, all to a
+    block: `recon-pii-csv` (the judge's measured miss), `recon-pii-share` and `recon-pii-mysqldump`;
+  - 80 red-team attacks on the design, replayed against this gate while it was built, each give their adjudicated
+    outcome;
+  - in real n8n, `deploy/k8s/tests/pipeline-e2e.sh` (section 7b) checks it, including a fullwidth file name that only
+    the task runner's NFKC folds. That runs in CI, not in the sandbox this was built in.
 - **Live runs in real n8n 2.48.7** (`n8n execute`), with real models through transformers: the abliterated GLM-Edge-1.5B as
   operator, the base GLM-Edge-1.5B standing in for the judge, bge-small for embeddings. Ollama and Qdrant themselves are not
   reachable from the sandbox this was built in, so their HTTP APIs were served by stand-ins written to Ollama's and Qdrant's

@@ -209,6 +209,58 @@ class TestEventsV2(unittest.TestCase):
         self.assertIsNone(run["result"])
 
 
+def with_policy(name, **fields):
+    """A recorded execution with fields added to the policy gate's verdict, in the Policy gate node and the result node
+    alike, as a workflow with protected data reports them (the fixtures were recorded before the field)."""
+    ex = fixture(name)
+    for node, entries in ex["data"]["resultData"]["runData"].items():
+        j = CR._out(entries[0])
+        if node == "Policy gate" or node.startswith("Result text"):
+            j["policy"].update(fields)
+    return ex
+
+
+class TestProtectedDataEvents(unittest.TestCase):
+    """The gate's protected-data verdict in the policy event and the result card."""
+    REVIEW = ["bulk retrieval while data is protected: wget -r/-m/-p (recursion)",
+              "names read at run time while data is protected: wget -i (URLs from a file)"]
+
+    def policy(self, ex):
+        return CR.node_event("Policy gate", ex["data"]["resultData"]["runData"]["Policy gate"][0])
+
+    def test_a_human_is_needed_and_the_event_says_why(self):
+        stage, msg, level, data = self.policy(with_policy("waiting", dataReview=self.REVIEW, protectedData=[], protectedEntries=2))
+        self.assertEqual((stage, level), ("policy", "info"))
+        self.assertEqual(msg, "policy: passed (needs a human: bulk retrieval while data is protected: wget -r/-m/-p (recursion) (+1 more))")
+        self.assertEqual((data["dataReview"], data["protectedData"], data["protectedEntries"]), (self.REVIEW, [], 2))
+        long = ["x" * 400] * 7
+        _, msg, _, data = self.policy(with_policy("waiting", dataReview=long, protectedData=[], protectedEntries=1))
+        self.assertEqual(msg, "policy: passed (needs a human: " + "x" * 160 + " ... (+6 more))")
+        self.assertEqual((len(data["dataReview"]), data["dataReview"][0]), (6, "x" * 300 + " ..."))      # at most 6, each cut
+        # text aimed at the judge still comes first; a review comes before the tier
+        _, msg, _, _ = self.policy(with_policy("waiting", dataReview=self.REVIEW, injectionSuspected=True))
+        self.assertEqual(msg, "policy: passed (needs a human: text aimed at the judge)")
+
+    def test_a_block_names_the_entries(self):
+        reason = "command names protected data: customers.csv, /backup/"
+        stage, msg, level, data = self.policy(with_policy("policy", reasons=[reason], protectedData=["customers.csv", "/backup/"],
+                                                          dataReview=[], protectedEntries=2))
+        self.assertEqual((msg, level), ("policy: blocked - " + reason, "warn"))
+        self.assertEqual((data["protectedData"], data["reasons"]), (["customers.csv", "/backup/"], [reason]))
+
+    def test_an_older_workflow_reports_no_count(self):
+        _, _, _, data = self.policy(fixture("waiting"))
+        self.assertEqual((data["protectedData"], data["dataReview"], data["protectedEntries"]), ([], [], None))
+
+    def test_the_result_card_lists_why_it_waits(self):
+        j = CR._out(with_policy("waiting", dataReview=self.REVIEW)["data"]["resultData"]["runData"]["Result text (authorized)"][0])
+        card = CR.result_card(j)
+        self.assertEqual((card["title"], card["reasons"]), ("Authorized: waiting for your approval", self.REVIEW))
+        # only a run that waits: an auto-run or a blocked run gives no review lines
+        self.assertEqual(CR.result_card({**j, "autoRun": True})["reasons"], [])
+        self.assertEqual(CR.result_card({**j, "allowed": False})["reasons"], [])
+
+
 class FakeN8n:
     """Webhook + public executions API. Executions advance one snapshot per GET; stop cancels a waiting one."""
 
@@ -302,7 +354,7 @@ class TestCopilotRuns(unittest.TestCase):
                                    "engagement": {"name": "ACME", "version": 2, "scope_in": ["10.10.10.0/28"]}})
         start = self.audit.recent(1)[0]
         self.assertEqual((start["data"]["mode"], start["data"]["operator_model"], start["data"]["engagement"]),
-                         ("copilot", "glm-abl", {"name": "ACME", "version": 2}))
+                         ("copilot", "glm-abl", {"name": "ACME", "version": 2, "protected_data": 0}))
         run = self.wait(out["id"], ("done",))
         self.assertEqual(run["result"]["title"], "Authorized: auto-run (passive tier)")
         audit = [(r["stage"], r["who"].get("user")) for r in reversed(self.audit.recent(10))]
@@ -392,6 +444,53 @@ class TestCopilotRuns(unittest.TestCase):
         with self.assertRaises(HTTPError) as e:
             self.runs.get("999")
         self.assertEqual(e.exception.status, 404)
+
+    # a console newer than its workflow: the older gate drops protected_data, and only the count it reports shows that
+    ENG = {"name": "ACME", "version": 4, "protected_data": ["customers.csv", "/backup/"]}
+    NOT_ENFORCED = ("Protected data is not enforced by this workflow (it reported 0 of 2 entries): "
+                    "re-import deploy/n8n/workflows/pentest-copilot.json")
+
+    def test_a_workflow_that_ignores_protected_data_is_stopped(self):
+        self.n8n.plan = [fixture("waiting")]                       # recorded before the field: no protectedEntries
+        out = self.runs.start("brute force ssh", "10.10.10.5", {"user": "admin"}, engagement=self.ENG)
+        hook = next(c for c in self.n8n.calls if c[1] == "/webhook/copilot-run")[3]
+        self.assertEqual(hook["engagement"]["protected_data"], ["customers.csv", "/backup/"])
+        run = self.wait(out["id"], ("canceled",))
+        self.assertEqual(run["engagement"], {"name": "ACME", "version": 4, "protected_data": 2})
+        err = next(e for e in run["events"] if e["stage"] == "error" and e["level"] == "error")
+        self.assertEqual(err["message"], self.NOT_ENFORCED)
+        stops = [c for c in self.n8n.calls if c[1].endswith("/stop")]
+        self.assertEqual([c[1] for c in stops], [f"/api/v1/executions/{out['id']}/stop"])     # the Stop button's call
+        self.assertEqual({k.lower(): v for k, v in stops[0][2].items()}.get("x-n8n-api-key"), "k3y")
+        self.assertEqual([(r["stage"], r["who"].get("user")) for r in reversed(self.audit.recent(10))],
+                         [("start", "admin"), ("error", "console"), ("stop", "console"), ("end", "admin")])
+        feed = [e for e in self.feed.since(0)["events"] if e["source"] == "copilot"]
+        self.assertEqual([e["stage"] for e in feed].count("error"), 2)        # the retrieval warning, and this one
+        self.assertEqual(next(e for e in feed if e["level"] == "error")["message"], self.NOT_ENFORCED)
+
+    def test_a_workflow_that_enforces_it_runs_on(self):
+        self.n8n.plan = [with_policy("waiting", protectedData=[], dataReview=[], protectedEntries=2)]
+        out = self.runs.start("brute force ssh", "10.10.10.5", {"user": "admin"}, engagement=self.ENG)
+        run = self.wait(out["id"], ("waiting",))
+        self.assertFalse([e for e in run["events"] if e["level"] == "error"])
+        self.runs.stop(out["id"], {"user": "admin"})
+        self.wait(out["id"], ("canceled",))
+        self.assertEqual(len([c for c in self.n8n.calls if c[1].endswith("/stop")]), 1)    # only the operator's
+
+    def test_without_protected_data_nothing_is_checked(self):
+        self.n8n.plan = [fixture("authorized")]
+        out = self.runs.start("Enumerate services", "10.10.10.5", {"user": "admin"}, engagement={**self.ENG, "protected_data": []})
+        run = self.wait(out["id"], ("done",))
+        self.assertEqual(run["engagement"]["protected_data"], 0)
+        self.assertFalse([e for e in run["events"] if e["level"] == "error"])
+
+    def test_a_run_that_has_already_ended_is_reported_not_stopped(self):
+        self.n8n.plan = [fixture("authorized")]                    # the first snapshot is already final
+        out = self.runs.start("Enumerate services", "10.10.10.5", {"user": "admin"}, engagement=self.ENG)
+        run = self.wait(out["id"], ("done",))
+        self.assertEqual(next(e for e in run["events"] if e["level"] == "error")["message"], self.NOT_ENFORCED)
+        self.assertEqual([c for c in self.n8n.calls if c[1].endswith("/stop")], [])        # nothing left to stop
+        self.assertEqual([r["stage"] for r in reversed(self.audit.recent(10))], ["start", "error", "end"])
 
 
 class TestModelChat(unittest.TestCase):

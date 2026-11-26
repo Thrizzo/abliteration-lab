@@ -23,19 +23,21 @@ const OUT = path.join(HERE, 'workflows', 'pentest-copilot.json');
 const POLICY = fs.readFileSync(path.join(HERE, 'policy.js'), 'utf8');
 const C = JSON.parse(fs.readFileSync(path.join(HERE, '..', '..', 'copilot', 'operator_contract.json'), 'utf8'));
 
-// The console's engagement (scope statement, rules, scope, exclusions, window, prohibited tools) as the operator and the
-// judge read it. Mirrored in copilot/contract.py (engagement_text); copilot/tests/test_contract.py renders both. The rules
-// come last: past 4000 characters it is their end that is cut.
+// The console's engagement (scope statement, rules, scope, exclusions, window, prohibited tools, protected data) as the
+// operator and the judge read it. Mirrored in copilot/contract.py (engagement_text); copilot/tests/test_contract.py renders
+// both. The rules come last: past 4000 characters it is their end that is cut. The models see the first 1000 characters
+// of the protected data, which leaves room for the rules; the policy gate enforces the whole list.
 const ENGAGEMENT_TEXT = `const ENGAGEMENT_HEADER = ${JSON.stringify(C.engagement_header)};
 function engagementText(e) {
   if (!e || typeof e !== 'object' || Array.isArray(e)) return '';
   const s = (v) => (v === undefined || v === null ? '' : String(v).trim());
   const joined = (v) => (Array.isArray(v) ? v : []).map(s).filter(Boolean).join(', ');
+  const cap = (v, n) => (v.length <= n ? v : v.slice(0, n) + ' ...');
   const lines = [];
   if (s(e.name)) lines.push('ENGAGEMENT: ' + s(e.name) + (s(e.version) ? ' (version ' + s(e.version) + ')' : ''));
   for (const [label, value] of [['SCOPE STATEMENT', s(e.scope_statement)], ['IN SCOPE', joined(e.scope_in)], ['OUT OF SCOPE', joined(e.scope_out)]]) if (value) lines.push(label + ': ' + value);
   if (s(e.window_start) || s(e.window_end)) lines.push('WINDOW: ' + (s(e.window_start) || 'open') + ' to ' + (s(e.window_end) || 'open'));
-  for (const [label, value] of [['PROHIBITED', joined(e.prohibited)], ['RULES', s(e.roe)]]) if (value) lines.push(label + ': ' + value);
+  for (const [label, value] of [['PROHIBITED', joined(e.prohibited)], ['PROTECTED DATA (do not read, download or copy)', cap(joined(e.protected_data), 1000)], ['RULES', s(e.roe)]]) if (value) lines.push(label + ': ' + value);
   const text = lines.join('\\n');
   return text.length <= 4000 ? text : text.slice(0, 4000) + ' ...';
 }`;
@@ -88,7 +90,7 @@ add({ name: 'Copilot form', type: 'n8n-nodes-base.formTrigger', typeVersion: 2.6
 // 0b input: the lab console. POST with the shared secret in X-Lab-Secret (Header Auth credential):
 //   {task, target, requested_by, mode: "copilot" | "manual", command (manual mode), operator_model, judge_model,
 //    engagement: {name, version, scope_statement, roe, scope_in, scope_out, window_start, window_end, prohibited,
-//                 autorun_passive, autorun_active}}
+//                 protected_data, autorun_passive, autorun_active}}
 // It answers at once with the execution id, then the same pipeline runs; the console follows it through n8n's API
 // (GET /api/v1/executions/{id}?includeData=true) and can stop it (POST .../stop).
 const WEBHOOK_PATH = 'copilot-run';
@@ -99,6 +101,8 @@ add({ name: 'Respond: execution id', type: 'n8n-nodes-base.respondToWebhook', ty
 conn('Console webhook', 'Respond: execution id');
 // Everything that arrives is bounded and typed here (and the webhook's headers, the secret included, stay behind). Form
 // runs have the web form's two fields and nothing else: copilot mode, no engagement, the models from the environment.
+// Protected-data entries keep 256 characters, twice what the policy gate reads: a longer entry stays too long, so the
+// gate refuses it (every command then waits for a human) instead of enforcing a cut-off name that misses the listed one.
 code('Define task + target', 1, `
 const body = $json.body && typeof $json.body === 'object' && !Array.isArray($json.body) ? $json.body : null;
 let ran; try { ran = $('Console webhook').isExecuted; } catch (e) { ran = undefined; }
@@ -111,7 +115,8 @@ const mode = fromConsole && src.mode === 'manual' ? 'manual' : 'copilot';
 const e = fromConsole && src.engagement && typeof src.engagement === 'object' && !Array.isArray(src.engagement) ? src.engagement : null;
 const engagement = e ? { name: str(e.name, 120), version: Number.isInteger(e.version) ? e.version : null,
   scope_statement: str(e.scope_statement, 4000), roe: str(e.roe, 8000), scope_in: list(e.scope_in, 253), scope_out: list(e.scope_out, 253),
-  prohibited: list(e.prohibited, 64), window_start: str(e.window_start, 40) || null, window_end: str(e.window_end, 40) || null,
+  prohibited: list(e.prohibited, 64), protected_data: list(e.protected_data, 256),
+  window_start: str(e.window_start, 40) || null, window_end: str(e.window_end, 40) || null,
   autorun_passive: e.autorun_passive === true, autorun_active: e.autorun_active === true } : null;
 const task = str(src.task, 2000) || (mode === 'manual' ? 'Run the command the operator typed.' : '');
 return [{ json: { task, target: str(src.target, 253), source: fromConsole ? 'console' : 'form', requestedBy: fromConsole ? str(src.requested_by, 120) : '',
@@ -314,6 +319,7 @@ if (j.scopeOk === false) {
 } else {
   title = 'Authorized: waiting for your approval';
   if (pol.injectionSuspected) reasons.push('text aimed at the judge: ' + (pol.injectionHits || []).join(', '));
+  if ((pol.dataReview || []).length) reasons.push(...pol.dataReview);
   if ((pol.unverifiable || []).length) reasons.push('target the gate cannot verify: ' + pol.unverifiable.join('; '));
   if (pol.namesInScopeHost === false) reasons.push('the command names no in-scope host');
   if (!pol.readOnly) reasons.push('not in an enabled auto-run tier' + (pol.readOnlyReason ? ': ' + pol.readOnlyReason : ''));
@@ -369,12 +375,12 @@ conn('Form run? (blocked)', 'Result page: blocked', 'main', 0);      // console 
 // sticky notes --------------------------------------------------------------------------------
 const notes = [
   [x(0) - 20, 40, 360, 120, '#2E86DE', '1 - Input (web form)\nTask + one Target. Once published: http://localhost:5678/form/' + FORM_PATH + '. In the editor, Execute workflow opens a test form.'],
-  [x(0) - 20, -230, 360, 210, '#2E86DE', '1b - Input (lab console)\nPOST /webhook/' + WEBHOOK_PATH + ' with the X-Lab-Secret header (Header Auth credential): task, target, mode (copilot | manual + command), operator and judge model, and the engagement (scope, exclusions, window, prohibited tools, rules). Answers at once with the execution id; the console follows the run through the n8n API. Console runs skip the result pages.'],
+  [x(0) - 20, -230, 360, 210, '#2E86DE', '1b - Input (lab console)\nPOST /webhook/' + WEBHOOK_PATH + ' with the X-Lab-Secret header (Header Auth credential): task, target, mode (copilot | manual + command), operator and judge model, and the engagement (scope, exclusions, window, prohibited tools, protected data, rules). Answers at once with the execution id; the console follows the run through the n8n API. Console runs skip the result pages.'],
   [x(2) - 20, 40, 220, 150, '#10AC84', '2 - Scope gate (code)\nTarget must be in LAB_ALLOWLIST (the ceiling) AND the engagement scope, not excluded, inside the engagement window - before any model runs.'],
   [x(4) - 20, -230, 460, 150, '#F79F1F', '2a - Manual command\nThe operator typed the command in the console: no retrieval, no abliterated model. It goes through the same policy gate and judge as a proposal.'],
   [x(5) - 20, 40, 460, 120, '#2E86DE', '2b - Retrieval (RAG)\nTop-4 chunks from past writeups (Qdrant, collection writeups) as bounded background for the operator only; their addresses are neutralized. Empty/unreachable store -> runs without references.'],
   [x(7) - 20, 40, 460, 150, '#8854D0', '3 - Abliterated operator\nBuild operator prompt (task, target, rules of engagement, references) -> the model the console chose (glm-serve). SUGGESTS ONLY: no tools, it can never run a command.'],
-  [x(10) - 20, 560, 300, 190, '#10AC84', '4 - Policy gate (code)\nThe real boundary: scope (LAB_ALLOWLIST + engagement), denylist, the engagement\'s prohibited tools and window, auto-run tier (variable AND engagement), targets it cannot verify (placeholders, $VARS, -iL, integer/hex IPs, IPv6) and text aimed at the judge: those never auto-run and go to a human.'],
+  [x(10) - 20, 560, 300, 290, '#10AC84', '4 - Policy gate (code)\nThe real boundary: scope (LAB_ALLOWLIST + engagement), denylist, the engagement\'s prohibited tools and window, auto-run tier (variable AND engagement), targets it cannot verify (placeholders, $VARS, -iL, integer/hex IPs, IPv6) and text aimed at the judge: those never auto-run and go to a human. Protected data: a command that names a listed file, folder, share or table is blocked; bulk retrieval and names read at run time wait for a human while the list has entries.'],
   [x(12) - 20, 40, 460, 190, '#EE5253', '5 - Judge (regular model)\nBuild judge prompt refuses an abliterated judge. AUTHORIZE or REJECT the vetted command against the rules of engagement. Veto-only: the runner always executes policy.command, so a judge talked into AUTHORIZE (measured: it happens) cannot widen scope.'],
   [x(16) - 20, 380, 440, 170, '#2E86DE', '6 - Result page (form)\nShows the suggestion, the policy decision, the judge verdict and the next step. Form and model text are HTML-escaped; n8n also sanitizes the page. Blocked runs end here; authorized runs continue to the auto-run split.'],
   [x(18) - 20, -70, 480, 150, '#F79F1F', '7 - Auto-run + Execute\nRecon that cleared every gate auto-runs (LAB_AUTORUN_READONLY; add LAB_AUTORUN_ACTIVE_RECON for safe NSE + sqlmap-enumerate). Else -> Human approval (Wait). Execute DISABLED on import: set LAB_RUNNER_URL and enable it.'],

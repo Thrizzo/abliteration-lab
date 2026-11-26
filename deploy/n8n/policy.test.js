@@ -311,6 +311,203 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
   ok('execEscape: a netcat port check (-z) and a verbose connect are not escapes', !execEscape('nc', 'nc -z 10.10.10.5 22') && !execEscape('ncat', 'ncat -nv 10.10.10.5 80'));
 }
 
+// ---- protected data (engagement protected_data): a name in a data position blocks; local positions, names apart, bulk
+// retrieval and names read at run time wait for a human while the list has entries; an empty list changes nothing ----
+{
+  const { protectedEntry, protectedCheck, shellSegments, nameMatch, PD_BULK_NONE, READONLY_TOOLS } = require('./policy');
+  const outcome = (d) => (!d.allowed ? 'block' : d.autoRun ? 'pass' : 'human');
+  const NOW = Date.parse('2026-11-26T12:00:00Z');
+  const CORPUS_ALLOW = ['10.10.10.0/24', 'web01.lab', 'fs01.lab', 'hr.lab', 'payroll.lab', 'backup.lab'];
+  const pdCfg = (protected_data, extra = {}) => engagementConfig({ autorun_passive: true, autorun_active: true, protected_data, ...extra },
+    { allowlist: CORPUS_ALLOW, autoRunReadOnly: true, autoRunActiveRecon: true, now: NOW });
+  const targetOf = (c) => extractTargets(c).find((h) => targetInScope(h, CORPUS_ALLOW)) || '10.10.10.5';
+  const pd = (c, list, extra) => decide({ command: c, target: targetOf(c) }, pdCfg(list, extra));
+
+  // entries: the vectors the console shares (copilot/tests/fixtures/protected_vectors.json); the gate's key is its fold
+  // with \ read as /, rebuilt from the compiled names
+  const vectors = require('../../copilot/tests/fixtures/protected_vectors.json');
+  const keyOf = (c) => (c.lead ? '/' : '') + c.toks.map((t, i) => (i ? c.seps[i] : '') + t).join('') + (c.trail ? '/' : '');
+  const vecOff = vectors.filter((v) => {
+    const c = protectedEntry(v.in);
+    if (v.ok) return !!c.error || keyOf(c) !== v.key;
+    return v.gate === 'refuses' ? !c.error : !!c.error;      // "accepts": only the console refuses it (it is stricter)
+  }).map((v) => JSON.stringify(v.in));
+  ok(`protectedEntry: ${vectors.length} shared vectors (console-accepted entries compile to the same key; refusals match; off: ${vecOff.join(', ') || 'none'})`,
+    vectors.length >= 59 && vecOff.length === 0);
+  ok('protectedEntry: names, a leading and trailing slash, words of one name, collapsed *', (() => {
+    const e = protectedEntry(' \\Users\\JDoe\\My   Documents\\** ');
+    return e.entry === '\\Users\\JDoe\\My Documents\\**' && e.toks.join('|') === 'users|jdoe|my|documents|*' && e.seps.join('|') === '|/|/| |/'
+      && e.lead && !e.trail && protectedEntry('/backup/').trail && !protectedEntry('backup').lead;
+  })());
+
+  // the bash subset: the arguments each program gets
+  const segs = (c) => shellSegments(c).map((s) => s.words.map((w) => (w.redir ? w.redir + ':' : '') + w.text));
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  ok('shellSegments: joined quotes, a backslash escape, $\'\\x63\', and \\" with $(...) inside double quotes', same(segs('curl http://h/cust""omers.csv'), [['curl', 'http://h/customers.csv']])
+    && same(segs('curl http://h/cust\\omers.csv'), [['curl', 'http://h/customers.csv']]) && same(segs("echo $'\\x63'"), [['echo', 'c']])
+    && same(segs('echo "a\\"b $(echo x y)"'), [['echo', 'a"b $(echo x y)']]));
+  ok('shellSegments: a comment is dropped (a # inside a word is not one); an escaped & and a quoted ; split nothing',
+    same(segs('curl -s http://h/ # customers.csv'), [['curl', '-s', 'http://h/']]) && same(segs('curl http://h/#x'), [['curl', 'http://h/#x']])
+    && same(segs('wget http://h/?a=1\\&curl -r'), [['wget', 'http://h/?a=1&curl', '-r']]) && same(segs("smbclient //h/s -c 'cd x; mget *'"), [['smbclient', '//h/s', '-c', 'cd x; mget *']]));
+  ok('shellSegments: | sets pipedIn (|| does not); 2>/dev/null and 0< req.txt drop the descriptor (a quoted 2 stays)',
+    same(shellSegments('cat r.txt | nc h 80').map((s) => s.pipedIn), [false, true]) && same(shellSegments('a || b').map((s) => s.pipedIn), [false, false])
+    && same(segs('nmap h 2>/dev/null'), [['nmap', 'h', 'out:/dev/null']]) && same(segs('nc h 80 0< req.txt'), [['nc', 'h', '80', 'in:req.txt']])
+    && same(segs("echo '2'>x"), [['echo', '2', 'out:x']]));
+  ok('shellSegments: a here-string word and a heredoc body word (appended to the declaring command)', same(segs("nc h 80 <<< 'GET /x'"), [['nc', 'h', '80', 'herestr:GET /x']])
+    && same(segs('ftp -n h <<EOF\nget customers.csv\nEOF\nnmap h'), [['ftp', '-n', 'h', 'heredoc:EOF', 'heredocBody:get customers.csv'], ['nmap', 'h']])
+    && same(segs('cat <<-X | nc h 80\n\tGET /a\n\tX'), [['cat', 'heredoc:X', 'heredocBody:GET /a'], ['nc', 'h', '80']]));
+  ok('shellSegments: unquoted cust{o,}mers sets unqBrace, quoted \'{a,b}\' and a lone {x} do not',
+    shellSegments('wget http://h/cust{o,}mers.csv')[0].words[1].unqBrace === true && shellSegments("echo '{a,b}'")[0].words[1].unqBrace === false
+    && shellSegments('echo {x}')[0].words[1].unqBrace === false);
+
+  // one name against one command component
+  const MATCH = [['customers', 'shop.customers'], ['customers.csv', 'customers.csv.gz'], ['customers*', 'customers.csv'], ['*.kdbx', 'it.kdbx.bak'], ['hr', 'hr$']];
+  const MISS = [['customers.csv', 'mycustomers.csv'], ['*.kdbx', '.kdbx'], ['hr$', 'hr'], ['.env', 'config.env']];
+  ok('nameMatch: dot-aligned runs, * needs a character when it starts a name, HR covers HR$ (not the reverse)',
+    MATCH.every(([t, c]) => nameMatch(t, c, false, false)) && MISS.every(([t, c]) => !nameMatch(t, c, false, false))
+    && !nameMatch('backup', 'backup.zip', true, true) && nameMatch('backup', 'backup', true, true));
+
+  // the adjudicated corpus (deploy/n8n/protected_corpus.json): block = not allowed, pass = auto-run, else a human
+  const corpus = require('./protected_corpus.json');
+  const counts = { block: 0, human: 0, pass: 0 };
+  corpus.forEach((k) => { counts[k.expect]++; });
+  ok(`protected corpus: ${corpus.length} cases with unique ids (block ${counts.block}, human ${counts.human}, pass ${counts.pass})`,
+    corpus.length === 107 && new Set(corpus.map((k) => k.id)).size === 107 && counts.block === 37 && counts.human === 38 && counts.pass === 32);
+  for (const want of ['block', 'human', 'pass']) {
+    const off = corpus.filter((k) => k.expect === want).filter((k) => {
+      const d = pd(k.command, k.patterns), got = outcome(d);
+      const text = got === 'block' ? d.reasons.join(' | ') : [...d.dataReview, d.readOnlyReason, d.activeReconReason, ...d.unverifiable].join(' | ');
+      const bad = got !== want || (want !== 'pass' && !text.includes(k.reason_contains));
+      if (bad) console.log(`   ${k.id}: got ${got} (${text.slice(0, 160)})`);
+      return bad;
+    }).map((k) => k.id);
+    ok(`protected corpus: every "${want}" case gives ${want} with its reason (off: ${off.join(', ') || 'none'})`, off.length === 0);
+  }
+
+  // an empty list changes nothing: the same decision as an engagement without the key, apart from the three new fields
+  const strip = ({ protectedData, dataReview, protectedEntries, ...rest }) => JSON.stringify(rest);
+  const emptyOff = corpus.filter((k) => !k.id.startsWith('fix-')).filter((k) => {
+    const target = targetOf(k.command);
+    const a = decide({ command: k.command, target }, pdCfg([])), b = decide({ command: k.command, target }, pdCfg(undefined));
+    return strip(a) !== strip(b) || [a, b].some((d) => d.protectedData.length || d.dataReview.length || d.protectedEntries !== 0);
+  }).map((k) => k.id);
+  ok(`protected data: an empty list decides like no list (corpus commands; off: ${emptyOff.join(', ') || 'none'})`, emptyOff.length === 0);
+  ok('protected data: without an engagement nothing is checked', (() => {
+    const c = engagementConfig(null, { allowlist: ['10.10.10.0/24'] });
+    const d = decide({ command: 'curl -s http://10.10.10.5/backup/customers.csv', target: '10.10.10.5' }, c);
+    return c.protectedData === undefined && d.allowed && d.protectedData.length === 0 && d.dataReview.length === 0 && d.protectedEntries === 0;
+  })());
+
+  // wiring: the fields, their order and bounds, and where the block line sits among the reasons
+  ok('decide(): protectedData lists the entries as written, in list order', (() => {
+    const d = pd('curl -s http://10.10.10.5/backup/customers.csv', ['Customers.CSV', 'nothing.txt', '/backup/']);
+    return !d.allowed && same(d.protectedData, ['Customers.CSV', '/backup/']) && same(d.reasons, ['command names protected data: Customers.CSV, /backup/']);
+  })());
+  ok('decide(): dataReview is ordered (local, apart, bulk, run time, cannot check) and capped at 6; protectedEntries counts unreadable entries', (() => {
+    const d = pd('wget -r -i urls.txt -o customers.csv http://10.10.10.5/HR$/x/Payroll/cust{o,}mers.csv http://10.10.10.5/CUSTOM~1.CSV',
+      ['customers.csv', 'HR$/Payroll', '%41', '%42']);
+    const heads = ['protected data only in a local position: customers.csv (output file)', 'protected data named apart: HR$/Payroll',
+      'bulk retrieval while data is protected: wget -r/-m/-p (recursion)', 'names read at run time while data is protected: wget -i (URLs from a file)',
+      'cannot check for protected data: the entry "%41"', 'cannot check for protected data: the entry "%42"'];
+    return d.allowed && !d.autoRun && d.dataReview.length === 6 && heads.every((h, i) => d.dataReview[i].startsWith(h)) && d.protectedEntries === 4;
+  })());
+  ok('decide(): the block line comes after the prohibited reason and before the window reason', (() => {
+    const d = pd('curl -s http://10.10.10.5/backup/customers.csv', ['customers.csv'], { prohibited: ['curl'], window_end: '2026-11-25T18:00:00Z' });
+    return d.reasons.length === 3 && d.reasons[0].startsWith('prohibited by the rules of engagement') && d.reasons[1] === 'command names protected data: customers.csv'
+      && d.reasons[2].startsWith('outside the engagement window');
+  })());
+  ok('decide(): "(after decoding)" marks only an entry seen after decoding', (() => {
+    const d = pd('curl -s http://10.10.10.5/backup/customers%2Ecsv', ['customers.csv', '/backup/']);
+    return same(d.reasons, ['command names protected data: customers.csv (after decoding), /backup/']) && same(d.protectedData, ['customers.csv', '/backup/']);
+  })());
+  ok('decide(): six hit entries show five and " and 1 more"', (() => {
+    const d = pd('curl -s http://10.10.10.5/aa/bb/cc/dd/ee/ff.csv', ['aa', 'bb', 'cc', 'dd', 'ee', 'ff.csv']);
+    return d.protectedData.length === 6 && same(d.reasons, ['command names protected data: aa, bb, cc, dd, ee and 1 more']);
+  })());
+  ok('decide(): a hit blocks even when there are review lines, which stay in dataReview', (() => {
+    const d = pd("smbclient //10.10.10.5/HR -N -c 'prompt OFF; recurse ON; mget *'", ['HR']);
+    return !d.allowed && d.protectedData.join() === 'HR' && d.dataReview.some((r) => r.includes('smbclient mget/recurse/tar'));
+  })());
+
+  // an entry the gate cannot read (sent around the console) fails closed: every command waits for a human
+  ok('protected data: an unreadable entry (%41) makes plain recon wait for a human', (() => {
+    const d = pd('curl -s http://10.10.10.5/robots.txt', ['%41']);
+    const clean = pd('curl -s http://10.10.10.5/robots.txt', ['customers.csv']);
+    return d.allowed && !d.autoRun && d.protectedEntries === 1 && d.dataReview.some((r) => r.startsWith('cannot check for protected data: the entry'))
+      && clean.autoRun === true;
+  })());
+
+  // cost: linear in the command; 64 adversarial globs on ~3,900 characters (the check alone: extractTargets has its own
+  // cost); past 4000 characters a human, unparsed
+  {
+    const globs = Array.from({ length: 64 }, (_, i) => `*a*b*c*d*e*f*g*${i}x*y*z*`);
+    const INPUTS = {
+      'commas inside an open brace': 'curl -s http://10.10.10.5/x -H {' + ','.repeat(3900),
+      '"a." repeated': 'curl -s http://10.10.10.5/' + 'a.'.repeat(1980),
+      'words repeated': 'curl -s http://10.10.10.5/ ' + 'ab/cd.ef '.repeat(430),
+      '"%25" repeated': 'curl -s http://10.10.10.5/' + '%25'.repeat(1300),
+    };
+    for (const [name, c] of Object.entries(INPUTS)) {
+      let best = Infinity;
+      for (let r = 0; r < 3; r++) { const t0 = Date.now(); protectedCheck(c, globs, ['10.10.10.5']); best = Math.min(best, Date.now() - t0); }
+      ok(`protected data: the check on ${name} (${c.length} characters, 64 glob entries) takes ${best} ms (< 100)`, c.length <= 4000 && best < 100);
+    }
+    const long = pd('curl -s http://10.10.10.5/' + 'a'.repeat(5000), ['customers.csv']);
+    ok('protected data: a 5,000-character command waits for a human, unparsed', long.allowed && !long.autoRun
+      && same(long.dataReview, ['cannot check for protected data: command longer than 4000 characters']));
+  }
+
+  // every READONLY_TOOLS member was reviewed: no bulk form (PD_BULK_NONE), or a row whose risky form a probe shows
+  {
+    const NONE = ['masscan', 'ping', 'fping', 'traceroute', 'tracepath', 'arp', 'host', 'dig', 'nslookup', 'whois', 'dnsrecon', 'dnsenum', 'fierce',
+      'amass', 'subfinder', 'theharvester', 'sslscan', 'sslyze', 'testssl.sh', 'gobuster', 'enum4linux', 'enum4linux-ng', 'ldapsearch', 'rpcclient',
+      'rpcinfo', 'showmount', 'snmpwalk', 'onesixtyone', 'nbtscan', 'ike-scan', 'netstat', 'ss', 'nc', 'ncat'];
+    const ROWS = {
+      wget: 'wget -r http://10.10.10.5/files/', curl: "curl -s 'http://10.10.10.5/[1-9].txt'", httpx: 'httpx -u http://10.10.10.5 -path paths.txt',
+      whatweb: 'whatweb -i urls.txt', wafw00f: 'wafw00f -i urls.txt', nikto: 'nikto -h http://10.10.10.5 -Save loot',
+      feroxbuster: 'feroxbuster -u http://10.10.10.5', dirb: 'dirb http://10.10.10.5/', dirbuster: 'dirbuster -u http://10.10.10.5/',
+      ffuf: 'ffuf -u http://10.10.10.5/FUZZ -w w.txt -recursion', wfuzz: 'wfuzz -R 2 -w w.txt http://10.10.10.5/FUZZ',
+      smbmap: 'smbmap -H 10.10.10.5 -R Data -A csv', smbclient: "smbclient //10.10.10.5/Data -N -c 'mget *'", nmap: 'nmap --script safe 10.10.10.5',
+      rustscan: 'rustscan -a 10.10.10.5 -- --script safe',
+    };
+    ok(`protected data: PD_BULK_NONE is the reviewed list (${PD_BULK_NONE.size} tools)`, same([...PD_BULK_NONE].sort(), [...NONE].sort()));
+    const unreviewed = [...READONLY_TOOLS].filter((t) => PD_BULK_NONE.has(t) === (t in ROWS));
+    ok(`protected data: every READONLY_TOOLS member has no bulk form or a bulk row (unreviewed or both: ${unreviewed.join(', ') || 'none'})`,
+      unreviewed.length === 0 && [...PD_BULK_NONE].every((t) => READONLY_TOOLS.has(t)));
+    const silent = Object.entries(ROWS).filter(([, c]) => !protectedCheck(c, ['customers.csv'], ['10.10.10.5']).review
+      .some((r) => /^(bulk retrieval|names read at run time) while data is protected: /.test(r))).map(([t]) => t);
+    ok(`protected data: each bulk row fires on its risky form (silent: ${silent.join(', ') || 'none'})`, silent.length === 0);
+  }
+
+  // a risky option counts in any spelling, not only the plain one a row names, and options that load settings from a file
+  // wait too; the compliant forms next to them still auto-run
+  const RISKY = [
+    ['sudo VAR=1 wget -r http://10.10.10.5/files/', 'wget -r/-m/-p (recursion)'],
+    ['sudo HOME=/tmp/x wget http://10.10.10.5/files/', 'HOME points a tool at another config'],
+    ["smbclient //10.10.10.20/Data -Nc 'mget *'", 'smbclient mget/recurse/tar'],
+    ["smbclient //10.10.10.20/Data -N -c'mget *'", 'smbclient mget/recurse/tar'],
+    ['wget -qe recursive=on http://10.10.10.5/files/', 'wget --config/-e'],
+    ['wget --execute robots=off --exe=recursive=on http://10.10.10.5/files/', 'wget --config/-e'],
+    ["curl -s -O '10.10.10.5/billing/invoice-[1-100].pdf'", 'curl URL glob'],
+    ['whatweb -vi urls.txt 10.10.10.5', 'whatweb -i (URLs from a file)'],
+    ['wafw00f -iurls.txt http://10.10.10.5', 'wafw00f -i (URLs from a file)'],
+    ['wfuzz -cR 2 -w /usr/share/wordlists/dirb/common.txt http://10.10.10.5/FUZZ', 'wfuzz -R (recursion)'],
+    ['feroxbuster -u http://10.10.10.5 -d 1 --depth 3 -w /usr/share/wordlists/dirb/common.txt', 'feroxbuster recursion'],
+    ['httpx -u http://10.10.10.5 -config x.yaml', 'httpx -config'],
+    ['wfuzz --recipe r.json -w /usr/share/wordlists/dirb/common.txt http://10.10.10.5/FUZZ', 'wfuzz --recipe'],
+    ['nikto -h http://10.10.10.5 -config /tmp/nikto.conf', 'nikto -config'],
+    ['nmap -sC --datadir /tmp/x 10.10.10.5', 'nmap --datadir/--resume'],
+    ['rustscan -a 10.10.10.5 --scripts custom', 'rustscan --config-path/--scripts'],
+  ];
+  const riskyOff = RISKY.filter(([c, label]) => { const d = pd(c, ['customers.csv']); return d.autoRun || !d.dataReview.some((r) => r.includes(label)); }).map(([c]) => c);
+  ok(`protected data: risky options in any spelling and settings files wait for a human (off: ${riskyOff.join(' | ') || 'none'})`, riskyOff.length === 0);
+  const COMPLIANT = ['feroxbuster -u http://10.10.10.5 --depth 1 -w /usr/share/wordlists/dirb/common.txt', 'wget -e robots=off -q -O- http://10.10.10.5/index.html',
+    "smbclient //10.10.10.20/Data -N -c 'ls'", "curl -s -H 'Host: web01.lab' http://10.10.10.5/", 'nmap -sV --reason --data-length 24 10.10.10.5',
+    'rustscan -a 10.10.10.5 --scripts default -- -sC', 'whatweb -a 3 -v http://10.10.10.5', 'wfuzz -c -z file,/usr/share/wordlists/dirb/common.txt --hc 404 http://10.10.10.5/FUZZ'];
+  const compliantOff = COMPLIANT.filter((c) => pd(c, ['customers.csv']).autoRun !== true);
+  ok(`protected data: their compliant forms still auto-run (off: ${compliantOff.join(' | ') || 'none'})`, compliantOff.length === 0);
+}
+
 // ---- copilot/judge_cases.json: every command the judge eval asks about passes these gates, so only the judge can stop it ----
 {
   const jc = require('../../copilot/judge_cases.json');
@@ -320,6 +517,18 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     return !d.allowed || d.readOnly !== k.read_only;
   }).map((k) => k.id);
   ok(`judge eval cases reach the judge (${jc.cases.length} cases; off: ${off.join(', ') || 'none'})`, off.length === 0);
+  // with realistic protected data, only the three measured personal-data misses change, all to a block; no AUTHORIZE case
+  const LISTS = { 'recon-only': ['customers.csv', 'HR', 'customers'], 'internal-ad': ['HR$', '/srv/backup/'], 'webapp-manual': ['customers', 'users'] };
+  const base = { allowlist: jc.allowlist, autoRunReadOnly: true, autoRunActiveRecon: true };
+  const outcome = (d) => (!d.allowed ? 'block' : d.autoRun ? 'auto' : 'human');
+  const changes = jc.cases.map((k) => {
+    const e = { ...jc.engagements[k.engagement], prohibited: [], autorun_passive: true, autorun_active: true };
+    const a = decide({ command: k.command, target: k.target }, engagementConfig({ ...e, protected_data: [] }, base));
+    const b = decide({ command: k.command, target: k.target }, engagementConfig({ ...e, protected_data: LISTS[k.engagement] }, base));
+    return { id: k.id, expect: k.expect, from: outcome(a), to: outcome(b) };
+  }).filter((c) => c.from !== c.to);
+  ok(`judge eval cases with protected data: only the three measured misses change, to a block (${changes.map((c) => `${c.id} ${c.from} -> ${c.to}`).join(', ')})`,
+    changes.map((c) => c.id).sort().join() === 'recon-pii-csv,recon-pii-mysqldump,recon-pii-share' && changes.every((c) => c.to === 'block' && c.expect === 'REJECT'));
 }
 
 console.log(failed ? `\n${failed} test(s) FAILED` : '\nall policy tests passed');

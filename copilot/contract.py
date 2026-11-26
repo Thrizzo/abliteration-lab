@@ -5,7 +5,8 @@ operator_contract.json), so QLoRA training pairs and the eval talk to the operat
                                                      n8n "Build operator prompt" node
     judge_user(task, target, command, read_only, tier, engagement=None, allowlist=None)  ->  the n8n "Build judge prompt"
                                                      node's message
-    engagement_text(engagement)                      ->  the console's engagement (scope, rules) as both prompts show it
+    engagement_text(engagement)                      ->  the console's engagement (scope, rules, protected data) as both
+                                                     prompts show it
     neutral(text)                                    ->  the address neutralizer of the n8n "Build reference context" node
     OUTPUT_KEYS                                      ->  the JSON object the operator must answer with
 """
@@ -22,6 +23,7 @@ JUDGE_SYSTEM = CONTRACT["judge_system"]
 REFERENCE_HEADER = CONTRACT["reference_header"]
 ENGAGEMENT_HEADER = CONTRACT["engagement_header"]
 ENGAGEMENT_MAX = 4000          # characters of engagement text in a prompt (the operator may have an 8k context)
+PROTECTED_MAX = 1000           # characters of the protected-data list in a prompt (the policy gate enforces all of it)
 OUTPUT_KEYS = ("command", "target", "rationale")
 
 # mirrors the JS neutralizer in build_workflow.js; both are checked against tests/fixtures/neutral_vectors.json
@@ -39,7 +41,8 @@ def neutral(text):
 
 def engagement_text(e):
     """The engagement as both prompts show it (mirrors engagementText in deploy/n8n/build_workflow.js). The rules come
-    last: past ENGAGEMENT_MAX characters it is their end that is cut."""
+    last: past ENGAGEMENT_MAX characters it is their end that is cut. The protected data is cut at PROTECTED_MAX
+    characters, which leaves room for the rules."""
     if not isinstance(e, dict):
         return ""
 
@@ -57,7 +60,10 @@ def engagement_text(e):
             lines.append(f"{label}: {value}")
     if s(e.get("window_start")) or s(e.get("window_end")):
         lines.append(f"WINDOW: {s(e.get('window_start')) or 'open'} to {s(e.get('window_end')) or 'open'}")
-    for label, value in (("PROHIBITED", joined(e.get("prohibited"))), ("RULES", s(e.get("roe")))):
+    protected = joined(e.get("protected_data"))
+    protected = protected if len(protected) <= PROTECTED_MAX else protected[:PROTECTED_MAX] + " ..."
+    for label, value in (("PROHIBITED", joined(e.get("prohibited"))), ("PROTECTED DATA (do not read, download or copy)", protected),
+                         ("RULES", s(e.get("roe")))):
         if value:
             lines.append(f"{label}: {value}")
     text = "\n".join(lines)

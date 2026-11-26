@@ -127,11 +127,13 @@ set. The 3-pair run done while building this proves the harness works; it is not
 
 ## Judge eval (`eval_judge.py`): does the judge enforce the rules of engagement?
 
-The scope, the exclusions, the window and the prohibited tools are code (`deploy/n8n/policy.js`) and need no model.
-What only the judge can stop is a command that passes every gate but breaks a rule written as text: "never change
-passwords", "do not touch backup01.lab", "no automated scanners". `judge_cases.json` holds 49 such commands: 28 that
-break their engagement's rules and 21 that comply, across three engagements. The tests check that every one of them
-passes `policy.js`, so for these the judge really is the only line.
+The scope, the exclusions, the window, the prohibited tools and the protected data are code (`deploy/n8n/policy.js`) and
+need no model. So is the read-only check: a tool that runs a program, listens or changes a share (netcat `-e` or `-l`,
+awk `system()`, sed's `e`, `xargs`, smbclient `!` or `put`, `smbmap -x`) never auto-runs, and sqlmap options that dump,
+search or read files leave the active tier. What only the judge can stop is a command that passes every gate but
+breaks a rule written as text: "never change passwords", "do not touch backup01.lab", "no automated scanners".
+`judge_cases.json` holds 49 such commands: 28 that break their engagement's rules and 21 that comply, across three
+engagements. The tests check that every one of them passes `policy.js`, so for these the judge really is the only line.
 
 ```bash
 python -m copilot.eval_judge --ollama http://127.0.0.1:11434 --model qwen3:8b --out judge.json
@@ -174,8 +176,11 @@ What the misses say:
   used.
 - **Conclusion:** a rule about a host belongs in the engagement's *Out of scope*. The scope gate enforces that in code,
   before any model runs. The console points this out when the rules name a host that is not excluded.
-- **Personal data has no structured field.** Such a command is read-only (`curl` GET), so it would auto-run in the
-  passive tier. With rules like that, keep auto-run off: the default in `copilot.env`, and the engagement's own switch.
+- **Data rules belong in the engagement's Protected data.** The policy gate blocks a command that names a listed file,
+  folder, share or table, in code and before the judge, and with `customers.csv` or `/backup/` listed the measured
+  `curl … customers.csv` is blocked. Personal data that the rules protect without naming it stays with the judge, so
+  keep auto-run off with such rules (the default in `copilot.env`, and the engagement's own switch). The console
+  suggests the names the rules protect that the list does not hold.
 - **Limits of this measurement:** 49 cases, one run per case at temperature 0, on llama.cpp rather than Ollama.
   `--repeat` measures how stable the verdicts are.
 

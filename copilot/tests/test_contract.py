@@ -15,7 +15,8 @@ NODE = shutil.which("node")
 
 
 def node_eval(js):
-    return subprocess.run([NODE, "-e", js], capture_output=True, text=True, check=True).stdout
+    # node always writes UTF-8; the locale's encoding would garble names such as Gehälter.xlsx
+    return subprocess.run([NODE, "-e", js], capture_output=True, encoding="utf-8", check=True).stdout
 
 
 class Neutralizer(unittest.TestCase):
@@ -43,7 +44,11 @@ console.log(JSON.stringify(out));"""
 ENGAGEMENTS = [None, {}, {"name": "ACME internal", "version": 4, "scope_statement": "Only the web tier.", "scope_in": ["10.10.11.0/28", "box.htb"],
                           "scope_out": ["10.10.11.1"], "window_start": "2026-11-26T08:00:00+01:00", "window_end": None,
                           "prohibited": ["hydra", "-T5"], "roe": "No DoS.\nStop on PII: report it, do not copy it."},
-               {"name": "long", "roe": "r" * 9000}, {"scope_out": [" ", "10.10.11.9 "], "roe": "  "}]
+               {"name": "long", "roe": "r" * 9000}, {"scope_out": [" ", "10.10.11.9 "], "roe": "  "},
+               {"name": "data", "protected_data": ["customers.csv", "\\Users\\jdoe\\Documents", "HR$", "Gehälter.xlsx"], "prohibited": ["hydra"],
+                "roe": "Stop on PII."},
+               {"protected_data": ["x" * 40 + str(i) for i in range(70)], "roe": "r"}]
+PROTECTED = "PROTECTED DATA (do not read, download or copy): "
 
 
 class OperatorPrompt(unittest.TestCase):
@@ -89,6 +94,15 @@ console.log(JSON.stringify(new Function('$input','$json','$','$env', code)({{}},
         long = engagement_text(ENGAGEMENTS[3])
         self.assertEqual(len(long), 4000 + 4)
         self.assertTrue(long.endswith("r ..."))
+        # protected data: after PROHIBITED, before RULES; cut at 1000 characters; no line without entries
+        self.assertIn("\nPROHIBITED: hydra\n" + PROTECTED + "customers.csv, \\Users\\jdoe\\Documents, HR$, Gehälter.xlsx\nRULES: Stop on PII.",
+                      engagement_text(ENGAGEMENTS[5]))
+        capped, rules = engagement_text(ENGAGEMENTS[6]).split("\n")
+        self.assertEqual(rules, "RULES: r")
+        self.assertTrue(capped.startswith(PROTECTED) and capped.endswith(" ..."), capped)
+        self.assertEqual(len(capped) - len(PROTECTED), 1004)
+        for empty in ([], [" ", ""], None, "customers.csv"):
+            self.assertEqual(engagement_text({"protected_data": empty, "roe": "r"}), "RULES: r", empty)
 
     def test_user_message_shape(self):
         self.assertEqual(operator_user("T", "10.0.0.1"), "TASK: T\nTARGET (authorized, in scope): 10.0.0.1")

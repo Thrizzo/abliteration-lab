@@ -296,6 +296,72 @@ for (const n of wf.nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   ok('re-check: the window closed meanwhile -> blocked, nothing staged', late.allowed === false && late.staged === '' && late.reasons.some((r) => r.startsWith('outside the engagement window')), late.reasons);
 }
 
+// ---- protected data: bounded on the way in, enforced by the policy gate and its re-check, in both prompts, on the page ----
+{
+  const env = { LAB_ALLOWLIST: '10.10.11.0/24', LAB_AUTORUN_READONLY: 'true' };
+  const E = { name: 'ACME data', version: 5, scope_in: ['10.10.11.0/28'], prohibited: ['hydra'], protected_data: ['customers.csv'],
+    roe: 'Stop on PII.', autorun_passive: true, autorun_active: false };
+  const hook = (engagement) => ({ headers: { 'x-lab-secret': 's3cret' }, params: {}, query: {}, body: { task: 'Enumerate the web root', target: '10.10.11.5', engagement } });
+  const define = (engagement) => run('Define task + target', { json: hook(engagement), executed: ['Console webhook'] })[0].json;
+  const pd = (v) => define({ ...E, protected_data: v }).engagement.protected_data;
+  const many = pd(Array.from({ length: 80 }, (_, i) => `export${i}.csv`));
+  ok('define: protected_data keeps 64 entries of at most 256 characters, drops blanks; a string is no list', many.length === 64 && many[63] === 'export63.csv'
+    && pd(['p'.repeat(300)])[0].length === 256 && JSON.stringify(pd([' ', ' customers.csv ', '', null])) === '["customers.csv"]'
+    && JSON.stringify(pd('customers.csv')) === '[]' && JSON.stringify(pd(undefined)) === '[]', many);
+
+  // the policy gate reads the list the console sent; without it the same commands auto-run
+  const scope = run('Scope gate', { json: define(E), env })[0].json;
+  const policy = (command, engagement = scope.engagement) => run('Policy gate', { json: { ...scope, engagement, proposal: { command, target: '10.10.11.5' } }, env })[0].json;
+  const noList = { ...scope.engagement, protected_data: [] };
+  const measured = 'curl -s http://10.10.11.5/backup/customers.csv -o customers.csv';
+  const blocked = policy(measured).policy;
+  ok('policy: the measured download is blocked with the reason (it auto-runs without the list); 1 entry in force', blocked.allowed === false
+    && JSON.stringify(blocked.reasons) === '["command names protected data: customers.csv"]' && JSON.stringify(blocked.protectedData) === '["customers.csv"]'
+    && blocked.protectedEntries === 1 && policy(measured, noList).policy.autoRun === true, blocked);
+  const bulk = policy('wget -r -np http://10.10.11.5/files/');
+  ok('policy: a recursive wget is allowed but waits for a human, the bulk reason first (it auto-runs without the list)', bulk.policy.allowed === true
+    && bulk.policy.autoRun === false && bulk.policy.dataReview[0].startsWith('bulk retrieval while data is protected')
+    && policy('wget -r -np http://10.10.11.5/files/', noList).policy.autoRun === true, bulk.policy);
+  const robots = policy('curl -s http://10.10.11.5/robots.txt').policy;
+  ok('policy: a command that names no protected data still auto-runs', robots.autoRun === true && robots.dataReview.length === 0 && robots.protectedEntries === 1, robots);
+  const unreadable = policy('curl -s http://10.10.11.5/robots.txt', define({ ...E, protected_data: ['p'.repeat(300)] }).engagement).policy;
+  ok('policy: an entry kept at 256 characters is still too long for the gate: refused, so every command waits for a human', unreadable.allowed === true
+    && unreadable.autoRun === false && /^cannot check for protected data: the entry "p{40}" cannot be read \(longer than 128 characters\)$/.test(unreadable.dataReview[0]), unreadable.dataReview);
+
+  // the judge cannot lift the wait: AUTHORIZE stages the vetted command for a human, and the page says why (no judge model
+  // is named here, so the node uses its default)
+  const jp = run('Build judge prompt', { json: bulk, env })[0].json;
+  const judged = run('Apply judge decision', { json: { text: 'AUTHORIZE' }, nodesOut: { 'Build judge prompt': jp }, env })[0].json;
+  ok('judge: AUTHORIZE with a dataReview line -> allowed, no auto-run, the vetted command staged', judged.allowed === true && judged.autoRun === false
+    && judged.staged === 'wget -r -np http://10.10.11.5/files/', judged);
+  const page = run('Result text (authorized)', { json: judged })[0].json;
+  ok('result: the waiting page lists the dataReview lines', page.resultTitle === 'Authorized: waiting for your approval'
+    && bulk.policy.dataReview.length > 0 && bulk.policy.dataReview.every((r) => page.resultMessage.includes('\n- ' + r)), page.resultMessage);
+  // the re-check runs the same gate: an item that passed without the list is blocked once the engagement carries it
+  const jpLate = { ...run('Build judge prompt', { json: policy(measured, noList), env })[0].json, engagement: scope.engagement };
+  const late = run('Apply judge decision', { json: { text: 'AUTHORIZE' }, nodesOut: { 'Build judge prompt': jpLate }, env })[0].json;
+  ok('re-check: protected data blocks after the judge too, nothing staged', late.allowed === false && late.staged === ''
+    && late.reasons.includes('command names protected data: customers.csv'), late.reasons);
+
+  // both prompts carry the list after PROHIBITED and before RULES, cut at 1000 characters; an empty list adds nothing
+  const prompts = (engagement) => {
+    const item = { ...scope, engagement, references: '', refCount: 0 };
+    const pg = run('Policy gate', { json: { ...item, proposal: { command: 'curl -s http://10.10.11.5/robots.txt', target: '10.10.11.5' } }, env })[0].json;
+    return [run('Build operator prompt', { json: item, env })[0].json.operatorPrompt, run('Build judge prompt', { json: pg, env })[0].json.judgePrompt];
+  };
+  const listed = prompts(define({ ...E, protected_data: ['customers.csv', '/backup/'] }).engagement);
+  ok('prompts: operator and judge read the list after PROHIBITED, before RULES', listed.every((p) => p.includes('\nPROHIBITED: hydra\nPROTECTED DATA (do not read, download or copy): customers.csv, /backup/\nRULES:')), listed);
+  const without = { ...E };
+  delete without.protected_data;
+  ok('prompts: no line for an empty list, byte for byte the prompts of an engagement without the key', prompts(without).every((p) => !p.includes('PROTECTED DATA'))
+    && JSON.stringify(prompts({ ...E, protected_data: [] })) === JSON.stringify(prompts(without)) && JSON.stringify(prompts({ ...E, protected_data: [' '] })) === JSON.stringify(prompts(without)));
+  const label = 'PROTECTED DATA (do not read, download or copy): ';
+  const value = (p) => (p.split('\n').find((l) => l.startsWith(label)) || '').slice(label.length);
+  const capped = prompts({ ...E, protected_data: Array.from({ length: 70 }, (_, i) => 'x'.repeat(38) + String(i).padStart(3, '0')) });
+  ok('prompts: 70 entries of 41 characters -> a value of 1004 characters ending in " ...", the rules still follow',
+    capped.every((p) => value(p).length === 1004 && value(p).endsWith(' ...') && p.includes(' ...\nRULES: Stop on PII.')), capped.map((p) => value(p).length));
+}
+
 // ---- manual mode: the operator's command takes the same policy gate and judge, no model, no retrieval ----
 {
   const env = { LAB_ALLOWLIST: '10.10.11.0/24' };

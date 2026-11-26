@@ -287,7 +287,8 @@ the console refuses such a judge (400), and n8n's "Build judge prompt" node refu
 **Scope and rules of engagement.** The **Engagement** card holds what the client agreed to:
 - **Fields:** a name, the scope statement, the rules of engagement (free text that the operator model and the judge
   both read), the in-scope IPv4 addresses, CIDRs or host names, exclusions, a time window, prohibited tools or flags
-  (`hydra`, `-T5`; whole words, no patterns), and the auto-run tiers.
+  (`hydra`, `-T5`; whole words, no patterns), protected data (files, folders, shares or tables no command may name;
+  [below](#protected-data)), and the auto-run tiers.
 - **One active engagement, versioned:** every save is a new version under `workspace/engagement/`, with who saved it and
   a note, in the audit log. Earlier versions can be loaded and saved again. Switch it off with *active*, and runs use
   `LAB_ALLOWLIST` alone.
@@ -332,6 +333,90 @@ the console refuses such a judge (400), and n8n's "Build judge prompt" node refu
 - **The webhook secret is in n8n's execution data**, as part of the request headers n8n stores for the webhook node.
   Only n8n's owner and the console's key can read executions, and both have the secret anyway. The console never shows
   that node's data.
+
+## Protected data
+
+The Engagement card's **Protected data** lists files, folders, shares, tables or buckets that no command may name, one
+per line: `customers.csv`, `/backup/`, `HR$`, `\Users\jdoe\Documents`, `*.kdbx`. n8n's policy gate enforces the list in
+code, before the judge and again after it. It reads each argument the way bash hands it to the program, folded and
+decoded: case, fullwidth letters, percent-encoding (`%63ustomers.csv`), `\` as `/`.
+
+- **Blocked:** a command that names an entry where it reaches the target: a URL, a share or remote path, an SQL string,
+  a positional argument. Like an out-of-scope host, a blocked command cannot be approved. With `customers.csv` or
+  `/backup/` listed, `curl -s http://10.10.10.5/backup/customers.csv -o customers.csv` is blocked: the command the judge
+  authorized when it was measured (copilot/README.md, "Judge eval").
+- **Waits for you:** a name only in a local position (an output file, a wordlist, a key file, an exclusion, a filter
+  such as `grep`), and the names of a path entry apart in one command (`//fs01/HR$ -D Payroll` for `HR$/Payroll`).
+- **Waits for you while the list has entries:** a command that could fetch names it does not spell (`wget -r`,
+  smbclient `mget`, curl `[1-9]` globs, NSE scripts beyond default, version and banner, sqlmap dumps), or that reads its
+  names at run time (`wget -i`, config files, pipes, `<` files). A wordlist run without recursion (gobuster, ffuf,
+  feroxbuster `-n`) still passes.
+- **An empty list changes nothing.**
+
+The result card and the flow view give the reason: `command names protected data: customers.csv`, or
+`needs a human: bulk retrieval while data is protected: wget -r/-m/-p (recursion)`. Both models also read the list, on
+a `PROTECTED DATA (do not read, download or copy)` line before the rules (its first 1000 characters). A workflow
+imported before this field drops the list: the console notices when the run reaches the policy gate and stops the run,
+with an error that says to re-import `deploy/n8n/workflows/pentest-copilot.json`.
+
+**Writing entries.** Write names, not hosts: `HR$` is that share on every host. Case does not matter, and `*` is the
+only wildcard.
+- A name matches a whole name in the command or a dot-separated part of one: `customers.csv` also matches
+  `customers.csv.gz`; `customers` matches `customers.csv`, `shop.customers` and `/api/customers/12`, but not
+  `customers_2024` (write `customers*`).
+- A slash at the start or end means the name must be whole on that side: `/backup/` is exactly the folder `backup`,
+  while `backup` also covers `backup.zip`.
+- The names of a path entry (`backup/customers.csv`) block when they are adjacent.
+- The console refuses what the gate would read differently, and says what to write instead: hosts and addresses (they
+  belong in Out of scope), `\\fs01\HR$`, schemes, drive letters, `~`, `%`, quotes and other punctuation, `.` and `..`,
+  names with fewer than two letters or digits, and a bare extension (`csv`: write `*.csv`). At most 64 entries of up to
+  128 characters.
+
+**Hints.** The Engagement card checks the list against the rules of engagement and the scope statement whenever it loads
+or saves the engagement:
+- a file, folder, share or table that a sentence protects ("Do not download anything from `\\fs01\HR$`") and the list
+  does not hold is marked *judge only*, with **add to Protected data** (**add anyway** for a common name);
+- an entry that is a short or common name (`HR`, `data`) is marked *broad*, one that reads like a description
+  (`HR share`) *check*, and a Prohibited entry that looks like data (`/backup/`) gets **move to Protected data**;
+- while the list is empty, rules that protect personal data without naming any file, folder, share or table get a
+  *judge only* warning: list the names you know, and keep auto-run off.
+
+The console never applies a hint by itself.
+
+**What it cannot catch.** It protects names, not data.
+- **Names it never sees.** A server can return a protected file for a name the gate does not know: `download.php?id=7`,
+  a redirect followed with `-L`, a symlink or web-server alias, a database view, a copy under another name, an archive
+  that contains it. With such rules, keep auto-run off: the judge and you remain the only check.
+- **Data the rules protect without naming it.** The measured rule ("If you find personal data, stop and report it; do
+  not download or copy it") names no location, so the console can only warn. Directory, RPC and SNMP enumeration
+  (`ldapsearch`, `rpcclient`, `enum4linux`, `snmpwalk`) and web pages or API responses that contain personal data stay
+  with the judge. LDAP DNs cannot be entered.
+- **The folder behind a share.** `HR$` protects the share's name. An admin share (`D$\Shares\HR`) or a parent share
+  reaches the same files under the folder's own name: list that folder too.
+- **Wordlist discovery.** gobuster, ffuf without `-recursion` and feroxbuster `-n` request names from a wordlist the
+  gate cannot read, so a protected file at the web root can still be requested. Response bodies are not kept;
+  recursion, saved responses and names read from a file wait for you.
+- **Bulk forms of other programs.** The bulk and run-time rules cover the programs that can auto-run. Every other
+  program waits for you anyway, and you are the check.
+- **Later commands.** Each command is judged on its own, and a file an earlier command wrote (an rc file, a config, a
+  list) can change what a later one does. The gate sends dotfile writes and config variables to you; the rest is the
+  runner's job: a fresh HOME and working directory for every command
+  ([runner contract](../n8n/README.md#runner-contract)).
+- **A bash subset.** Aliases, functions and `eval` strings are not expanded; `$VAR` and `$(...)` values are unknown, and
+  such commands wait for you already. A runner that does not use bash would read comments and quotes differently.
+- **Encodings decoded later.** Three rounds of percent-encoding are decoded, and deeper nesting waits for you. A base64
+  parameter, `printf %b` or `xxd -r` is decoded after the gate has looked; a client fed through a pipe waits for you.
+  Letters from other scripts are other names (Cyrillic `а` is not `a`).
+- **File names the gate takes for hosts.** A name whose extension the gate does not know as a file (`vault.kdbx`,
+  `ntds.dit`, `web.config`) counts as an out-of-scope host, so the command is blocked whether or not it is listed, with
+  that misleading reason.
+
+**False positives are deliberate and visible.**
+- A short or common bare name blocks every spelling: `users` blocks `/users/sign_in`, `customers` blocks
+  `customers.php`, `HR` blocks `"HR Policies.pdf"` and `DC=hr`, `public` blocks the SNMP community `public`. Use slashes
+  for whole names (`/customers/`), or the hidden share's name (`HR$`).
+- Output files, wordlists, key files, exclusions and filters named like an entry wait for you.
+- A HEAD request (`curl -I`) for a protected file is blocked: take the evidence from the discovery output.
 
 ## Knowledge uploads
 
@@ -423,6 +508,11 @@ delete old runs you no longer need for Rollback.
     - a prohibited tool is blocked by the policy gate;
     - a manual command takes the gates without retrieval or the operator, and is staged;
     - switched off, `LAB_ALLOWLIST` applies alone again;
+    - with protected data listed (`customers.csv`, `/backup/`), the judge eval's measured miss
+      (`curl … /backup/customers.csv -o customers.csv`) is blocked by the policy gate before the judge, and the gate
+      reports both entries in force. The same file name in fullwidth letters is blocked too, which needs NFKC in n8n's
+      task runner. A recursive `wget` waits for a human, with the reason. Both prompts carry the `PROTECTED DATA` line,
+      and the audit log records the list;
   - the prompt sets each run measured on (source, pinned commit, column) are recorded in `run.json`;
   - knowledge uploads into **real Qdrant**:
     - markdown and PDF are indexed, and a scanned PDF is refused;

@@ -566,6 +566,7 @@ $('#cpModelsRefresh').onclick=()=>cpModelsLoad(true);
 
 // ---- the engagement: one active version, saved as a new version each time, audited
 const lines = v => (v||[]).join('\n');
+const addLine = (t, x) => { const v=t.value.trim(); t.value=(v?v+'\n':'')+x; };
 const toLocalInput = iso => { const d=new Date(iso||''); if(!iso || isNaN(d)) return ''; return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16); };
 const fromLocalInput = v => { if(!v) return ''; const off=-new Date(v).getTimezoneOffset(), a=Math.abs(off);
   return (v.length===16 ? v+':00' : v) + (off>=0?'+':'-') + String(Math.floor(a/60)).padStart(2,'0') + ':' + String(a%60).padStart(2,'0'); };
@@ -573,9 +574,26 @@ function cpEngFill(r){
   r=r||{};
   $('#engName').value=r.name||''; $('#engScopeStmt').value=r.scope_statement||''; $('#engRoe').value=r.roe||'';
   $('#engIn').value=lines(r.scope_in); $('#engOut').value=lines(r.scope_out); $('#engProhibited').value=lines(r.prohibited);
+  $('#engProtected').value=lines(r.protected_data);
   $('#engStart').value=toLocalInput(r.window_start); $('#engEnd').value=toLocalInput(r.window_end);
   $('#engAutoPassive').checked=!!r.autorun_passive; $('#engAutoActive').checked=!!r.autorun_active;
   $('#engActive').checked = r.active!==false; $('#engNote').value='';
+}
+// a data hint (app/engagement.py data_hints): suggest or broad from a sentence of the rules, broad or descriptive for a saved
+// entry, unnamed (the rules protect personal data but name nothing), move (a Prohibited entry that looks like data)
+function cpDataHint(h){
+  const box=(badge, text, button)=>`<div class="cp-hint"><span class="badge warn">${badge}</span> ${text}${button?' '+button:''}</div>`;
+  const e=`<span class="mono">${esc(h.entry)}</span>`, q=h.sentence?` (&ldquo;${esc(h.sentence)}&rdquo;)`:'';
+  if(h.kind==='suggest' || (h.kind==='broad' && h.sentence))
+    return box('judge only', `The rules protect ${e}, but Protected data does not list it${q}. Protected data is enforced in code; the judge alone authorized a download like this when measured.`
+      + (h.kind==='broad' ? ' It is a common name: commands that name it anywhere are blocked, and wordlists or output files named like it wait for you.' : ''),
+      `<button class="btn sm" data-dhint="${escA(h.entry)}">${h.kind==='broad' ? 'add anyway' : 'add to Protected data'}</button>`);
+  if(h.kind==='broad') return box('broad', `${e} is a short or common name: every command that names it is blocked, and wordlists or output files named like it wait for you. Prefer a full path (/srv/hr/) or the hidden share (HR$).`);
+  if(h.kind==='descriptive') return box('check', `${e} reads like a description; the gate looks for this exact text. Write the name itself (HR or HR$).`);
+  if(h.kind==='unnamed') return box('judge only', `The rules protect personal data but name no file, folder, share or table${q}. Only names listed in Protected data are blocked in code: list the ones you know, and keep auto-run off while the judge is the only check.`);
+  if(h.kind==='move') return box('move', `${e} is under Prohibited (tools and flags), which only matches the raw text. Protected data also reads URLs, shares, quoting and encodings.`,
+    `<button class="btn sm" data-dmove="${escA(h.entry)}">move to Protected data</button>`);
+  return '';                                                    // a kind this page does not know yet
 }
 async function cpEngLoad(){
   let s; try{ s=await api('/engagement'); }catch(e){ return; }
@@ -585,10 +603,18 @@ async function cpEngLoad(){
   $('#cpEngCeiling').innerHTML = c.known
     ? `Ceiling (n8n enforces it, the engagement can only narrow it): LAB_ALLOWLIST <span class="mono">${esc(c.allowlist)}</span>`
     : 'The console does not know LAB_ALLOWLIST; n8n enforces it (ConfigMap copilot-scope).';
-  // a host the rules put off-limits belongs in Out of scope: that is code; the judge alone missed such rules when measured
+  // a host the rules put off-limits belongs in Out of scope, a name they protect in Protected data: both are code; the judge
+  // alone missed such rules when measured. The buttons only fill the form: nothing applies until it is saved.
   const hints=s.hints||[];
-  $('#engHints').innerHTML = hints.map(h=>`<div class="cp-hint"><span class="badge warn">judge only</span> The rules put <span class="mono">${esc(h.host)}</span> off-limits, but Out of scope does not list it (&ldquo;${esc(h.sentence)}&rdquo;). Out of scope is enforced in code; the judge alone missed rules like this when measured. <button class="btn sm" data-hint="${escA(h.host)}">add to Out of scope</button></div>`).join('');
-  $('#engHints').querySelectorAll('[data-hint]').forEach(b=>b.onclick=()=>{ const t=$('#engOut'), v=t.value.trim(); t.value=(v?v+'\n':'')+b.dataset.hint; b.disabled=true; b.textContent='added: save to apply'; });
+  $('#engHints').innerHTML = hints.map(h=>`<div class="cp-hint"><span class="badge warn">judge only</span> The rules put <span class="mono">${esc(h.host)}</span> off-limits, but Out of scope does not list it (&ldquo;${esc(h.sentence)}&rdquo;). Out of scope is enforced in code; the judge alone missed rules like this when measured. <button class="btn sm" data-hint="${escA(h.host)}">add to Out of scope</button></div>`).join('')
+    + (s.data_hints||[]).map(cpDataHint).join('');
+  $('#engHints').querySelectorAll('[data-hint]').forEach(b=>b.onclick=()=>{ addLine($('#engOut'), b.dataset.hint); b.disabled=true; b.textContent='added: save to apply'; });
+  $('#engHints').querySelectorAll('[data-dhint]').forEach(b=>b.onclick=()=>{ addLine($('#engProtected'), b.dataset.dhint); b.disabled=true; b.textContent='added: save to apply'; });
+  // a move also takes the entry out of Prohibited, which the console splits on lines and commas and dedups ignoring case
+  $('#engHints').querySelectorAll('[data-dmove]').forEach(b=>b.onclick=()=>{ const x=b.dataset.dmove, t=$('#engProhibited');
+    addLine($('#engProtected'), x);
+    t.value=t.value.split(/[\n,]/).map(v=>v.trim()).filter(v=>v && v.replace(/\s+/g,' ').toLowerCase()!==x.toLowerCase()).join('\n');
+    b.disabled=true; b.textContent='moved: save to apply'; });
   const cap=[]; if(c.autorun_passive===false) cap.push('passive'); if(c.autorun_active===false) cap.push('active');
   $('#engAutoCap').textContent = cap.length ? `capped: the ${cap.join(' and ')} tier is off in LAB_AUTORUN_* (copilot.env)` : '';
   const off=-new Date().getTimezoneOffset(), a=Math.abs(off);
@@ -600,7 +626,7 @@ async function cpEngLoad(){
 }
 $('#engSave').onclick=async()=>{
   const body={name:$('#engName').value, scope_statement:$('#engScopeStmt').value, roe:$('#engRoe').value, scope_in:$('#engIn').value,
-    scope_out:$('#engOut').value, prohibited:$('#engProhibited').value, window_start:fromLocalInput($('#engStart').value),
+    scope_out:$('#engOut').value, prohibited:$('#engProhibited').value, protected_data:$('#engProtected').value, window_start:fromLocalInput($('#engStart').value),
     window_end:fromLocalInput($('#engEnd').value), autorun_passive:$('#engAutoPassive').checked, autorun_active:$('#engAutoActive').checked,
     active:$('#engActive').checked, note:$('#engNote').value};
   $('#engSave').disabled=true;
