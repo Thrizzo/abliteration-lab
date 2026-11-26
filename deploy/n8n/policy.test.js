@@ -256,5 +256,14 @@ ok('tiers: the engagement cannot switch on a tier the variable leaves off', (() 
 ok('tiers: active-recon needs both too', decide({ command: 'nmap --script=safe,version 10.10.10.5', target: '10.10.10.5' }, eng({ autorun_active: true })).tier === 'active_recon'
   && decide({ command: 'nmap --script=safe,version 10.10.10.5', target: '10.10.10.5' }, eng({ autorun_active: false })).autoRun === false);
 
+// ---- a line break separates commands like ; does (a shell runs each line) ----
+ok('REGRESSION: a second command on a new line is classified, not hidden behind nmap', (() => {
+  const d = decide({ command: 'nmap -sV 10.10.10.5\nchmod 777 /etc/shadow', target: '10.10.10.5' }, { allowlist: ['10.10.10.0/24'], autoRunReadOnly: true });
+  return d.allowed === true && d.readOnly === false && d.autoRun === false && /chmod/.test(d.readOnlyReason);
+})());
+ok('CRLF and CR break lines too', classifyReadOnly('nmap 10.10.10.5\r\nchmod 777 x').readOnly === false && classifyReadOnly('nmap 10.10.10.5\rchmod 777 x').readOnly === false);
+ok('two read-only lines stay read-only', classifyReadOnly('nmap -sV 10.10.10.5\ncurl -s http://10.10.10.5/').readOnly === true);
+ok('active tier: a multi-line command is not eligible', classifyActiveRecon('nmap --script=safe 10.10.10.5\nrm -rf ~/x').ok === false);
+
 console.log(failed ? `\n${failed} test(s) FAILED` : '\nall policy tests passed');
 process.exit(failed ? 1 : 0);

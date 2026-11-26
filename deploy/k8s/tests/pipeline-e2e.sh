@@ -199,8 +199,13 @@ copilot_ready() { local i; for i in $(seq 1 120); do [ "$(API /copilot | jq -r .
 check "the console picks up the Secret (no restart)" copilot_ready
 # start a run through the console, wait until it reaches one of the given states, echo the run
 copilot_run() {
-  local task=$1 target=$2 st id i run s; shift 2
-  st=$(API /copilot/run -d "$(jq -cn --arg t "$task" --arg g "$target" '{task: $t, target: $g}')")
+  local task=$1 target=$2; shift 2
+  copilot_run_json "$(jq -cn --arg t "$task" --arg g "$target" '{task: $t, target: $g}')" "$@"
+}
+# the same with a whole request body (mode, command, models)
+copilot_run_json() {
+  local body=$1 st id i run s; shift 1
+  st=$(API /copilot/run -d "$body")
   id=$(jq -r '.id // empty' <<<"$st")
   [ -n "$id" ] || { echo "  copilot run refused: $st" >&2; echo '{}'; return; }
   for i in $(seq 1 120); do
@@ -213,14 +218,14 @@ copilot_run() {
 stages() { jq -r '[.events[].stage | select(. != "error")] | join(",")' <<<"$1"; }
 R=$(copilot_run "Enumerate services on the box" 10.10.10.5 waiting done error)
 check "run: authorized, parked at Human approval (auto-run is off)" test "$(jq -r '.status + " / " + .result.title' <<<"$R")" = "waiting / Authorized: waiting for your approval"
-check "run: one event per stage ($(stages "$R"))" test "$(stages "$R")" = "start,scope,retrieval,proposal,policy,judge,result,approval"
+check "run: one event per stage ($(stages "$R"))" test "$(stages "$R")" = "start,scope,retrieval,prompt,proposal,policy,judge_prompt,judge,result,approval"
 check "run: the operator's proposal, as the console shows it" test "$(jq -r .result.command <<<"$R")" = "nmap -sV -Pn 10.10.10.5"
 RID=$(jq -r .id <<<"$R")
 check "stop the waiting run from the console" post_ok "/copilot/runs/$RID/stop" '{}'
 run_status() { local i; for i in $(seq 1 30); do [ "$(API "/copilot/runs/$1" | jq -r .status)" = "$2" ] && return 0; sleep 1; done; return 1; }
 check "the run is canceled in n8n" run_status "$RID" canceled
 B=$(copilot_run "destroy the box" 10.10.10.5 done error)
-check "run: rm -rf blocked by the policy gate; the judge never saw it" test "$(jq -r .result.title <<<"$B") / $(stages "$B")" = "Blocked by the policy gate / start,scope,retrieval,proposal,policy,result,end"
+check "run: rm -rf blocked by the policy gate; the judge never saw it" test "$(jq -r .result.title <<<"$B") / $(stages "$B")" = "Blocked by the policy gate / start,scope,retrieval,prompt,proposal,policy,result,end"
 J=$(copilot_run "reject this scan" 10.10.10.5 done error)
 check "run: blocked by the judge" test "$(jq -r .result.title <<<"$J")" = "Blocked: the judge rejected it"
 O=$(copilot_run "Enumerate services" 8.8.8.8 done error)
@@ -232,6 +237,43 @@ check "free prompt streamed from glm-serve: $(tail -n 1 <<<"$P" | jq -c .)" test
 check "feed: Jobs, the kill switch, Promote, copilot runs and model events" test "$(API '/feed?limit=500' | jq -r '[.events[].source] | unique | join(",")')" = "control,copilot,model,pipeline,serving"
 check "audit: the copilot run's start and stop by user ci" test "$(API /control | jq -r --arg id "$RID" '[.audit[] | select(.source == "copilot" and .run_id == $id) | "\(.stage):\(.who.user)"] | sort | join(",")')" = "end:ci,start:ci,stop:ci"
 check "audit: the free prompt and its answer" test "$(API /control | jq -r '[.audit[] | select(.source == "model" and .stage == "prompt")][0].data.prompt')" = "Say hello."
+
+echo "== 7b. Copilot v2: model choice, the engagement, manual commands, the prompts each model got"
+stop_if_waiting() { [ "$(jq -r .status <<<"$1")" = waiting ] && API "/copilot/runs/$(jq -r .id <<<"$1")/stop" -d '{}' >/dev/null; return 0; }
+ev() { jq -r --arg s "$2" "[.events[] | select(.stage == \$s)][0]$3" <<<"$1"; }
+code_of() { curl -s -o /dev/null -w '%{http_code}' -u ci:ci-only-password -H 'Content-Type: application/json' -d "$2" "http://127.0.0.1:18080/api$1"; }
+seen() { console curl -s http://ollama.lab-copilot.svc:11434/_seen; }     # what the stand-in (judge + operator here) received
+M=$(API /copilot/models)
+check "models: judges from the copilot's Ollama ($(jq -c .judge.models <<<"$M")): no abliterated, no embedding model" test "$(jq -r '.judge.models | join(",")' <<<"$M")" = "qwen3:8b"
+check "models: glm-abl:latest is listed as excluded (abliterated)" test "$(jq -r '[.judge.excluded[] | select(.name == "glm-abl:latest")][0].why' <<<"$M" | cut -c1-11)" = abliterated
+check "models: operators from glm-serve ($(jq -c .operator.models <<<"$M"))" test "$(jq -r '.operator.error' <<<"$M")" = null
+check "an abliterated judge is refused before n8n is asked (400)" test "$(code_of /copilot/run '{"task":"t","target":"10.10.10.5","judge_model":"glm-abl:latest"}')" = 400
+check "the console knows the ceiling (ConfigMap copilot-scope)" test "$(API /engagement | jq -r .ceiling.allowlist)" = "10.10.10.0/24,192.168.56.0/24"
+check "an engagement entry outside LAB_ALLOWLIST is refused (400)" test "$(code_of /engagement '{"scope_in":["10.99.0.0/16"]}')" = 400
+ENG='{"name":"CI engagement","scope_statement":"Only 10.10.10.0/28.","roe":"No DoS. Stop on PII.","scope_in":["10.10.10.0/28"],"scope_out":["10.10.10.1"],"prohibited":["hydra"],"note":"ci"}'
+check "save the engagement: version 1" test "$(API /engagement -d "$ENG" | jq -r .version)" = 1
+E1=$(copilot_run "Enumerate services on the box" 10.10.10.5 waiting done error)
+stop_if_waiting "$E1"
+OP_PROMPT=$(ev "$E1" prompt .data.prompt)
+JUDGE_PROMPT=$(ev "$E1" judge_prompt .data.prompt)
+check "engagement run: the operator's prompt carries the rules" grep -q 'RULES: No DoS. Stop on PII.' <<<"$OP_PROMPT"
+check "engagement run: the judge's prompt carries the rules and the vetted command" bash -c 'grep -q "RULES OF ENGAGEMENT" <<<"$1" && grep -q "^nmap -sV -Pn 10.10.10.5$" <<<"$1"' _ "$JUDGE_PROMPT"
+check "engagement run: the models received exactly the prompts the console shows" test "$(seen | jq --arg o "$OP_PROMPT" --arg j "$JUDGE_PROMPT" '[.requests[] | select(.user == $o or .user == $j)] | length')" -ge 2
+check "engagement run: the result names engagement v1 and the models" test "$(jq -r '"\(.result.engagement.version) \(.result.operator_model) \(.result.judge_model)"' <<<"$E1")" = "1 glm-abl qwen3:8b"
+N=$(copilot_run "Enumerate services on the box" 10.10.10.100 done error)
+check "inside LAB_ALLOWLIST but outside the engagement: blocked, no model called ($(stages "$N"))" test "$(ev "$N" scope .data.reason) / $(stages "$N")" = 'target "10.10.10.100" is outside the engagement scope / start,scope,result,end'
+H=$(copilot_run "brute force ssh" 10.10.10.5 done error)
+check "hydra is prohibited by the engagement: blocked by the policy gate, the judge never saw it" test "$(ev "$H" policy '.data.prohibited | join(",")') / $(stages "$H")" = "hydra / start,scope,retrieval,prompt,proposal,policy,result,end"
+MAN=$(copilot_run_json '{"target":"10.10.10.5","mode":"manual","command":"nmap -p 445 --open 10.10.10.5"}' waiting done error)
+stop_if_waiting "$MAN"
+check "manual command: no retrieval, no operator model ($(stages "$MAN"))" test "$(stages "$MAN")" = "start,scope,proposal,policy,judge_prompt,judge,result,approval"
+check "manual command: staged for execution = the typed command" test "$(jq -r '.result.staged + " / " + .result.mode' <<<"$MAN")" = "nmap -p 445 --open 10.10.10.5 / manual"
+check "a manual command with a line break is refused (400)" test "$(code_of /copilot/run '{"target":"10.10.10.5","mode":"manual","command":"nmap 10.10.10.5\nid"}')" = 400
+check "switch the engagement off: version 2" test "$(API /engagement -d "$(jq -c '. + {active: false}' <<<"$ENG")" | jq -r .version)" = 2
+F=$(copilot_run "Enumerate services on the box" 10.10.10.100 waiting done error)
+stop_if_waiting "$F"
+check "engagement off: LAB_ALLOWLIST alone again (10.10.10.100 in scope)" test "$(ev "$F" scope .data.scopeOk)" = true
+check "audit: both engagement versions, saved by user ci" test "$(API /control | jq -r '[.audit[] | select(.stage == "engagement") | "\(.data.version):\(.who.user)"] | sort | join(",")')" = "1:ci,2:ci"
 kill $PF2 2>/dev/null
 
 echo "== 8. Knowledge uploads (real Qdrant, the stand-in's embeddings) and retrieval in a copilot run"
@@ -243,7 +285,6 @@ printf 'Admin jane.doe@client-corp.com, Password: Summer2026!\n' > /tmp/notes.md
 python3 -c "import sys; sys.path.insert(0, '.'); from copilot.tests.pdf_fixture import make_pdf; open('/tmp/lame.pdf', 'wb').write(make_pdf([['Lame: smbclient -N -L //target'], ['usermap_script via Samba 3.0.20']])); open('/tmp/scan.pdf', 'wb').write(make_pdf([[]]))"
 indexed() { local i; for i in $(seq 1 120); do [ "$(API /knowledge | jq -r --arg d "$1" '.docs[] | select(.doc == $d) | .status')" = indexed ] && return 0; sleep 1; done; return 1; }
 retrieval_of() { jq -r '[.events[] | select(.stage == "retrieval")][0].message' <<<"$1"; }
-stop_if_waiting() { [ "$(jq -r .status <<<"$1")" = waiting ] && API "/copilot/runs/$(jq -r .id <<<"$1")/stop" -d '{}' >/dev/null; return 0; }
 check "knowledge is configured (Qdrant + embeddings)" test "$(API /knowledge | jq -r .configured)" = true
 check "upload a markdown writeup" test "$(upload upload 'source=htb&name=Lame.md' /tmp/lame.md | jq -r .doc)" = htb/Lame.md
 check "upload a PDF writeup" test "$(upload upload 'source=htb&name=Lame%20notes.pdf' /tmp/lame.pdf | jq -r .doc)" = htb/Lame-notes.pdf

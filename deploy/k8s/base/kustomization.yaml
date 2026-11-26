@@ -44,13 +44,16 @@ configMapGenerator:
     namespace: lab
     files:
       - lab/Caddyfile
-  # the copilot's lab scope, read by n8n's Code nodes (same variables as deploy/n8n/docker-compose.n8n.yml)
+  # the copilot's scope ceiling and default judge (copilot/copilot.env, the one place to edit them): n8n's Code nodes
+  # read copilot-settings; the console reads the same values as copilot-scope, to check the engagement the GUI saves
   - name: copilot-settings
     namespace: lab-copilot
-    literals:
-      - LAB_ALLOWLIST=10.10.10.0/24
-      - LAB_AUTORUN_READONLY=true
-      - LAB_AUTORUN_ACTIVE_RECON=false
+    envs:
+      - copilot/copilot.env
+  - name: copilot-scope
+    namespace: lab
+    envs:
+      - copilot/copilot.env
   # models the judge/embeddings Ollama pulls when it starts, in this order (space-separated; empty = pull nothing).
   # The embedding model (~270 MB) first: knowledge uploads work while the judge (~5 GB) is still downloading.
   - name: ollama-models

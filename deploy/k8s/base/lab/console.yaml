@@ -32,6 +32,9 @@ spec:
         - name: app
           image: ghcr.io/thrizzo/redteam-llm-lab:latest
           imagePullPolicy: Always
+          # LAB_ALLOWLIST / LAB_AUTORUN_* / COPILOT_JUDGE_MODEL as n8n reads them (base/copilot/copilot.env): the console
+          # checks the engagement against that ceiling and names the default judge
+          envFrom: [{ configMapRef: { name: copilot-scope, optional: true } }]
           env:
             - { name: ABL_HOST, value: "127.0.0.1" }                         # only Caddy (same pod) reaches it
             - { name: ABL_RUNNER, value: k8s }

@@ -19,7 +19,7 @@ import urllib.request
 import webbrowser
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +30,7 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 import rundata  # noqa: E402
 import copilot_runs as CR  # noqa: E402
+import engagement as EN  # noqa: E402
 import knowledge as KN  # noqa: E402
 from lab import Lab  # noqa: E402
 from datasets import Datasets, FILES as DATA_FILES  # noqa: E402
@@ -211,6 +212,16 @@ copilot = CR.CopilotRuns(os.environ.get("N8N_URL"), os.environ.get("COPILOT_SECR
 model_chat = CR.ModelChat(os.environ.get("GLM_SERVE_URL"),
                           (_k8s_settings.get("serving") or {}).get("servedName", "glm-abl") if K8S else os.environ.get("GLM_SERVE_MODEL", "glm-abl"),
                           FEED, audit=audit)
+# which models a copilot run may use: operators from glm-serve, judges from the copilot's Ollama (never abliterated)
+copilot_models = CR.CopilotModels(os.environ.get("GLM_SERVE_URL"), os.environ.get("RAG_OLLAMA_URL"), operator_default=model_chat.model,
+                                  judge_default=os.environ.get("COPILOT_JUDGE_MODEL") or "qwen3:8b", http_error=HTTPException)
+# the copilot's engagement (scope statement, rules, scope, exclusions, window, prohibited tools): versioned under
+# workspace/engagement/, audited. LAB_ALLOWLIST / LAB_AUTORUN_* are the ceiling n8n enforces (ConfigMap copilot-scope);
+# the console reads the same values to check what the GUI saves.
+engagements = EN.Engagements(PROJECT, audit=audit, feed=FEED, ceiling=os.environ.get("LAB_ALLOWLIST") or None,
+                             autorun={k: os.environ[v] == "true" for k, v in (("passive", "LAB_AUTORUN_READONLY"),
+                                                                         ("active", "LAB_AUTORUN_ACTIVE_RECON")) if v in os.environ},
+                             http_error=HTTPException)
 # knowledge uploads for the copilot's retrieval: embedded with the copilot's Ollama (RAG_OLLAMA_URL; in dev OLLAMA_HOST
 # points at glm-serve instead) into the Qdrant collection n8n searches
 knowledge = KN.Knowledge(PROJECT, os.environ.get("QDRANT_URL"), os.environ.get("RAG_COLLECTION", "writeups"),
@@ -528,8 +539,12 @@ def feed_since(after: int = 0, source: str = "", limit: int = 200):
 
 
 class CopilotRun(BaseModel):
-    task: str = Field(min_length=1, max_length=2000)
+    task: str = Field("", max_length=2000)              # copilot mode: required; manual mode: optional (why)
     target: str = Field(min_length=1, max_length=253)
+    mode: str = Field("copilot", pattern="^(copilot|manual)$")
+    command: str = Field("", max_length=2000)            # manual mode: the command the operator typed
+    operator_model: str = Field("", max_length=128)
+    judge_model: str = Field("", max_length=128)
 
 
 @app.get("/api/copilot")
@@ -537,10 +552,38 @@ def copilot_status():
     return {**copilot.status(), "model": {"configured": bool(model_chat.base), "name": model_chat.model}}
 
 
+@app.get("/api/copilot/models")
+def copilot_model_list(fresh: bool = False):
+    """Operators (glm-serve) and judges (the copilot's Ollama, abliterated and embedding models left out)."""
+    return copilot_models.list(fresh)
+
+
 @app.post("/api/copilot/run")
 def copilot_run(b: CopilotRun, request: Request):
-    """Starts the n8n copilot (scope gate, retrieval, operator, policy gate, judge). It suggests; nothing executes."""
-    return copilot.start(b.task, b.target, _who(request))
+    """Starts the n8n copilot with the chosen models and the active engagement: scope gate, retrieval, operator (copilot
+    mode) or the typed command (manual mode), policy gate, judge. It stages a command; nothing executes."""
+    op, judge = copilot_models.check(b.operator_model, b.judge_model)
+    return copilot.start(b.task, b.target, _who(request), mode=b.mode, command=b.command, operator_model=op, judge_model=judge,
+                         engagement=engagements.payload())
+
+
+@app.get("/api/engagement")
+def engagement_status():
+    """The active engagement, its recent versions and the ceiling (LAB_ALLOWLIST, LAB_AUTORUN_*) as far as the console knows it."""
+    return engagements.status()
+
+
+@app.post("/api/engagement")
+def engagement_save(request: Request, b: dict = Body(...)):
+    """Saves a new version (validated; the same fields again change nothing). Audited with who saved it."""
+    b = dict(b)
+    note = b.pop("note", "")
+    return engagements.save(b, _who(request), note)
+
+
+@app.get("/api/engagement/versions/{version}")
+def engagement_version(version: int):
+    return engagements.get(version)
 
 
 @app.get("/api/copilot/runs/{run_id}")
@@ -556,6 +599,7 @@ def copilot_stop(run_id: str, b: Action, request: Request):
 class Prompt(BaseModel):
     prompt: str = Field(min_length=1, max_length=20000)
     max_tokens: int = Field(512, ge=1, le=4096)
+    model: str = Field("", max_length=128)              # one glm-serve lists; empty: the served model
 
 
 @app.post("/api/model/chat")
@@ -564,7 +608,8 @@ def model_chat_stream(b: Prompt, request: Request):
     if not model_chat.base:
         raise HTTPException(404, "no model server configured (GLM_SERVE_URL)")
     who = _who(request)
-    return StreamingResponse((json.dumps(ev) + "\n" for ev in model_chat.stream(b.prompt, b.max_tokens, who)),
+    model = copilot_models.operator(b.model)
+    return StreamingResponse((json.dumps(ev) + "\n" for ev in model_chat.stream(b.prompt, b.max_tokens, who, model)),
                              media_type="application/x-ndjson")
 
 

@@ -82,13 +82,15 @@ class TestEventsFromRealExecutions(unittest.TestCase):
         self.assertEqual(run["status"], "done")
         self.assertEqual(self.stages(run)[:2], ["scope", "error"])        # no Qdrant on that n8n: retrieval failed, run continued
         self.assertEqual([s for s in self.stages(run) if s != "error"],
-                         ["scope", "retrieval", "proposal", "policy", "judge", "result", "execute", "end"])
+                         ["scope", "retrieval", "prompt", "proposal", "policy", "judge_prompt", "judge", "result", "execute", "end"])
         warn = next(e for e in run["events"] if e["stage"] == "error")
         self.assertEqual(warn["level"], "warn")                               # tolerated: the run went on
         r = run["result"]
         self.assertEqual((r["title"], r["allowed"], r["autoRun"], r["command"]),
                          ("Authorized: auto-run (passive tier)", True, True, "nmap -sV -Pn 10.10.10.5"))
         self.assertIn("disabled: nothing ran", r["next"])
+        self.assertEqual((r["staged"], r["mode"], r["operator_model"], r["judge_model"], r["engagement"]),
+                         ("nmap -sV -Pn 10.10.10.5", "copilot", "glm-abl", "qwen3:8b", None))
         self.assertIn("nothing ran", run["events"][-2]["message"])          # the Execute node is reported as disabled
         self.assertEqual(run["events"][-1]["message"], "copilot run 1 done: Authorized: auto-run (passive tier)")
 
@@ -108,8 +110,10 @@ class TestEventsFromRealExecutions(unittest.TestCase):
         self.assertEqual(pol["level"], "warn")
         self.assertTrue(pol["message"].startswith("policy: blocked"))
         self.assertNotIn("judge", self.stages(run))                        # the judge never saw it
+        self.assertNotIn("judge_prompt", self.stages(run))
         self.assertEqual(run["result"]["title"], "Blocked by the policy gate")
         self.assertFalse(run["result"]["allowed"])
+        self.assertEqual(run["result"]["staged"], "")                      # nothing staged when blocked
 
     def test_out_of_scope_calls_no_model(self):
         run, _ = self.absorb("scope")
@@ -126,7 +130,7 @@ class TestEventsFromRealExecutions(unittest.TestCase):
         self.assertIsNone(run["result"])
 
     def test_no_event_carries_the_webhook_headers(self):
-        for name in ("authorized", "waiting", "policy", "scope", "error"):
+        for name in ("authorized", "waiting", "policy", "scope", "error", "manual", "engagement_scope", "prohibited", "judge_refused"):
             run, _ = self.absorb(name)
             dump = json.dumps(run["events"])
             self.assertNotIn("x-lab-secret", dump.lower(), name)
@@ -141,8 +145,68 @@ class TestEventsFromRealExecutions(unittest.TestCase):
             seen.append(len(run["events"]))
         self.assertTrue(runs.absorb(run, ex))
         stages = [s for s in self.stages(run) if s != "error"]
-        self.assertEqual(stages, ["scope", "retrieval", "proposal", "policy", "judge", "result", "execute", "end"])   # each once
+        self.assertEqual(stages, ["scope", "retrieval", "prompt", "proposal", "policy", "judge_prompt", "judge", "result", "execute", "end"])   # each once
         self.assertEqual(seen[1], seen[2])                                   # the same snapshot twice adds nothing
+
+
+class TestEventsV2(unittest.TestCase):
+    """Real executions of the workflow with the engagement, model choice, manual mode and the visible prompts."""
+    absorb = TestEventsFromRealExecutions.absorb
+    stages = TestEventsFromRealExecutions.stages
+
+    def ev(self, run, stage):
+        return next(e for e in run["events"] if e["stage"] == stage)
+
+    def test_the_prompt_to_the_abliterated_model_and_its_answer(self):
+        run, _ = self.absorb("prohibited")                                 # an engagement: its rules are in the prompt
+        p = self.ev(run, "prompt")
+        self.assertEqual(p["data"]["model"], "glm-abl")
+        self.assertTrue(p["data"]["prompt"].startswith("TASK: brute force ssh\nTARGET (authorized, in scope): 10.10.10.5\n\nRULES OF ENGAGEMENT"))
+        self.assertIn("PROHIBITED: hydra", p["data"]["prompt"])
+        answer = self.ev(run, "proposal")
+        self.assertIn('"command": "hydra', answer["data"]["raw"])          # the model's own answer, as it came back
+        self.assertEqual(answer["data"]["model"], "glm-abl")
+
+    def test_prohibited_by_the_engagement(self):
+        run, ended = self.absorb("prohibited")
+        pol = self.ev(run, "policy")
+        self.assertEqual((pol["level"], pol["data"]["prohibited"]), ("warn", ["hydra"]))
+        self.assertIn("prohibited by the rules of engagement: hydra", pol["data"]["reasons"])
+        self.assertNotIn("judge_prompt", self.stages(run))
+        self.assertEqual((run["result"]["engagement"], run["result"]["staged"]), ({"name": "ACME internal", "version": 3}, ""))
+
+    def test_manual_mode(self):
+        run, ended = self.absorb("manual")
+        self.assertTrue(ended)
+        self.assertEqual(self.stages(run), ["scope", "proposal", "policy", "judge_prompt", "judge", "result", "execute", "end"])
+        prop = self.ev(run, "proposal")
+        self.assertEqual((prop["data"]["manual"], prop["data"]["proposal"]["command"]), (True, "nmap -p 445 --open 10.10.10.5"))
+        self.assertTrue(prop["message"].startswith("typed by the operator"))
+        jp = self.ev(run, "judge_prompt")
+        self.assertEqual(jp["data"]["model"], "qwen3:8b")
+        self.assertIn("RULES OF ENGAGEMENT", jp["data"]["prompt"])
+        self.assertTrue(jp["data"]["prompt"].endswith("PROPOSED COMMAND (already passed the scope + denylist gate):\nnmap -p 445 --open 10.10.10.5"
+                                                      "\nread-only: true  tier: passive"))
+        self.assertEqual(self.ev(run, "judge")["data"]["staged"], "nmap -p 445 --open 10.10.10.5")
+        r = run["result"]
+        self.assertEqual((r["mode"], r["staged"], r["engagement"]["version"]), ("manual", "nmap -p 445 --open 10.10.10.5", 3))
+
+    def test_outside_the_engagement_scope(self):
+        run, _ = self.absorb("engagement_scope")
+        self.assertEqual(self.stages(run), ["scope", "result", "end"])
+        self.assertEqual(self.ev(run, "scope")["data"]["reason"], 'target "10.10.10.100" is outside the engagement scope')
+        self.assertIn("engagement decides this", run["result"]["next"])
+        run, _ = self.absorb("scope")
+        self.assertIn("add it to LAB_ALLOWLIST", run["result"]["next"])
+
+    def test_an_abliterated_judge_fails_the_run(self):
+        run, ended = self.absorb("judge_refused")
+        self.assertTrue(ended)
+        self.assertEqual(run["status"], "error")
+        err = next(e for e in run["events"] if e["stage"] == "error" and e["level"] == "error")
+        self.assertIn('judge model "glm-abl" refused', err["message"])
+        self.assertNotIn("judge", self.stages(run))
+        self.assertIsNone(run["result"])
 
 
 class FakeN8n:
@@ -229,9 +293,15 @@ class TestCopilotRuns(unittest.TestCase):
     def test_run_followed_to_its_result_and_audited(self):
         ex = fixture("authorized")
         self.n8n.plan = [partial(ex, 3), partial(ex, 9), ex]
-        out = self.runs.start("Enumerate services", "10.10.10.5", {"user": "admin", "ip": "10.42.0.7"})
+        out = self.runs.start("Enumerate services", "10.10.10.5", {"user": "admin", "ip": "10.42.0.7"}, operator_model="glm-abl",
+                              judge_model="qwen3:8b", engagement={"name": "ACME", "version": 2, "scope_in": ["10.10.10.0/28"]})
         hook = next(c for c in self.n8n.calls if c[1] == "/webhook/copilot-run")
-        self.assertEqual(hook[3], {"task": "Enumerate services", "target": "10.10.10.5", "requested_by": "admin"})
+        self.assertEqual(hook[3], {"task": "Enumerate services", "target": "10.10.10.5", "requested_by": "admin", "mode": "copilot",
+                                   "command": "", "operator_model": "glm-abl", "judge_model": "qwen3:8b",
+                                   "engagement": {"name": "ACME", "version": 2, "scope_in": ["10.10.10.0/28"]}})
+        start = self.audit.recent(1)[0]
+        self.assertEqual((start["data"]["mode"], start["data"]["operator_model"], start["data"]["engagement"]),
+                         ("copilot", "glm-abl", {"name": "ACME", "version": 2}))
         run = self.wait(out["id"], ("done",))
         self.assertEqual(run["result"]["title"], "Authorized: auto-run (passive tier)")
         audit = [(r["stage"], r["who"].get("user")) for r in reversed(self.audit.recent(10))]
@@ -291,6 +361,32 @@ class TestCopilotRuns(unittest.TestCase):
         self.assertEqual(e.exception.status, 409)
         self.assertIn("connect_console.py", e.exception.msg)
 
+    def test_manual_mode_and_its_checks(self):
+        ex = fixture("manual")
+        self.n8n.plan = [ex]
+        out = self.runs.start("", "10.10.10.5", {"user": "admin"}, mode="manual", command="nmap -p 445 --open 10.10.10.5",
+                              operator_model="glm-abl", judge_model="qwen3:8b")
+        hook = next(c for c in self.n8n.calls if c[1] == "/webhook/copilot-run")
+        self.assertEqual((hook[3]["mode"], hook[3]["command"], hook[3]["task"]), ("manual", "nmap -p 445 --open 10.10.10.5", ""))
+        self.assertEqual((out["mode"], out["command"]), ("manual", "nmap -p 445 --open 10.10.10.5"))
+        self.wait(out["id"], ("done",))
+        start = next(r for r in reversed(self.audit.recent(10)) if r["stage"] == "start")
+        self.assertIn("(manual): manual command nmap -p 445", start["message"])
+        for kwargs, part in (({"mode": "manual"}, "command are both required"),
+                             ({"mode": "manual", "command": "nmap 10.10.10.5\nrm -rf ~"}, "one line"),
+                             ({"mode": "manual", "command": "x" * 2001}, "one line"),
+                             ({"mode": "shell", "command": "id"}, "mode is one of"),
+                             ({"judge_model": "glm-abl"}, "refused"),
+                             ({"judge_model": "llama3-abliterated:8b"}, "refused"),
+                             ({"operator_model": "same", "judge_model": "same"}, "refused")):
+            with self.assertRaises(HTTPError, msg=kwargs) as e:
+                self.runs.start("t", "10.10.10.5", {}, **kwargs)
+            self.assertEqual(e.exception.status, 400, kwargs)
+            self.assertIn(part, e.exception.msg, kwargs)
+        with self.assertRaises(HTTPError) as e:
+            self.runs.start("", "10.10.10.5", {})                              # copilot mode needs a task
+        self.assertIn("task and target", e.exception.msg)
+
     def test_unknown_run(self):
         with self.assertRaises(HTTPError) as e:
             self.runs.get("999")
@@ -345,6 +441,61 @@ class TestModelChat(unittest.TestCase):
         rec = self.audit.recent(1)[0]
         self.assertEqual(rec["data"]["error"], "the browser closed the stream")
         self.assertEqual(rec["data"]["answer"], "stand-in ")
+
+
+class TestCopilotModels(unittest.TestCase):
+    """Operators from glm-serve's /v1/models, judges from the copilot Ollama's /api/tags (the model stand-in serves both)."""
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), model_standin.H)
+        cls.url = f"http://127.0.0.1:{cls.srv.server_address[1]}"
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def models(self, op=None, judge=None):
+        return CR.CopilotModels(self.url if op is None else op, self.url if judge is None else judge, http_error=HTTPError)
+
+    def test_lists_without_abliterated_or_embedding_judges(self):
+        m = self.models().list()
+        self.assertEqual((m["operator"]["models"], m["operator"]["default"], m["operator"]["error"]), (["glm-abl"], "glm-abl", None))
+        self.assertEqual((m["judge"]["models"], m["judge"]["default"]), (["qwen3:8b"], "qwen3:8b"))
+        self.assertEqual({x["name"]: x["why"].split(":")[0] for x in m["judge"]["excluded"]},
+                         {"glm-abl:latest": "abliterated", "nomic-embed-text:latest": "an embedding model, not a chat model"})
+
+    def test_check(self):
+        m = self.models()
+        self.assertEqual(m.check(), ("glm-abl", "qwen3:8b"))                  # nothing chosen: the defaults
+        self.assertEqual(m.check("glm-abl:latest", "qwen3:8b"), ("glm-abl:latest", "qwen3:8b"))
+        for op, judge, part in (("glm-abl", "glm-abl:latest", "refused"), (None, "glm-edge-1.5b-chat-abl", "refused"),
+                                ("qwen3:8b", "qwen3:8b", "refused"), (None, "llama3.1:8b", "has no model 'llama3.1:8b'"),
+                                ("other", None, "glm-serve has no model 'other'"), ("rm -rf", None, "not a model name")):
+            with self.assertRaises(HTTPError, msg=(op, judge)) as e:
+                m.check(op, judge)
+            self.assertEqual(e.exception.status, 400)
+            self.assertIn(part, e.exception.msg, (op, judge))
+
+    def test_servers_down(self):
+        m = self.models("http://127.0.0.1:9", "http://127.0.0.1:9")
+        lst = m.list()
+        self.assertIn("did not list", lst["operator"]["error"])
+        self.assertIn("did not list", lst["judge"]["error"])
+        self.assertEqual(m.check("glm-abl", "llama3.1:8b"), ("glm-abl", "llama3.1:8b"))   # can't verify the list: n8n will tell
+        with self.assertRaises(HTTPError):
+            m.check("glm-abl", "glm-abl")                                     # the judge rule needs no server
+        self.assertEqual(m.operator("anything"), "anything")
+        m2 = self.models()
+        self.assertEqual(m2.operator(""), "glm-abl")
+        with self.assertRaises(HTTPError):
+            m2.operator("not-served")
+
+    def test_free_prompt_to_a_chosen_model(self):
+        feed = CR.Feed()
+        list(CR.ModelChat(self.url, "glm-abl", feed).stream("hello there", 16, model="glm-abl-run7"))
+        self.assertEqual(model_standin.SEEN[-1]["model"], "glm-abl-run7")
+        self.assertEqual(feed.since(0)["events"][-1]["data"]["model"], "glm-abl-run7")
 
 
 class TestModelWatch(unittest.TestCase):

@@ -98,7 +98,8 @@ def collect(project, run_dir):
         "model": {"name": meta.get("model_repo", "THUDM/glm-edge-4b-chat"), "slug": meta.get("slug", "glm-edge-4b-chat"),
                   "n_layers": la["n_layers"] if la else None, "d_model": la["d_model"] if la else None,
                   "revision": copy_info.get("revision"), "arch": meta.get("arch")},
-        "meta": {k: meta.get(k) for k in ("status", "stage", "started", "updated", "layer", "recommended", "ollama", "out_dir", "model_dir", "error")},
+        # data: the prompt sets the run measured on (source, pinned commit, column, rows, sha256, edited): abliterate/data.py
+        "meta": {k: meta.get(k) for k in ("status", "stage", "started", "updated", "layer", "recommended", "ollama", "out_dir", "model_dir", "error", "data")},
         "config": {"n_inst_train": la["n_inst_train"] if la else None, "n_inst_test": len(bl["prompts"]) if bl else None, **cfg},
         "refusal_markers": REFUSAL_MARKERS,
         "prompts": ({"harmful_train_examples": la["harmful_train_examples"], "harmless_train_examples": la["harmless_train_examples"]} if la else None),

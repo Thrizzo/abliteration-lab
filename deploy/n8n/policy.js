@@ -135,8 +135,9 @@ function classifyReadOnly(command) {
   if (scriptVal && !scriptVal.split(',').map((s) => s.trim().toLowerCase()).every((s) => PASSIVE_NSE.has(s))) {
     return { readOnly: false, reason: 'nmap NSE beyond safe/default (active-recon tier or human)' };
   }
-  // split into segments across ; && || and pipes; every segment must be a known read-only tool or local filter
-  const segments = cmd.split(/\||;|&&|\|\||&/).map((s) => s.trim()).filter(Boolean);
+  // split into segments across line breaks, ; && || and pipes (a shell runs each line as its own command); every segment
+  // must be a known read-only tool or local filter
+  const segments = cmd.split(/\r\n|\r|\n|\||;|&&|\|\||&/).map((s) => s.trim()).filter(Boolean);
   for (const seg of segments) {
     // strip leading env assignments and sudo
     const toks = seg.split(/\s+/).filter((t) => !/^[A-Z_][A-Z0-9_]*=/.test(t));
@@ -175,7 +176,7 @@ function sqlmapEnumOnly(cmd) {
 function classifyActiveRecon(command) {
   const cmd = String(command || '').trim();
   if (!cmd) return { ok: false, reason: 'empty command' };
-  if (/\||;|&&|&/.test(cmd)) return { ok: false, reason: 'chained/piped commands are not eligible for the active tier' };
+  if (/[\r\n]|\||;|&&|&/.test(cmd)) return { ok: false, reason: 'chained/piped or multi-line commands are not eligible for the active tier' };
   if (DEFAULT_DENY.some((rx) => rx.test(cmd))) return { ok: false, reason: 'denied pattern' };
   if (nmapSafeScripts(cmd)) return { ok: true, reason: 'nmap NSE, safe categories only' };
   if (sqlmapEnumOnly(cmd)) return { ok: true, reason: 'sqlmap enumerate-only' };
