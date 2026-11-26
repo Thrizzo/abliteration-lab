@@ -113,10 +113,11 @@ const READONLY_TOOLS = new Set([
   'enum4linux', 'enum4linux-ng', 'smbmap', 'smbclient', 'ldapsearch', 'rpcclient', 'rpcinfo', 'showmount',
   'snmpwalk', 'onesixtyone', 'nbtscan', 'ike-scan', 'netstat', 'ss', 'nc', 'ncat',
 ]);
-// local filters allowed as pipe targets (they touch local stdout/files, never the target)
+// local filters allowed as pipe targets (they touch local stdout/files, never the target). Not xargs: it runs whatever
+// program it is given (curl ... | xargs -n1 curl -sO fetches every name a server lists).
 const FILTER_TOOLS = new Set([
   'grep', 'egrep', 'fgrep', 'awk', 'sed', 'cut', 'sort', 'uniq', 'head', 'tail', 'tee', 'tr',
-  'wc', 'cat', 'less', 'more', 'jq', 'column', 'xargs', 'tr', 'rev', 'base64', 'cat',
+  'wc', 'cat', 'less', 'more', 'jq', 'column', 'tr', 'rev', 'base64', 'cat',
 ]);
 // patterns that make a command mutating/active even if its tool is in READONLY_TOOLS
 const MUTATING_PATTERNS = [
@@ -128,12 +129,27 @@ const MUTATING_PATTERNS = [
 ];
 const PASSIVE_NSE = new Set(['safe', 'default']); // the only NSE categories cheap enough for the passive tier
 
+// A tool on the read-only list, or a local filter, that can still run a program, listen or change a share. Each of these
+// auto-ran in the passive tier before (found by the protected-data red team, checked against this gate).
+function execEscape(bin, seg) {
+  const args = seg.split(/\s+/).slice(1);
+  if (['nc', 'ncat', 'netcat'].includes(bin) && args.some((t) => /^-[A-Za-z]*[ecl][A-Za-z]*$/.test(t) || /^--(sh-|lua-)?exec(=|$)|^--listen\b/.test(t)))
+    return 'netcat that runs a program or listens (-e, -c, --exec, --sh-exec, --lua-exec, -l)';
+  if (bin === 'ffuf' && /(^|\s)--?input-cmd\b/.test(seg)) return 'ffuf -input-cmd runs a program';
+  if (bin === 'awk' && /system\s*\(|\|\s*"|\|&|getline/.test(seg)) return 'awk that runs a program (system, pipes, getline)';
+  if (bin === 'sed' && /(^|[;\n{}\s0-9$\/'"])e(\s|;|'|"|$)|\/[gpiImM0-9]*e[gpiImMwW0-9]*(\s|;|}|'|"|$)/.test(seg)) return 'sed e runs a program';
+  if (bin === 'smbclient' && /['";]\s*(!|(mput|put|mkdir|md|rmdir|rd|del|deltree|rm|rename|mv|setmode)\b)/i.test(seg))
+    return 'smbclient command that runs a local shell (!) or changes the share';
+  if (bin === 'smbmap' && /(^|\s)-[A-Za-z]*x|(^|\s)--(upload|delete|mkdir)\b/.test(seg)) return 'smbmap that runs a command (-x) or changes the share';
+  return '';
+}
+
 function classifyReadOnly(command) {
   const cmd = String(command || '').trim();
   if (!cmd) return { readOnly: false, reason: 'empty command' };
   if (MUTATING_PATTERNS.some((rx) => rx.test(cmd))) return { readOnly: false, reason: 'command performs a write/active operation' };
   // nmap NSE is passive only if EVERY script in the list is safe/default (a lone "default" prefix must not smuggle in vuln)
-  const scriptVal = (cmd.match(/--script[=\s]+("?)([^"\s]+)\1/i) || [])[2];
+  const scriptVal = (cmd.match(/(?:^|\s)--?script[=\s]+("?)([^"\s]+)\1/i) || [])[2];   // nmap reads -script like --script
   if (scriptVal && !scriptVal.split(',').map((s) => s.trim().toLowerCase()).every((s) => PASSIVE_NSE.has(s))) {
     return { readOnly: false, reason: 'nmap NSE beyond safe/default (active-recon tier or human)' };
   }
@@ -149,6 +165,8 @@ function classifyReadOnly(command) {
     if (!READONLY_TOOLS.has(bin) && !FILTER_TOOLS.has(bin)) {
       return { readOnly: false, reason: `"${bin || '(empty)'}" is not on the read-only tool allowlist` };
     }
+    const esc = execEscape(bin, seg);
+    if (esc) return { readOnly: false, reason: esc };
   }
   return { readOnly: true, reason: 'passive recon (read-only tools only)' };
 }
@@ -163,10 +181,21 @@ const SQLMAP_ENUM = /--(banner|current-user|current-db|hostname|is-dba|users|dbs
 const SQLMAP_DANGER = /--(os-shell|os-pwn|os-cmd|sql-shell|sql-query|file-write|file-dest|file-read|reg-add|reg-del|reg-write|dump|dump-all|passwords|eval|udf-inject|priv-esc|crawl)\b/i;
 
 function nmapSafeScripts(cmd) {
-  const m = cmd.match(/--script[=\s]+("?)([^"\s]+)\1/i);
+  const m = cmd.match(/(?:^|\s)--?script[=\s]+("?)([^"\s]+)\1/i);
   if (!m) return false;                       // no --script => not this tier (plain nmap is passive tier)
   if (DANGER_NSE.test(m[2])) return false;
   return m[2].split(',').map((s) => s.trim().toLowerCase()).every((s) => SAFE_NSE.has(s));
+}
+
+// sqlmap rewrites leading Unicode dashes to "-" and "-word" to "--word" (lib/parse/cmdline.py) and accepts unique prefixes
+const SQLMAP_RISKY = ['os-shell', 'os-pwn', 'os-cmd', 'os-bof', 'os-smbrelay', 'sql-shell', 'sql-query', 'sql-file', 'file-write', 'file-dest',
+  'file-read', 'reg-add', 'reg-del', 'reg-write', 'reg-read', 'dump', 'dump-all', 'passwords', 'eval', 'udf-inject', 'shared-lib', 'priv-esc',
+  'crawl', 'search', 'all'];
+function sqlmapRisky(words) {
+  const n = words.map((t) => t.replace(/^[\u2010\u2013\u2212\u2014\u4e00\u1680\ufe63\uff0d]+/, (m) => '-'.repeat(m.length)));
+  if (n.some((t) => /^-[armlgcz]/.test(t))) return true;           // -a all, -r/-m/-l/-c files, -g dork, -z mnemonics
+  return n.some((t) => { const m = /^--?([A-Za-z][\w-]*)/.exec(t); if (!m) return false; const x = m[1].toLowerCase();
+    return x.length >= 2 && SQLMAP_RISKY.some((d) => d === x || d.startsWith(x) || x.startsWith(d + '-')); });
 }
 
 function sqlmapEnumOnly(cmd) {
@@ -181,6 +210,7 @@ function classifyActiveRecon(command) {
   if (/[\r\n]|\||;|&&|&/.test(cmd)) return { ok: false, reason: 'chained/piped or multi-line commands are not eligible for the active tier' };
   if (DEFAULT_DENY.some((rx) => rx.test(cmd))) return { ok: false, reason: 'denied pattern' };
   if (nmapSafeScripts(cmd)) return { ok: true, reason: 'nmap NSE, safe categories only' };
+  if (/\bsqlmap\b/i.test(cmd) && sqlmapRisky(cmd.split(/\s+/))) return { ok: false, reason: 'sqlmap option that dumps, searches or reads files' };
   if (sqlmapEnumOnly(cmd)) return { ok: true, reason: 'sqlmap enumerate-only' };
   return { ok: false, reason: 'not an allowed active-recon shape' };
 }
@@ -325,5 +355,5 @@ function decide(proposal, config) {
 // exported for the unit test; harmless inside an n8n Code node
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { decide, classifyReadOnly, classifyActiveRecon, detectInjection, findUnverifiable, targetInScope, extractTargets, inCidr, ipToInt,
-    engagementConfig, scopeWhy, windowCheck, prohibitedHits, DEFAULT_DENY };
+    engagementConfig, scopeWhy, windowCheck, prohibitedHits, execEscape, sqlmapRisky, DEFAULT_DENY };
 }

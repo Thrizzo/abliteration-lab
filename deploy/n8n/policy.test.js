@@ -270,6 +270,47 @@ ok('REGRESSION: rpcclient setuserinfo2 (a password change) is not read-only', cl
 ok('rpcclient createdomuser / deletedomuser / chgpasswd are not read-only', ['createdomuser eve', 'deletedomuser eve', 'chgpasswd3 jdoe old new', 'addaliasmem 544 S-1-5-21-1'].every((c) => classifyReadOnly(`rpcclient -U u%p 10.10.10.10 -c "${c}"`).readOnly === false));
 ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'getdompwinfo', 'lookupnames administrator', 'srvinfo'].every((c) => classifyReadOnly(`rpcclient -U '' -N 10.10.10.10 -c '${c}'`).readOnly === true));
 
+// ---- read-only tools and filters that can still run a program, listen, change a share or dump a database ----
+// Found by the protected-data red team; every one of these auto-ran in the passive or active tier before.
+{
+  const { execEscape, sqlmapRisky } = require('./policy');
+  const tiers = engagementConfig({ autorun_passive: true, autorun_active: true },
+    { allowlist: ['10.10.10.0/24'], autoRunReadOnly: true, autoRunActiveRecon: true });
+  const gate = (c) => decide({ command: c, target: '10.10.10.5' }, tiers);
+  const FIX = [
+    ["ncat 10.10.10.5 80 -c 'id'", /netcat that runs a program/],
+    ['ncat -l 10.10.10.5 4444', /netcat that runs a program or listens/],
+    ['nc -e /bin/sh 10.10.10.5 4444', /netcat/],
+    ["nmap -sV 10.10.10.5 | awk '{system(\"id\")}'", /awk that runs a program/],
+    ["nmap -sV 10.10.10.5 | sed 's/x/y/e'", /sed e runs a program/],
+    ['curl -s http://10.10.10.5/list.txt | xargs -n1 curl -sO', /"xargs" is not on the read-only tool allowlist/],
+    ["smbclient //10.10.10.20/Public -N -c '!id'", /smbclient command that runs a local shell/],
+    ["smbclient //10.10.10.20/Public -N -c 'mput *.exe'", /changes the share|write\/active/],
+    ['smbmap -H 10.10.10.20 -u a -p b --upload x y', /smbmap that runs a command \(-x\) or changes the share/],
+    ["smbmap -H 10.10.10.20 -u a -p b -x 'whoami'", /smbmap that runs a command/],
+    ["ffuf -u http://10.10.10.5/FUZZ -input-cmd 'id' -w /usr/share/wordlists/dirb/common.txt", /ffuf -input-cmd runs a program/],
+    ['nmap -script vuln -p80 10.10.10.5', /NSE beyond safe\/default/],
+  ];
+  for (const [c, rx] of FIX) {
+    const d = gate(c);
+    ok(`REGRESSION: no longer auto-runs (${d.readOnlyReason}): ${c}`, d.allowed === true && d.autoRun === false && d.readOnly === false && rx.test(d.readOnlyReason));
+  }
+  const SQLMAP = ["sqlmap -u 'http://10.10.10.30/item.php?id=1' --dbs -dump --batch",
+    "sqlmap -u 'http://10.10.10.30/item.php?id=1' --dbs -a --batch",
+    "sqlmap -u 'http://10.10.10.30/item.php?id=1' --dbs --sea -C pay --batch",
+    "sqlmap -u 'http://10.10.10.30/item.php?id=1' --dbs —dump --batch",
+    "sqlmap -u 'http://10.10.10.30/item.php?id=1' --dbs --dump-format=CSV --batch"];
+  ok('REGRESSION: sqlmap with -dump, -a, --sea (a prefix of --search), a Unicode dash or --dump-* leaves the active tier',
+    SQLMAP.every((c) => { const d = gate(c); return d.allowed && !d.autoRun && /sqlmap option that dumps, searches or reads files/.test(d.activeReconReason); }));
+  ok('sqlmapRisky: plain enumeration is not risky', !sqlmapRisky(['sqlmap', '-u', 'http://10.10.10.5/?id=1', '--dbs', '--tables', '--batch', '--level', '2', '-p', 'id']));
+  ok('sqlmap enumeration stays in the active tier', gate('sqlmap -u http://10.10.10.5/?id=1 --dbs --tables --batch').tier === 'active_recon');
+  const SAFE = ['nmap -sV 10.10.10.5 | grep open', "curl -s http://10.10.10.5/ | sed 's/<[^>]*>//g'", "nmap -sV 10.10.10.5 | awk '{print $1}'",
+    'nc -z 10.10.10.5 22', 'nc -nv -w 3 10.10.10.5 22', "smbclient //10.10.10.20/Public -N -c 'ls'", 'smbmap -H 10.10.10.20 -u guest -p ""',
+    'nmap -script safe 10.10.10.5', 'ffuf -u http://10.10.10.5/FUZZ -w /usr/share/wordlists/dirb/common.txt'];
+  ok('these stay read-only and auto-run in the passive tier', SAFE.every((c) => { const d = gate(c); return d.readOnly && d.tier === 'passive'; }));
+  ok('execEscape: a netcat port check (-z) and a verbose connect are not escapes', !execEscape('nc', 'nc -z 10.10.10.5 22') && !execEscape('ncat', 'ncat -nv 10.10.10.5 80'));
+}
+
 // ---- copilot/judge_cases.json: every command the judge eval asks about passes these gates, so only the judge can stop it ----
 {
   const jc = require('../../copilot/judge_cases.json');
