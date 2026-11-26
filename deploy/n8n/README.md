@@ -122,10 +122,10 @@ instead of guessing a scope.
 
 | File | What it is |
 | --- | --- |
-| `workflows/pentest-copilot.json` | The importable workflow (39 nodes). **Generated**, do not hand-edit. |
-| `connect_console.py` | One-shot setup: credentials, the workflow (published), and, for the Kubernetes console, an n8n API key limited to reading and stopping executions plus the console's Secret. Safe to re-run. |
+| `workflows/pentest-copilot.json` | The importable workflow (44 nodes). **Generated**, do not hand-edit. |
+| `connect_console.py` | One-shot setup: credentials, the workflow (published), and, for the Kubernetes console, an n8n API key limited to reading and stopping executions plus the console's Secret. Safe to re-run. It first waits (`--wait`, 300 s) until `/healthz/readiness` answers 200: while n8n migrates its database, every request gets 200 "n8n is starting up", and its routes appear only after that, so it can run right after a deploy. |
 | `build_workflow.js` | Generator: embeds `policy.js` into the Code nodes and reads the prompts from `copilot/operator_contract.json`. Every Code node is parsed at build time; `--check` fails if the JSON is stale. |
-| `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 66 tests. |
+| `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 98 tests. |
 | `workflow.test.js` | Runs each Code node's actual code with mocked n8n globals (neutralizer, `$env` fail-closed, parse, veto-only judge, store-down detection, result-page escaping). Also checks the graph: blocked runs never reach approval or execution, console runs never reach a form page, and the operator calls chat completions (not the Responses API). |
 | `docker-compose.n8n.yml` | n8n + Qdrant overlay on the lab stack. n8n listens on localhost only; Qdrant has no published port. |
 | `../../copilot/` | Ingestion, scrubbing, QLoRA pairs, trainer and eval ([copilot/README.md](../../copilot/README.md)). |

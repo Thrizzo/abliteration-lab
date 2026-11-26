@@ -440,9 +440,11 @@ function Invoke-N8n {
     if (-not $py) { Bad 'Python 3 for deploy/n8n/connect_console.py (python.org, or: winget install Python.Python.3.12), then -Setup again'; return }
     Ok ('Python: ' + ($py -join ' '))
     try { Start-Forward 'lab-copilot' 'n8n' $N8nPort 5678 } catch { Bad $_.Exception.Message; return }
-    # /rest/settings, not /healthz: that one answers before n8n's REST API (which the script uses) is ready
-    if (Wait-For 300 { (Http -Url "http://127.0.0.1:$N8nPort/rest/settings" -NoAuth).Code -eq '200' } 3) { Ok 'n8n answers (/rest/settings)' }
-    else { Bad 'n8n answers (/rest/settings) within 5 minutes'; Show-Trouble 'lab-copilot'; return }
+    # /healthz/readiness says 200 only once n8n's REST API is there. /healthz and /rest/settings are no proof: while
+    # n8n migrates its database it answers every request with 200 "n8n is starting up", and its routes come after
+    # that (an owner setup in between got a plain 404 in CI). connect_console.py waits for it as well.
+    if (Wait-For 300 { (Http -Url "http://127.0.0.1:$N8nPort/healthz/readiness" -NoAuth).Code -eq '200' } 3) { Ok 'n8n is ready (/healthz/readiness)' }
+    else { Bad 'n8n is not ready after 5 minutes (/healthz/readiness)'; Show-Trouble 'lab-copilot'; return }
     $email = $N8nEmail
     if (-not $email) {
         if ($NonInteractive) { Bad 'N8N_EMAIL is not set (needed with -NonInteractive)'; return }

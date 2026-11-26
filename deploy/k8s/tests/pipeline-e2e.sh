@@ -191,7 +191,8 @@ check "rollout n8n" kubectl -n lab-copilot rollout status deploy/n8n --timeout=6
 check "rollout the model stand-in (in place of the copilot's Ollama)" kubectl -n lab-copilot rollout status deploy/ollama --timeout=300s
 kubectl -n lab-copilot port-forward svc/n8n 15678:5678 >/dev/null 2>&1 &
 PF2=$!
-for i in $(seq 1 120); do [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:15678/rest/settings)" = 200 ] && break; sleep 2; done
+# /healthz/readiness: 200 only once n8n's REST API is there (while it migrates, every path answers 200 "starting up")
+for i in $(seq 1 120); do [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:15678/healthz/readiness)" = 200 ] && break; sleep 2; done
 check "connect_console.py: owner, API keys, credentials, workflow published, console Secret" python3 deploy/n8n/connect_console.py \
   --n8n http://127.0.0.1:15678 --email ci@lab.test --password Ci-Only-Owner-Pass-1 --setup-owner \
   --operator-url http://ollama.lab-copilot.svc:11434/v1 --apply-secret

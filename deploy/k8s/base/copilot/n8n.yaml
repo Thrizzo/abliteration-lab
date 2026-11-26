@@ -64,7 +64,8 @@ spec:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
           startupProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 5, failureThreshold: 60 }
-          readinessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 10 }
+          # ready = the REST API is there (/healthz answers while n8n still migrates and before its routes exist)
+          readinessProbe: { httpGet: { path: /healthz/readiness, port: http }, periodSeconds: 10 }
           livenessProbe: { httpGet: { path: /healthz, port: http }, periodSeconds: 30, failureThreshold: 6 }
       volumes:
         - { name: data, persistentVolumeClaim: { claimName: n8n-data } }

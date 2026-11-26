@@ -20,6 +20,7 @@ import os
 import secrets
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -77,6 +78,37 @@ class N8n:
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
             raise RuntimeError(f"{method} {path}: HTTP {e.code} {detail}") from None
+
+    def wait_ready(self, timeout=300, every=2.0, log=print):
+        """Until n8n can serve its REST API, which GET /healthz/readiness answers with 200. /healthz and even /rest/settings
+        are no proof: while n8n migrates its database it answers every request with 200 "n8n is starting up", and its
+        routes come after that (a request in between gets a plain 404). An n8n without the readiness endpoint (404)
+        counts as ready once /rest/settings answers with its JSON."""
+        t0, said = time.time(), False
+        while True:
+            status, _ = self._probe("/healthz/readiness")
+            if status == 200:
+                return
+            if status == 404:
+                s2, body = self._probe("/rest/settings")
+                if s2 == 200 and body.lstrip().startswith("{"):
+                    return
+            if time.time() - t0 > timeout:
+                raise RuntimeError(f"n8n at {self.base} was not ready after {timeout} s (GET /healthz/readiness: {status})")
+            if not said:
+                log(f"waiting for n8n to finish starting (GET /healthz/readiness: {status})")
+                said = True
+            time.sleep(every)
+
+    def _probe(self, path):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(self.base + path, headers={"Accept": "application/json"}),
+                                        timeout=10) as r:
+                return r.status, r.read(200).decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            return e.code, ""
+        except OSError as e:
+            return f"unreachable, {type(e).__name__}", ""
 
     # ---------------------------------------------------------------- API key (internal REST API, your login)
     def owner_setup(self, email, password):
@@ -185,9 +217,11 @@ def main(argv=None):
     ap.add_argument("--namespace", default="lab", help="the console's namespace (for the Secret)")
     ap.add_argument("--apply-secret", action="store_true", help="apply the console's Secret with kubectl (Kubernetes)")
     ap.add_argument("--secret-file", help="write the console's Secret (JSON manifest) here instead")
+    ap.add_argument("--wait", type=int, default=300, help="seconds to wait for n8n to finish starting (default 300)")
     a = ap.parse_args(argv)
 
     n8n = N8n(a.n8n)
+    n8n.wait_ready(a.wait)
     if a.api_key:
         n8n.api_key = console_key = a.api_key
     else:
