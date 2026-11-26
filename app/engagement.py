@@ -304,19 +304,21 @@ _CATEGORY = re.compile(r"\b(personal data|personal information|pii|customer data
 _DATA_EXT = "csv|tsv|xlsx|xls|docx|doc|pdf|sql|bak|dump|dmp|db|sqlite|mdb|accdb|pst|ost|kdbx|json|xml|zip|7z|tar|gz|tgz|ldif|pfx|p12"
 _DATA_EXTS = set(_DATA_EXT.split("|"))
 # a word may start only where no name character precedes it: tried once per word, so these stay linear on long text
-_CONCRETE = re.compile(rf"\\\\|://|(?<![\w-])[\w-]+\.(?:{_DATA_EXT})\b|\w\$(?!\w)", re.I)
+_CONCRETE = re.compile(rf"\\\\|://|(?<![\w:/])//[\w.-]|(?<![\w-])[\w-]+\.(?:{_DATA_EXT})\b|\w\$(?!\w)", re.I)
 _DOTTED = re.compile(r"(?<![\w-])-*(\w[\w-]*(?:\.[\w-]+)+)")             # a dotted name, its last part decides
 _KEYWORDS = ((re.compile(r"\bkeepass\b|\bpassword (?:vault|database)s?\b", re.I), "*.kdbx"),
              (re.compile(r"\boutlook data files?\b|\bpst files?\b", re.I), "*.pst"))
 _STOP = {"file", "files", "network", "shared", "server", "drive", "production", "main", "whole", "entire", "same", "other", "any", "every",
          "this", "that", "data", "new", "old", "test", "temp", "big", "central", "customer", "client", "employee"}
 _UNC_PART = r"[\w$.-]+(?: [A-Z0-9][\w$.-]*)*"        # a space only before a capital: "Personnel Files", not "HR$ or the backups"
+# The path candidate's lookbehind holds every character the path itself may hold: a match then starts only where a path
+# starts, never again at each later "/" (a run of "*/" took quadratic time).
 _CANDIDATES = (
-    (re.compile(rf"\\\\[\w.-]+\\({_UNC_PART}(?:\\{_UNC_PART})*)"), lambda m: m.group(1).rstrip(" .")),         # UNC: share, path
-    (re.compile(r"\b(?:https?|ftp|smb)://[\w.-]+(?::\d+)?(/[\w/.%$-]*\w/?)", re.I), lambda m: m.group(1)),      # URL: its path
+    (re.compile(rf"(?:\\\\|(?<![\w:/])//)[\w.-]+[\\/]({_UNC_PART}(?:[\\/]{_UNC_PART})*)"), lambda m: m.group(1).rstrip(" .")),  # UNC
+    (re.compile(r"\b(?:https?|ftp|smb)://[\w.-]+(?::\d+)?(/[\w/.%$-]*[\w$]/?)", re.I), lambda m: m.group(1)),   # URL: its path
     (re.compile(r"\b(?:s3|gs)://([\w.-]+(?:/[\w/.-]*)?)", re.I), lambda m: m.group(1).rstrip("/.")),             # bucket and path
     (re.compile(r"\b[A-Za-z]:((?:\\[\w$.*-]+)+)"), lambda m: m.group(1).rstrip(".")),                             # C:\a\b -> \a\b
-    (re.compile(r"(?<![\w/:.])(/(?:[\w.*$-]+/)*[\w.*$-]*[A-Za-z][\w.*$-]*/?)"), lambda m: m.group(1).rstrip(".")),  # /srv/exports/
+    (re.compile(r"(?<![\w/:.*$-])(/(?:[\w.*$-]+/)*[\w.*$-]*[A-Za-z][\w.*$-]*/?)"), lambda m: m.group(1).rstrip(".")),  # /srv/exports/
     (_DOTTED, lambda m: m.group(1) if m.group(1).rsplit(".", 1)[1].lower() in _DATA_EXTS else ""),               # customers.csv
     (re.compile(r"(?<![\w\\/$])([A-Za-z][\w-]{1,30}\$)(?![\w$])"), lambda m: m.group(1)),                         # HR$
     (re.compile(r"\b[Tt]he (?:\"([\w$. -]{2,40})\"|'([\w$. -]{2,40})'|([A-Z][\w$.-]{1,40}|[\w$.-]{0,20}[\d$_.][\w$.-]{0,20})) "
@@ -324,21 +326,65 @@ _CANDIDATES = (
     (re.compile(r"\b[Tt]he ([\"']?)([A-Za-z_][\w$.-]{2,40})\1 (?:table|collection)\b"),
      lambda m: "" if m.group(2).lower() in _STOP else m.group(2)),                                               # the X table
 )
+_UNC, _THE_SHARE, _THE_TABLE = 0, 7, 8                  # their places in _CANDIDATES
+_TOOL_DIRS = {"bin", "sbin", "libexec", "tools", "wordlists", "seclists"}     # the runner's programs and wordlists
 BROAD = {"share", "shared", "public", "common", "users", "user", "data", "files", "home", "temp", "tmp", "admin", "docs", "documents",
          "scans", "logs", "web", "www", "root", "opt", "usr", "wordlists", "seclists", "kali", "passwords", "test", "db", "it", "hr"}
 _DESCRIPTIVE = re.compile(r"\s(?:share|folder|directory|table|database|bucket|collection|files)$", re.I)
+# a sentence that states the scope ("Scope: the API at https://api.acme.lab/v2/ (no production data)", "the shop at
+# http://10.10.10.5/shop/ is in scope, but ..."), and the clauses it is split into: a name it gives counts only with a
+# negation or protective cue in its own clause
+_STATES_SCOPE = re.compile(r"\b(?:in[ -]scope|within (?:the )?scope|(?:limited|restricted) to)\b|\bscope\s*:", re.I)
+_CLAUSE = re.compile(r"[,;()]|\bbut\b|\band\b(?=\s+(?:must|should|shall|may|will|can|cannot|do|does|is|are)\b)", re.I)
 
 
-def _candidates(sentence, scope):
-    """The names a sentence gives that the console would accept; of two where one contains the other, the longer."""
-    found = [c for rx, pick in _CANDIDATES for m in rx.finditer(sentence) for c in (pick(m),) if c][:64]
+def _names(c):
+    return [n for n in protected_key(c).strip("/").split("/") if n]
+
+
+def _names_within(c, d):
+    """Whether c's names stand, in order and whole, among d's: HR$/Payroll holds HR$ and Payroll, not HR$/Pay. A name
+    also stands for its hidden share (HR in HR$), as "the HR share" names \\\\fs01\\HR$."""
+    a, b = _names(c), _names(d)
+    return bool(a) and any(all(x == y or x + "$" == y for x, y in zip(a, b[i:i + len(a)])) for i in range(len(b) - len(a) + 1))
+
+
+def _candidates(sentence, scope, scoped=False):
+    """The names a sentence gives that the console would accept, as (name, verbatim): verbatim for a UNC path or a
+    quoted name, a share or folder spelled as it is. One mention matched twice gives one name: a name inside another's
+    match (the file name of a URL or a path), or "the HR share" whose names another candidate spells (HR$). Two mentions
+    stay two (customers.csv and customers.csv.bak, \\\\fs01\\HR$ and \\\\fs01\\HR$\\Payroll). scoped: the sentence states
+    the scope, so a name needs a negation or protective cue in its own clause."""
+    found = []
+    for i, (rx, pick) in enumerate(_CANDIDATES):
+        for m in rx.finditer(sentence):
+            c = pick(m)
+            if c:
+                found.append((c, m.span(), i in (_THE_SHARE, _THE_TABLE), i == _UNC or (i == _THE_SHARE and bool(m.group(1) or m.group(2)))))
+    found = found[:64] + [(entry, None, False, False) for rx, entry in _KEYWORDS if rx.search(sentence)]
     valid = []
-    for c in found + [entry for rx, entry in _KEYWORDS if rx.search(sentence)]:
+    for c, span, described, verbatim in found:
         try:
-            valid.append(protected_entry(c, scope))                # hosts are rule_hints' business
+            valid.append((protected_entry(c, scope), span, described, verbatim))    # hosts are rule_hints' business
         except ValueError:
             continue
-    return [c for c in valid if not any(c != d and c in d for d in valid)]
+
+    def merged(c, d):
+        if protected_key(c[0]) == protected_key(d[0]):
+            return False                                   # the same name twice: data_hints keeps the first
+        if c[1] and d[1] and d[1][0] <= c[1][0] and c[1][1] <= d[1][1] and (c[1] != d[1] or len(d[0]) > len(c[0])):
+            return True                                    # inside the other's match: one mention matched twice
+        return c[2] and _names_within(c[0], d[0])          # "the HR share" next to \\fs01\HR$
+
+    cuts = [m.span() for m in _CLAUSE.finditer(sentence)] if scoped else []
+
+    def cued(c):
+        if not scoped:
+            return True
+        clause = sentence if not c[1] else sentence[max([e for s, e in cuts if e <= c[1][0]], default=0):
+                                                    min([s for s, e in cuts if s >= c[1][1]], default=len(sentence))]
+        return bool(_NEGATED.search(clause) or _PROTECT.search(clause))
+    return [(c[0], c[3]) for c in valid if cued(c) and not any(merged(c, d) for d in valid if d is not c)]
 
 
 def _short(key):
@@ -443,14 +489,16 @@ def data_hints(fields, hosts=()):
     scope = _scope_pairs(hosts)
     listed = _lines(fields.get("protected_data"))
     cover = [_compiled(e) for e in listed]
-    out, seen, unnamed = [], set(), None
+    out, seen, unnamed, verbatim = [], set(), None, []
     for key in ("roe", "scope_statement"):
         for sentence in _SENTENCE.split(str(fields.get(key) or "")):
             if not ((_NEGATED.search(sentence) or _PROTECT.search(sentence))
                     and (_DATA_WORD.search(sentence) or _CATEGORY.search(sentence) or _CONCRETE.search(sentence)
                          or any(rx.search(sentence) for rx, _ in _KEYWORDS))):
                 continue
-            cands = _candidates(sentence, scope)
+            found = _candidates(sentence, scope, scoped=key == "scope_statement" or bool(_STATES_SCOPE.search(sentence)))
+            verbatim += [c for c, spelled in found if spelled]
+            cands = [c for c, _ in found]
             for cand in cands:
                 if len(out) >= 8:                                  # at most 8 from the rules
                     break
@@ -470,13 +518,24 @@ def data_hints(fields, hosts=()):
         k = protected_key(e)
         if k.strip("/") in BROAD or _short(k):
             out.append({"kind": "broad", "entry": e, "sentence": None})
-        elif _DESCRIPTIVE.search(e):
+        elif _DESCRIPTIVE.search(e) and not any(_names_within(e, v) for v in verbatim):   # "Personnel Files" from a UNC path is a name
             out.append({"kind": "descriptive", "entry": e, "sentence": None})
     for p in _lines(fields.get("prohibited")):           # Prohibited matches the raw text only
         if re.search(r"\s", p) or p.startswith("-"):    # a command or a flag (rm -rf /, -oN out/x), not a name
             continue
-        if re.search(r"[/\\]", p) or re.search(rf"\.(?:{_DATA_EXT})$", p, re.I) or re.search(r"\w\$$", p):
-            out.append({"kind": "move", "entry": p, "sentence": None})
+        if not (re.search(r"[/\\]", p) or re.search(rf"\.(?:{_DATA_EXT})$", p, re.I) or re.search(r"\w\$$", p)):
+            continue
+        # a move only where Protected data takes the entry (C$, a URL, ../ are refused there) and reads it at least as
+        # strictly: a tool or wordlist path (/usr/bin/hydra, /usr/share/wordlists/rockyou.txt) is a local position there,
+        # which waits for a human, while Prohibited blocks it
+        try:
+            protected_entry(p, scope)
+        except ValueError:
+            continue
+        names = _names(p)
+        if any(n in _TOOL_DIRS for n in names) and not re.search(rf"\.(?:{_DATA_EXT})$", names[-1], re.I):
+            continue
+        out.append({"kind": "move", "entry": p, "sentence": None})
     return out
 
 

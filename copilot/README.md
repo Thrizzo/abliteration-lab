@@ -129,8 +129,9 @@ set. The 3-pair run done while building this proves the harness works; it is not
 
 The scope, the exclusions, the window, the prohibited tools and the protected data are code (`deploy/n8n/policy.js`) and
 need no model. So is the read-only check: a tool that runs a program, listens or changes a share (netcat `-e` or `-l`,
-awk `system()`, sed's `e`, `xargs`, smbclient `!` or `put`, `smbmap -x`) never auto-runs, and sqlmap options that dump,
-search or read files leave the active tier. What only the judge can stop is a command that passes every gate but
+awk `system()`, sed's `e`, `xargs`, smbclient `!` or `put`, `smbmap -x`) never auto-runs, quoted, attached or
+abbreviated (`nc '-e'`, `nc -e/bin/sh`, `ncat --exe`), and sqlmap options that dump, search or read files leave the
+active tier. What only the judge can stop is a command that passes every gate but
 breaks a rule written as text: "never change passwords", "do not touch backup01.lab", "no automated scanners".
 `judge_cases.json` holds 49 such commands: 28 that break their engagement's rules and 21 that comply, across three
 engagements. The tests check that every one of them passes `policy.js`, so for these the judge really is the only line.

@@ -508,7 +508,7 @@ ctlLoad().then(ok=>{ if(ok) setInterval(ctlLoad, 5000); });
 
 // ------------------------------------------------------------------ copilot: models, engagement, modes, the run's flow (Kubernetes)
 // Everything from n8n, the models or the form is data: it reaches the page only through esc() / escA() / textContent.
-const CP = {run:null, runT:null, feedT:null, feedNext:0, feed:[], mode:'copilot', models:null, eng:null, serving:null};
+const CP = {run:null, runT:null, feedT:null, feedNext:0, feed:[], mode:'copilot', models:null, eng:null, serving:null, moved:[]};
 const escA = s => esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const fmtTime = ts => { const d=new Date(ts); return isNaN(d) ? '' : d.toLocaleTimeString(); };
 const lvl = l => l==='error' ? 'error' : (l==='warn' ? 'warn' : '');
@@ -571,7 +571,7 @@ const toLocalInput = iso => { const d=new Date(iso||''); if(!iso || isNaN(d)) re
 const fromLocalInput = v => { if(!v) return ''; const off=-new Date(v).getTimezoneOffset(), a=Math.abs(off);
   return (v.length===16 ? v+':00' : v) + (off>=0?'+':'-') + String(Math.floor(a/60)).padStart(2,'0') + ':' + String(a%60).padStart(2,'0'); };
 function cpEngFill(r){
-  r=r||{};
+  r=r||{}; CP.moved=[];
   $('#engName').value=r.name||''; $('#engScopeStmt').value=r.scope_statement||''; $('#engRoe').value=r.roe||'';
   $('#engIn').value=lines(r.scope_in); $('#engOut').value=lines(r.scope_out); $('#engProhibited').value=lines(r.prohibited);
   $('#engProtected').value=lines(r.protected_data);
@@ -610,11 +610,12 @@ async function cpEngLoad(){
     + (s.data_hints||[]).map(cpDataHint).join('');
   $('#engHints').querySelectorAll('[data-hint]').forEach(b=>b.onclick=()=>{ addLine($('#engOut'), b.dataset.hint); b.disabled=true; b.textContent='added: save to apply'; });
   $('#engHints').querySelectorAll('[data-dhint]').forEach(b=>b.onclick=()=>{ addLine($('#engProtected'), b.dataset.dhint); b.disabled=true; b.textContent='added: save to apply'; });
-  // a move also takes the entry out of Prohibited, which the console splits on lines and commas and dedups ignoring case
+  // a move also takes the entry out of Prohibited, which the console splits on lines and commas and dedups ignoring case;
+  // a refused save puts it back (engSave), so Prohibited never loses a line Protected data has not taken
   $('#engHints').querySelectorAll('[data-dmove]').forEach(b=>b.onclick=()=>{ const x=b.dataset.dmove, t=$('#engProhibited');
     addLine($('#engProtected'), x);
     t.value=t.value.split(/[\n,]/).map(v=>v.trim()).filter(v=>v && v.replace(/\s+/g,' ').toLowerCase()!==x.toLowerCase()).join('\n');
-    b.disabled=true; b.textContent='moved: save to apply'; });
+    CP.moved.push(x); b.disabled=true; b.textContent='moved: save to apply'; });
   const cap=[]; if(c.autorun_passive===false) cap.push('passive'); if(c.autorun_active===false) cap.push('active');
   $('#engAutoCap').textContent = cap.length ? `capped: the ${cap.join(' and ')} tier is off in LAB_AUTORUN_* (copilot.env)` : '';
   const off=-new Date().getTimezoneOffset(), a=Math.abs(off);
@@ -630,7 +631,9 @@ $('#engSave').onclick=async()=>{
     window_end:fromLocalInput($('#engEnd').value), autorun_passive:$('#engAutoPassive').checked, autorun_active:$('#engAutoActive').checked,
     active:$('#engActive').checked, note:$('#engNote').value};
   $('#engSave').disabled=true;
-  try{ const r=await api('/engagement', body); toast(`engagement v${r.version} saved`); await cpEngLoad(); }catch(e){ toast(e.message, true); }
+  try{ const r=await api('/engagement', body); CP.moved=[]; toast(`engagement v${r.version} saved`); await cpEngLoad(); }
+  catch(e){ const back=CP.moved.splice(0); back.forEach(x=>addLine($('#engProhibited'), x));
+    toast(e.message + (back.length ? ` (not saved, so back under Prohibited: ${back.join(', ')})` : ''), true); }
   $('#engSave').disabled=false;
 };
 
@@ -743,10 +746,13 @@ function cpFlowHtml(r){
         `<div class="cp-arrow left ${ans}"><span>answer</span></div>`,
         cpBox(ans, 'Answer', prop ? (cpPre('show the raw answer', prop.data.raw) || '<span class="small">(empty)</span>') : ''), 'cross');
   }
-  const G = next(P, pol, e => e.data.allowed ? 'ok' : 'blocked');
+  // the console stops a run whose gate did not enforce the protected data it sent (an older workflow): that is the gate's error
+  const skew=evs.find(e=>e.stage==='error' && e.level==='error' && e.data && e.data.sent!==undefined);
+  const G = skew ? 'error' : next(P, pol, e => e.data.allowed ? 'ok' : 'blocked');
   // passed: why it does or doesn't auto-run; blocked: every reason, once
-  row(cpBox(G, 'Policy gate', pol ? (pol.data.allowed || !(pol.data.reasons||[]).length ? esc(pol.message)
-    : `blocked<ul class="small cp-reasons">${pol.data.reasons.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`) : (G==='active' ? 'checking…' : fail(G))));
+  row(cpBox(G, 'Policy gate', (pol ? (pol.data.allowed || !(pol.data.reasons||[]).length ? esc(pol.message)
+    : `blocked<ul class="small cp-reasons">${pol.data.reasons.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`) : (G==='active' ? 'checking…' : fail(G)))
+    + (skew ? `<div class="small">${esc(skew.message)}</div>` : '')));
   const J = next(G, judge, e => e.data.allowed ? 'ok' : 'blocked');
   row(cpBox(J, `Judge · ${esc(judgeModel)}`, (jp ? cpPre(`show the judge's prompt (${jp.data.prompt.length} characters)`, jp.data.prompt) : '')
     + (judge ? `<div>${esc(judge.data.verdict || judge.message)}</div>` : (J==='active' ? 'deciding…' : fail(J)))));
@@ -757,6 +763,10 @@ function cpStagedHtml(r){
   const fatal=evs.find(e=>e.stage==='error' && e.level==='error');
   const staged=(res && res.staged) || (judge && judge.data.staged) || '';
   const execBtn = `<button class="btn sm" disabled title="Execute is disabled by design: the workflow's Execute node is off and no lab runner is configured (LAB_RUNNER_URL). Run it yourself if you decide to.">Execute (disabled)</button>`;
+  // a run that failed or was stopped with an error (the console stops one whose workflow does not enforce the protected data
+  // it sent) stages nothing, whatever the judge said before
+  if(fatal && !(res && !res.allowed)) return `<div class="cp-staged blocked"><div class="cp-staged-h"><b>About to be executed</b><span class="badge fail">nothing</span></div>`
+    + `<div class="small">${r.status==='canceled' ? 'The run was stopped' : ['running','waiting'].includes(r.status) ? 'The run is being stopped' : 'The run failed'}: ${esc(fatal.message)}</div></div>`;
   if(staged){
     const how = res ? (res.autoRun ? `auto-run tier ${esc(res.tier||'')}` : 'waiting for approval in n8n') : 'authorized';
     return `<div class="cp-staged ok"><div class="cp-staged-h"><b>About to be executed</b><span class="badge pass">${how}</span></div>`
@@ -769,7 +779,7 @@ function cpStagedHtml(r){
       + `<div><b>${esc(res.title)}</b></div>${(res.reasons||[]).length?`<ul class="small cp-reasons">${res.reasons.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}<div class="small">${esc(res.next)}</div></div>`;
   }
   if(['running','waiting'].includes(r.status)) return `<div class="cp-staged pending"><div class="cp-staged-h"><b>About to be executed</b><span class="badge warn">the gates are still deciding</span></div><code class="cp-staged-cmd muted">…</code></div>`;
-  return `<div class="cp-staged blocked"><div class="cp-staged-h"><b>About to be executed</b><span class="badge ghost">nothing</span></div><div class="small">${fatal ? 'The run failed: '+esc(fatal.message) : 'The run ended ('+esc(r.status)+') before anything was staged.'}</div></div>`;
+  return `<div class="cp-staged blocked"><div class="cp-staged-h"><b>About to be executed</b><span class="badge ghost">nothing</span></div><div class="small">The run ended (${esc(r.status)}) before anything was staged.</div></div>`;
 }
 function cpRenderRun(){
   const r=CP.run; if(!r) return;

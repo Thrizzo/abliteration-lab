@@ -22,6 +22,25 @@ import copilot_runs as CR  # noqa: E402
 import k8sjobs  # noqa: E402
 import model_standin  # noqa: E402
 
+NODE = shutil.which("node")
+APP_JS = os.path.join(HERE, "..", "static", "app.js")
+
+
+def render(run):
+    """A run (GET /api/copilot/runs/<id>) through the GUI's own renderers in app.js: the staged box's HTML and each flow
+    box's state by its title."""
+    import subprocess
+    js = f"""
+const src = require('fs').readFileSync({json.dumps(APP_JS)}, 'utf8').replace(/\\r/g, '');
+const grab = (start, end) => {{ const i = src.indexOf(start), j = src.indexOf(end, i); if (i < 0 || j < 0) throw new Error(start); return src.slice(i, j); }};
+const code = [grab('const esc = ', '\\n'), grab('const escA = ', '\\n'), grab('const STATE_ICON', 'function cpRenderRun')].join('\\n');
+const {{ cpStagedHtml, cpFlowHtml }} = new Function(code + '; return {{ cpStagedHtml, cpFlowHtml }};')();
+const run = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const boxes = Object.fromEntries([...cpFlowHtml(run).matchAll(/<div class="cp-box (\\w+)"><div class="cp-box-h">.*?<b>(.*?)<\\/b>/g)].map((m) => [m[2], m[1]]));
+console.log(JSON.stringify({{ staged: cpStagedHtml(run), boxes }}));"""
+    p = subprocess.run([NODE, "-e", js], input=json.dumps(run, default=str), capture_output=True, text=True, check=True)
+    return json.loads(p.stdout)
+
 
 def fixture(name):
     with open(os.path.join(HERE, "fixtures", f"n8n_execution_{name}.json"), encoding="utf-8") as f:
@@ -467,6 +486,26 @@ class TestCopilotRuns(unittest.TestCase):
         feed = [e for e in self.feed.since(0)["events"] if e["source"] == "copilot"]
         self.assertEqual([e["stage"] for e in feed].count("error"), 2)        # the retrieval warning, and this one
         self.assertEqual(next(e for e in feed if e["level"] == "error")["message"], self.NOT_ENFORCED)
+
+    @unittest.skipUnless(NODE, "node not installed")
+    def test_gui_shows_a_run_stopped_for_protected_data_as_stopped(self):
+        # the same stop, as the GUI draws it: the snapshot held the judge's answer and a staged command, which must not
+        # read as waiting for approval (with Copy and Edit buttons); the policy gate is where it went wrong
+        self.n8n.plan = [fixture("waiting")]
+        out = self.runs.start("brute force ssh", "10.10.10.5", {"user": "admin"}, engagement=self.ENG)
+        run = self.wait(out["id"], ("canceled",))
+        self.assertTrue((run["result"] or {}).get("staged"))
+        got = render(run)
+        self.assertIn("The run was stopped: " + self.NOT_ENFORCED, got["staged"])
+        for shown in ("waiting for approval", 'id="cpCopy"', 'id="cpEdit"', (run["result"] or {})["staged"]):
+            self.assertNotIn(shown, got["staged"])
+        self.assertEqual(got["boxes"]["Policy gate"], "error")
+        self.n8n.plan = [fixture("waiting")]                       # a run that only waits still shows what it staged
+        out = self.runs.start("brute force ssh", "10.10.10.5", {"user": "admin"})
+        run = self.wait(out["id"], ("waiting",))
+        self.assertIn("waiting for approval in n8n", render(run)["staged"])
+        self.runs.stop(out["id"], {"user": "admin"})
+        self.wait(out["id"], ("canceled",))
 
     def test_a_workflow_that_enforces_it_runs_on(self):
         self.n8n.plan = [with_policy("waiting", protectedData=[], dataReview=[], protectedEntries=2)]

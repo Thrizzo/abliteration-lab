@@ -130,17 +130,35 @@ const MUTATING_PATTERNS = [
 const PASSIVE_NSE = new Set(['safe', 'default']); // the only NSE categories cheap enough for the passive tier
 
 // A tool on the read-only list, or a local filter, that can still run a program, listen or change a share. Each of these
-// auto-ran in the passive tier before (found by the protected-data red team, checked against this gate).
+// auto-ran in the passive tier before (found by the protected-data red team, checked against this gate). seg is a segment
+// of shellSegments(), whose words are what bash hands the program, so quoting hides nothing (nc '-e', awk 'sys''tem(',
+// sed 's/x/id/'\e, smbclient -c \!id); a raw string is split on whitespace. An option counts in the spellings the tool
+// accepts: netcat's attached values and clusters (-e/bin/sh, -ve/bin/sh, -lp4444) and long-option prefixes (--exe,
+// --lis), smbmap's prefixes (--upl, --dele), smbclient's command prefixes (ren is rename).
+const SMB_WRITES = ['mput', 'put', 'mkdir', 'md', 'rmdir', 'rd', 'del', 'deltree', 'rm', 'rename', 'mv', 'setmode'];
 function execEscape(bin, seg) {
-  const args = seg.split(/\s+/).slice(1);
-  if (['nc', 'ncat', 'netcat'].includes(bin) && args.some((t) => /^-[A-Za-z]*[ecl][A-Za-z]*$/.test(t) || /^--(sh-|lua-)?exec(=|$)|^--listen\b/.test(t)))
+  const words = typeof seg === 'string' ? null : seg.words;
+  const args = words ? pdProgram(words).args : String(seg).split(/\s+/).slice(1);
+  const text = words ? args.join(' ') : String(seg);
+  if (['nc', 'ncat', 'netcat'].includes(bin) && (args.some((t) => /^-[A-Za-z]*[ecl]/.test(t) || /^--(sh-|lua-)?exec(=|$)|^--listen\b/.test(t))
+    || pdLong(args, ['exec', 'sh-exec', 'lua-exec', 'listen'])))
     return 'netcat that runs a program or listens (-e, -c, --exec, --sh-exec, --lua-exec, -l)';
-  if (bin === 'ffuf' && /(^|\s)--?input-cmd\b/.test(seg)) return 'ffuf -input-cmd runs a program';
-  if (bin === 'awk' && /system\s*\(|\|\s*"|\|&|getline/.test(seg)) return 'awk that runs a program (system, pipes, getline)';
-  if (bin === 'sed' && /(^|[;\n{}\s0-9$\/'"])e(\s|;|'|"|$)|\/[gpiImM0-9]*e[gpiImMwW0-9]*(\s|;|}|'|"|$)/.test(seg)) return 'sed e runs a program';
-  if (bin === 'smbclient' && /['";]\s*(!|(mput|put|mkdir|md|rmdir|rd|del|deltree|rm|rename|mv|setmode)\b)/i.test(seg))
-    return 'smbclient command that runs a local shell (!) or changes the share';
-  if (bin === 'smbmap' && /(^|\s)-[A-Za-z]*x|(^|\s)--(upload|delete|mkdir)\b/.test(seg)) return 'smbmap that runs a command (-x) or changes the share';
+  if (bin === 'ffuf' && /(^|\s)--?input-cmd\b/.test(text)) return 'ffuf -input-cmd runs a program';
+  if (bin === 'awk' && /system\s*\(|\|\s*"|\|&|getline/.test(text)) return 'awk that runs a program (system, pipes, getline)';
+  if (bin === 'sed' && /(^|[;\n{}\s0-9$\/'"])e(\s|;|'|"|$)|\/[gpiImM0-9]*e[gpiImMwW0-9]*(\s|;|}|'|"|$)/.test(text)) return 'sed e runs a program';
+  if (bin === 'smbclient') {
+    // the commands it runs: -c in any spelling (-c, -Nc, -c'...', --comm=...), here-strings and heredoc bodies
+    const cmds = !words ? [] : pdLetterValues(args, 'c').concat(pdLongValues(args, 'command').filter((v) => v !== null),
+      words.filter((w) => w.redir === 'herestr' || w.redir === 'heredocBody').map((w) => w.text));
+    const writes = cmds.some((c) => c.split(/[;\n]/).some((x) => {
+      const f = (x.trim().split(/\s+/)[0] || '').toLowerCase();
+      return f.startsWith('!') || (f.length >= 2 && SMB_WRITES.some((n) => n.startsWith(f)));
+    }));
+    if (writes || /['";]\s*(!|(mput|put|mkdir|md|rmdir|rd|del|deltree|rm|rename|mv|setmode)\b)/i.test(text))
+      return 'smbclient command that runs a local shell (!) or changes the share';
+  }
+  if (bin === 'smbmap' && (/(^|\s)-[A-Za-z]*x|(^|\s)--(upload|delete|mkdir)\b/.test(text) || args.some((t) => /^-[A-Za-z]*x/.test(t))
+    || pdLong(args, ['upload', 'delete', 'mkdir']))) return 'smbmap that runs a command (-x) or changes the share';
   // nmap loads NSE scripts from --datadir and reads its whole option list back from a --resume log (getopt_long_only:
   // one dash and unique prefixes count); rustscan's custom scripts and config file run whatever they name
   if (bin === 'nmap' && (pdAbbrev(args, 'datadir', 5) || pdAbbrev(args, 'resume', 3))) return 'nmap --datadir or --resume (scripts or options the gate cannot see)';
@@ -152,13 +170,20 @@ function execEscape(bin, seg) {
   return '';
 }
 
+// every --script value in the raw text (nmap reads -script like --script); the words bash hands nmap give the rest
+const rawScriptValues = (cmd) => [...cmd.matchAll(/(?:^|\s)--?script[=\s]+("?)([^"\s]+)\1/gi)].map((m) => m[2]);
+
 function classifyReadOnly(command) {
   const cmd = String(command || '').trim();
   if (!cmd) return { readOnly: false, reason: 'empty command' };
   if (MUTATING_PATTERNS.some((rx) => rx.test(cmd))) return { readOnly: false, reason: 'command performs a write/active operation' };
-  // nmap NSE is passive only if EVERY script in the list is safe/default (a lone "default" prefix must not smuggle in vuln)
-  const scriptVal = (cmd.match(/(?:^|\s)--?script[=\s]+("?)([^"\s]+)\1/i) || [])[2];   // nmap reads -script like --script
-  if (scriptVal && !scriptVal.split(',').map((s) => s.trim().toLowerCase()).every((s) => PASSIVE_NSE.has(s))) {
+  // the segments as bash reads them, each with its program and the words it gets: quoting hides no option from the checks
+  // below ("--script=vuln", nc '-e', awk 'sys''tem('), which also run on the raw text and never relax it
+  const segs = shellSegments(cmd).map((seg) => ({ seg, ...pdProgram(seg.words) }));
+  // nmap NSE is passive only if EVERY script in EVERY list is safe/default (a lone "default" prefix, or a second --script,
+  // must not smuggle in vuln)
+  const scripts = rawScriptValues(cmd).concat(segs.filter((s) => s.program === 'nmap' || s.program === 'rustscan').flatMap((s) => pdScriptValues(s.args)));
+  if (scripts.some((v) => !v.split(',').map((s) => s.trim().toLowerCase()).every((s) => PASSIVE_NSE.has(s)))) {
     return { readOnly: false, reason: 'nmap NSE beyond safe/default (active-recon tier or human)' };
   }
   // split into segments across line breaks, ; && || and pipes (a shell runs each line as its own command); every segment
@@ -176,6 +201,13 @@ function classifyReadOnly(command) {
     const esc = execEscape(bin, seg);
     if (esc) return { readOnly: false, reason: esc };
   }
+  for (const s of segs) {                                         // the same, on the words bash hands each program
+    if (!READONLY_TOOLS.has(s.program) && !FILTER_TOOLS.has(s.program)) {
+      return { readOnly: false, reason: `"${s.program || '(empty)'}" is not on the read-only tool allowlist` };
+    }
+    const esc = execEscape(s.program, s.seg);
+    if (esc) return { readOnly: false, reason: esc };
+  }
   return { readOnly: true, reason: 'passive recon (read-only tools only)' };
 }
 
@@ -188,11 +220,12 @@ const DANGER_NSE = /\b(vuln|exploit|brute|dos|intrusive|malware|fuzzer|external|
 const SQLMAP_ENUM = /--(banner|current-user|current-db|hostname|is-dba|users|dbs|tables|columns|schema|count)\b|(^|\s)-b(\s|$)/i;
 const SQLMAP_DANGER = /--(os-shell|os-pwn|os-cmd|sql-shell|sql-query|file-write|file-dest|file-read|reg-add|reg-del|reg-write|dump|dump-all|passwords|eval|udf-inject|priv-esc|crawl)\b/i;
 
-function nmapSafeScripts(cmd) {
-  const m = cmd.match(/(?:^|\s)--?script[=\s]+("?)([^"\s]+)\1/i);
-  if (!m) return false;                       // no --script => not this tier (plain nmap is passive tier)
-  if (DANGER_NSE.test(m[2])) return false;
-  return m[2].split(',').map((s) => s.trim().toLowerCase()).every((s) => SAFE_NSE.has(s));
+// every --script value nmap gets, in the raw text and as words (args: the words after the program), safe categories only
+function nmapSafeScripts(cmd, args) {
+  const raw = rawScriptValues(cmd);
+  if (!raw.length) return false;              // no --script => not this tier (plain nmap is passive tier)
+  return raw.concat(args ? pdScriptValues(args) : [])
+    .every((v) => !DANGER_NSE.test(v) && v.split(',').map((s) => s.trim().toLowerCase()).every((s) => SAFE_NSE.has(s)));
 }
 
 // sqlmap rewrites leading Unicode dashes to "-" and "-word" to "--word" (lib/parse/cmdline.py) and accepts unique prefixes
@@ -217,9 +250,17 @@ function classifyActiveRecon(command) {
   if (!cmd) return { ok: false, reason: 'empty command' };
   if (/[\r\n]|\||;|&&|&/.test(cmd)) return { ok: false, reason: 'chained/piped or multi-line commands are not eligible for the active tier' };
   if (DEFAULT_DENY.some((rx) => rx.test(cmd))) return { ok: false, reason: 'denied pattern' };
-  if (nmapSafeScripts(cmd)) return { ok: true, reason: 'nmap NSE, safe categories only' };
-  if (/\bsqlmap\b/i.test(cmd) && sqlmapRisky(cmd.split(/\s+/))) return { ok: false, reason: 'sqlmap option that dumps, searches or reads files' };
-  if (sqlmapEnumOnly(cmd)) return { ok: true, reason: 'sqlmap enumerate-only' };
+  // the one command as bash reads it: its program picks the shape (a --script or --dbs word on another program is none),
+  // the passive tier's escapes count here too (nmap --datadir, rustscan custom scripts), and quoting hides no option
+  // ('-dump', "--script=vuln"); the raw-text checks stay and never relax this
+  const segs = shellSegments(cmd);
+  if (segs.length !== 1) return { ok: false, reason: 'not an allowed active-recon shape' };
+  const { program, args } = pdProgram(segs[0].words);
+  const esc = execEscape(program, segs[0]);
+  if (esc) return { ok: false, reason: esc };
+  if ((program === 'nmap' || program === 'rustscan') && nmapSafeScripts(cmd, args)) return { ok: true, reason: 'nmap NSE, safe categories only' };
+  if (program === 'sqlmap' && (sqlmapRisky(cmd.split(/\s+/)) || sqlmapRisky(args))) return { ok: false, reason: 'sqlmap option that dumps, searches or reads files' };
+  if (program === 'sqlmap' && sqlmapEnumOnly(cmd)) return { ok: true, reason: 'sqlmap enumerate-only' };
   return { ok: false, reason: 'not an allowed active-recon shape' };
 }
 
@@ -525,6 +566,15 @@ function pdProgramIndex(words) {
   if (k < words.length && words[k].text === 'sudo') k = skip(k + 1);
   return k;
 }
+// a segment's words -> the program's index, the program and the words it gets (redirections left out)
+function pdProgram(words) {
+  const k = pdProgramIndex(words);
+  return { k, program: k < words.length ? words[k].text.replace(/^.*\//, '').toLowerCase() : '',
+    args: words.slice(k + 1).filter((w) => !w.redir).map((w) => w.text) };
+}
+// every --script value nmap gets as a word: the next word, or the text after = (nmap reads -script like --script)
+const pdScriptValues = (args) => args.flatMap((t, i) => (/^--?script$/i.test(t) ? args.slice(i + 1, i + 2)
+  : /^--?script=/i.test(t) ? [t.slice(t.indexOf('=') + 1)] : []));
 
 // Word classes. Local programs only read the runner's files and stdout. Options whose value is a local file make that
 // value local; identity options (accounts, passwords, domains) make it ignored when it looks like one. A value that names
@@ -535,15 +585,75 @@ const PD_LOCAL_OPTS = new Map([
   ...['-w', '--wordlist', '-iL', '-L', '-P', '-C', '--input-file', '--files-from'].map((o) => [o, 'wordlist or input file']),
   ...['-i', '-F', '-K', '--config'].map((o) => [o, 'key or input file'])]);
 const PD_ID_OPTS = new Set(['-u', '-U', '--user', '--username', '-l', '--login', '-p', '--password', '--pass', '--hashes', '-hashes', '--domain', '-W', '--workgroup']);
+// Per READONLY_TOOLS member (a test pins the list, so a tool that joins it gets reviewed): `none`, the letters of the shared
+// tables that take no value in that tool (curl -L follows redirects, nmap -O detects the OS: the next word is not theirs),
+// and the tool's own output, input and account options (masscan -oL, testssl.sh --jsonfile, smbmap -d). Letters differ
+// between tools (curl -c is a cookie jar it writes, dnsrecon -c a CSV file), so these apply to their tool only.
+const PD_OUT = 'output file', PD_IN = 'wordlist or input file', PD_KEY = 'key or input file', PD_ID = 'identity';
+const pdTool = (none, kinds = {}) => ({ none, opts: new Map(Object.entries(kinds).flatMap(([kind, opts]) => opts.map((o) => [o, kind]))) });
+const PD_TOOL_OPTS = {
+  nmap: pdTool('OF'), rustscan: pdTool(''),
+  masscan: pdTool('', { [PD_OUT]: ['-oL', '-oJ', '-oB', '-oU', '-oD', '--output-filename', '--pcap'], [PD_IN]: ['--readscan', '--includefile'], [PD_KEY]: ['-c', '--conf'] }),
+  ping: pdTool(''), fping: pdTool(''), traceroute: pdTool(''), tracepath: pdTool(''), arp: pdTool(''), host: pdTool(''), dig: pdTool(''),
+  nslookup: pdTool(''), whois: pdTool(''),
+  dnsrecon: pdTool('w', { [PD_OUT]: ['-x', '--xml', '-c', '--csv', '-j', '--json', '--db'], [PD_IN]: ['-D', '--dictionary'] }),
+  dnsenum: pdTool('w', { [PD_OUT]: ['--subfile'], [PD_IN]: ['-f', '--file'] }),
+  fierce: pdTool('', { [PD_IN]: ['--subdomain-file', '--dns-file'] }),
+  amass: pdTool('', { [PD_OUT]: ['-json', '-dir', '-log'], [PD_IN]: ['-df', '-nf', '-rf', '-blf', '-trf', '-ef', '-if', '-aw'], [PD_KEY]: ['-config'] }),
+  subfinder: pdTool('', { [PD_OUT]: ['-output', '-oD', '-output-dir'], [PD_IN]: ['-dL', '-list', '-rL', '-rlist'], [PD_KEY]: ['-config', '-pc', '-provider-config'] }),
+  theharvester: pdTool('p', { [PD_OUT]: ['-f', '--filename'] }),
+  curl: pdTool('LiOpl', { [PD_OUT]: ['-c', '--cookie-jar', '-D', '--dump-header', '--trace', '--trace-ascii', '--stderr', '--libcurl', '--etag-save'] }),
+  wget: pdTool('LFKp', { [PD_OUT]: ['-P', '--directory-prefix', '-a', '--append-output', '--save-cookies', '--warc-file', '--rejected-log'],
+    [PD_KEY]: ['--load-cookies'], [PD_ID]: ['--http-user', '--http-password', '--http-passwd', '--ftp-user', '--ftp-password', '--ftp-passwd',
+      '--proxy-user', '--proxy-password', '--proxy-passwd'] }),
+  httpx: pdTool('', { [PD_OUT]: ['-output', '-srd', '-store-response-dir'], [PD_IN]: ['-l', '-list'], [PD_KEY]: ['-config'] }),
+  whatweb: pdTool('', { [PD_OUT]: ['--log-brief', '--log-verbose', '--log-errors', '--log-xml', '--log-json', '--log-json-verbose',
+    '--log-magictree', '--log-object', '--log-sql', '--log-sql-create'], [PD_KEY]: ['--cookie-jar'] }),
+  wafw00f: pdTool('l', { [PD_KEY]: ['-H', '--headers'] }),
+  sslscan: pdTool('', { [PD_OUT]: ['--xml'], [PD_IN]: ['--targets'] }),
+  sslyze: pdTool('', { [PD_OUT]: ['--json_out'], [PD_IN]: ['--targets_in'] }),
+  'testssl.sh': pdTool('UOLCFPWp', { [PD_OUT]: ['-oL', '--logfile', '-oj', '--jsonfile', '-oJ', '--jsonfile-pretty', '-oC', '--csvfile', '-oH',
+    '--htmlfile', '-oa', '--outfile', '--outFile', '--outprefix'], [PD_IN]: ['--file'], [PD_ID]: ['--basicauth'] }),
+  gobuster: pdTool('l'),
+  ffuf: pdTool('', { [PD_OUT]: ['-debug-log'], [PD_IN]: ['-request'], [PD_KEY]: ['-config'] }),
+  feroxbuster: pdTool('', { [PD_OUT]: ['--debug-log'], [PD_IN]: ['--resume-from'] }),
+  dirb: pdTool('ilw', { [PD_IN]: ['-x'] }),
+  dirbuster: pdTool('', { [PD_OUT]: ['-r'], [PD_IN]: ['-l'] }),
+  wfuzz: pdTool('L', { [PD_OUT]: ['-f', '--dump-recipe'], [PD_KEY]: ['--recipe'] }),
+  nikto: pdTool('', { [PD_OUT]: ['-output', '--output'], [PD_KEY]: ['-config'], [PD_ID]: ['-id', '--id'] }),
+  enum4linux: pdTool('UPloi'),
+  'enum4linux-ng': pdTool('UCPOL', { [PD_OUT]: ['-oJ', '-oY'], [PD_IN]: ['-s'] }),
+  smbmap: pdTool('L', { [PD_OUT]: ['-g', '--csv'], [PD_IN]: ['--host-file'], [PD_ID]: ['-d'] }),
+  smbclient: pdTool('', { [PD_KEY]: ['-A', '--authentication-file'] }),
+  ldapsearch: pdTool('LuCW', { [PD_IN]: ['-f'], [PD_KEY]: ['-y'] }),
+  rpcclient: pdTool('', { [PD_KEY]: ['-A', '--authentication-file'] }),
+  rpcinfo: pdTool(''), showmount: pdTool(''), snmpwalk: pdTool(''),
+  onesixtyone: pdTool('', { [PD_IN]: ['-c'] }),
+  nbtscan: pdTool('', { [PD_IN]: ['-f'] }),
+  'ike-scan': pdTool(''), netstat: pdTool(''), ss: pdTool(''), nc: pdTool(''),
+  ncat: pdTool('', { [PD_OUT]: ['-x', '--hex-dump'] }),
+};
+PD_TOOL_OPTS.wget2 = PD_TOOL_OPTS.wget;
 const pdExclusion = (opt, program) => /^--(exclude|reject)/.test(opt) || opt === '--dont-scan'
   || ((program === 'wget' || program === 'wget2') && (opt === '-X' || opt === '-R'));
-const pdOptionKind = (opt, program) => PD_LOCAL_OPTS.get(opt) || (pdExclusion(opt, program) ? 'exclusion' : PD_ID_OPTS.has(opt) ? 'identity' : '');
+const pdOptionKind = (opt, program) => {
+  const own = Object.prototype.hasOwnProperty.call(PD_TOOL_OPTS, program) ? PD_TOOL_OPTS[program] : null;
+  if (own && own.opts.has(opt)) return own.opts.get(opt);
+  if (own && /^-[A-Za-z]$/.test(opt) && own.none.includes(opt[1])) return '';
+  return PD_LOCAL_OPTS.get(opt) || (pdExclusion(opt, program) ? 'exclusion' : PD_ID_OPTS.has(opt) ? 'identity' : '');
+};
+// a short-option cluster in a tool whose value letters are known (curl -sSLo FILE, wget -qO FILE): the position of the
+// first letter that takes a value, or -1
+const pdClusterAt = (t, program) => {
+  let at = -1;
+  pdClusterScan(t, program, (c, p) => { if (PD_VALUE_LETTERS[program].includes(c)) { at = p; return true; } return false; });
+  return at;
+};
 const pdHostComponent = (t, hosts) => pdComponents(pdFold(t).replace(/\\/g, '/')).comps.some((c) => hosts.has(c));
 const pdRemote = (t, hosts) => /:\/\/|^[\\/]{2}|^[^\s/\\:]+:\//.test(t) || pdHostComponent(t, hosts);
 const pdIdentityLike = (t, hosts) => !t.includes('://') && !/^[\\/.~]/.test(t) && (t.match(/[\\/]/g) || []).length <= 1 && !pdHostComponent(t, hosts);
 function wordClasses(segment, hosts) {
-  const ws = segment.words, k = pdProgramIndex(ws);
-  const program = k < ws.length ? ws[k].text.replace(/^.*\//, '').toLowerCase() : '';
+  const ws = segment.words, { k, program } = pdProgram(ws);
   const value = (w, kind) => {                                    // the value of a table option
     if (kind !== 'identity') return { w, cls: pdRemote(w.text, hosts) ? 'data' : 'local', kind };
     if (pdIdentityLike(w.text, hosts)) return { w, cls: 'ignored' };
@@ -572,6 +682,10 @@ function wordClasses(segment, hosts) {
     if (/^-[^-]/.test(t)) {                                                    // -o file, -ofile, -Tcustomers
       const kind = pdOptionKind(t, program);
       if (kind) { pending = kind; return words.push({ w, cls: 'ignored' }); }
+      const at = Object.prototype.hasOwnProperty.call(PD_VALUE_LETTERS, program) ? pdClusterAt(t, program) : -1;   // -sSLo file, -qO file
+      const clusterKind = at > 0 ? pdOptionKind('-' + t[at], program) : '';
+      if (clusterKind && at === t.length - 1) { pending = clusterKind; return words.push({ w, cls: 'ignored' }); }
+      if (clusterKind) return words.push(value({ ...w, text: t.slice(at + 1) }, clusterKind));
       const attachedKind = t.length > 2 ? pdOptionKind(t.slice(0, 2), program) : '';
       if (attachedKind) return words.push(value({ ...w, text: t.slice(2) }, attachedKind));
       return words.push({ w, cls: 'data', attached: true });
@@ -595,19 +709,31 @@ const pdTidy = (s) => s.replace(/\s+/g, ' ').replace(/\/{2,}/g, '/').replace(/\/
 function pdBlank(f, hosts) {
   if (!hosts.size) return f;
   const ac = [...f.replace(/\\/g, '/')], chars = [...f], spans = [];
-  let cur = '', st = 0;
+  let cur = '', st = 0, at = [];                                  // at[u]: the character (index in ac) of cur's UTF-16 unit u
   for (let p = 0; p <= ac.length; p++) {
-    if (p < ac.length && pdCompChar(ac[p])) { if (!cur) st = p; cur += ac[p]; continue; }
+    if (p < ac.length && pdCompChar(ac[p])) {
+      if (!cur) { st = p; at = []; }
+      for (let q = 0; q < ac[p].length; q++) at.push(p);
+      cur += ac[p];
+      continue;
+    }
     if (!cur) continue;
-    let len = hosts.has(cur) ? cur.length : 0;
-    if (!len) for (const h of hosts) if (h.length > len && cur.startsWith(h + '.')) len = h.length;   // hr.lab.xml: the host part
-    if (len) {
-      spans.push([st, st + len]);
-      if (ac[st - 1] === '@') {                                   // user@host, DOMAIN/user:pass@host: the user part too
-        let b = st - 1;
-        while (b > 0 && !/[\s='"]/.test(ac[b - 1]) && !(ac[b - 1] === '/' && ac[b - 2] === '/')) b--;
-        spans.push([b, st]);
+    // a host is blanked wherever it stands dot-aligned in a component: the whole component, its start (hr.lab.xml), its
+    // end (_ldap._tcp.hr.lab, _dmarc.hr.lab) or between dots
+    let atStart = false;
+    for (const h of hosts) {
+      for (let i = cur.indexOf(h); i >= 0; i = cur.indexOf(h, i + 1)) {
+        const e = i + h.length;
+        if ((i === 0 || cur[i - 1] === '.') && (e === cur.length || cur[e] === '.')) {
+          spans.push([at[i], e === cur.length ? p : at[e]]);
+          if (i === 0) atStart = true;
+        }
       }
+    }
+    if (atStart && ac[st - 1] === '@') {                          // user@host, DOMAIN/user:pass@host: the user part too
+      let b = st - 1;
+      while (b > 0 && !/[\s='"]/.test(ac[b - 1]) && !(ac[b - 1] === '/' && ac[b - 2] === '/')) b--;
+      spans.push([b, st]);
     }
     cur = '';
   }
@@ -753,8 +879,7 @@ function bulkReasons(program, args, classifiedWords, hosts) {
     if (fetchesAll || pdLetter(args, 'T') || pdLong(args, ['tar'])) bulk.push('smbclient mget/recurse/tar');
   }
   if (program === 'nmap' || program === 'rustscan') {
-    const scripts = args.flatMap((t, i) => (/^--?script$/.test(t) ? args.slice(i + 1, i + 2) : /^--?script=/.test(t) ? [t.slice(t.indexOf('=') + 1)] : []));
-    if (scripts.some((v) => v.split(',').some((x) => !PD_NSE_OK.has(x.trim().toLowerCase())))) bulk.push('nmap NSE beyond default, version and banner');
+    if (pdScriptValues(args).some((v) => v.split(',').some((x) => !PD_NSE_OK.has(x.trim().toLowerCase())))) bulk.push('nmap NSE beyond default, version and banner');
     if (args.some((t) => /^--?script-args/.test(t))) bulk.push('nmap --script-args');
     if (pdAbbrev(args, 'datadir', 5) || pdAbbrev(args, 'resume', 3)) settings('nmap --datadir/--resume');
   }
@@ -810,7 +935,7 @@ function protectedCheck(command, entries, inScopeHosts) {
       }
     }
     for (const s of segs) {
-      const args = s.seg.words.slice(s.k + 1).filter((w) => !w.redir).map((w) => w.text);
+      const { args } = pdProgram(s.seg.words);
       const r = bulkReasons(s.program, args, s.words, hosts);
       bulk.push(...r.bulk);
       runtime.push(...r.runtime);
@@ -821,6 +946,18 @@ function protectedCheck(command, entries, inScopeHosts) {
       for (const w of s.seg.words.slice(0, s.k)) {
         const m = /^([A-Z_][A-Z0-9_]*)=/.exec(w.text);
         if (m && PD_CONFIG_ENV.has(m[1])) runtime.push(`${m[1]} points a tool at another config`);
+      }
+      // wget names the file it writes after the URL unless -O names it, and so does curl -O: a URL ending in a dotfile
+      // (http://h/.wgetrc) writes that dotfile, into the working directory or wherever -P points
+      const fromUrl = s.program === 'curl' ? pdCluster(args, 'curl', 'O') || pdLong(args, ['remote-name', 'remote-name-all'])
+        : (s.program === 'wget' || s.program === 'wget2') && !pdClusterValues(args, s.program, 'O').length && !pdLongValues(args, 'output-document').length;
+      if (fromUrl) {
+        for (const u of args.filter((t) => !t.startsWith('-') && pdRemote(t, hosts))) {
+          let name = u.replace(/[?#].*$/, '').replace(/\/+$/, '');
+          name = name.slice(name.lastIndexOf('/') + 1);
+          for (let round = 0; round < 3; round++) name = pdPercentRound(name);
+          if (/^\.[^./\s]/.test(name)) runtime.push(`writes a dotfile that can change later commands (${name.slice(0, 30)})`);
+        }
       }
       for (const cw of s.words) {
         const written = cw.kind === 'output file' || cw.kind === 'redirection' || (s.program === 'tee' && cw.kind === 'local filter');
@@ -929,5 +1066,5 @@ function decide(proposal, config) {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { decide, classifyReadOnly, classifyActiveRecon, detectInjection, findUnverifiable, targetInScope, extractTargets, inCidr, ipToInt,
     engagementConfig, scopeWhy, windowCheck, prohibitedHits, execEscape, sqlmapRisky, DEFAULT_DENY,
-    protectedEntry, protectedCheck, shellSegments, nameMatch, PD_BULK_NONE, READONLY_TOOLS };
+    protectedEntry, protectedCheck, shellSegments, nameMatch, PD_BULK_NONE, PD_TOOL_OPTS, READONLY_TOOLS };
 }

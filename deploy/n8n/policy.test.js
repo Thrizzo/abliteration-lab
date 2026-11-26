@@ -317,6 +317,43 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
   ok('nmap -sV and rustscan with default scripts stay passive; nmap options after rustscan -- are not rustscan\'s',
     ['nmap -sV -oN scan.txt 10.10.10.5', 'rustscan -a 10.10.10.5 --scripts default', 'rustscan -a 10.10.10.5 -- -sC -sV'].every((c) => gate(c).tier === 'passive'));
   ok('execEscape: a netcat port check (-z) and a verbose connect are not escapes', !execEscape('nc', 'nc -z 10.10.10.5 22') && !execEscape('ncat', 'ncat -nv 10.10.10.5 80'));
+
+  // the checks read the words bash hands the program, not the raw text, so quoting hides no option, and an option counts
+  // in every spelling the tool accepts (attached values, clusters, long-option prefixes, smbclient's command prefixes).
+  // Each of these auto-ran while its plain spelling waited for a human.
+  const SPELLED = [
+    ['nmap -sV "--script=vuln" 10.10.10.5', /NSE beyond safe\/default/], ["nmap -sV '--script=vuln' 10.10.10.5", /NSE beyond safe\/default/],
+    ['nmap -sV "--script" vuln 10.10.10.5', /NSE beyond safe\/default/], ['nmap -sV --script=default --script=vuln 10.10.10.5', /NSE beyond safe\/default/],
+    ["nc '-e' /bin/sh 10.10.10.5 4444", /netcat/], ['ncat "-c" id 10.10.10.5 4444', /netcat/], ['nc 10.10.10.5 4444 -e/bin/sh', /netcat/],
+    ['nc -ve/bin/sh 10.10.10.5 4444', /netcat/], ["nc 10.10.10.5 80 -c'id'", /netcat/], ['ncat --exe /bin/sh 10.10.10.5 4444', /netcat/],
+    ['ncat --exe=/bin/sh 10.10.10.5 4444', /netcat/], ['ncat --sh-ex id 10.10.10.5 80', /netcat/], ['ncat -lp4444 10.10.10.5', /netcat/],
+    ['ncat --lis -p 4444 10.10.10.5', /netcat/], ['ncat -lp4444 -e/bin/sh --allow 10.10.10.5', /netcat/],
+    ["curl -s http://10.10.10.5/ | awk 'BEGIN{sys''tem(\"id\")}'", /awk that runs a program/], ["curl -s http://10.10.10.5/ | sed 's/x/id/'\\e", /sed e runs a program/],
+    ['smbclient //10.10.10.20/Public -N -c \\!id', /smbclient command that runs a local shell/], ['smbclient //10.10.10.20/Public -N -c !id', /smbclient command/],
+    ["smbclient //10.10.10.20/Public -N -c 'ren a.txt b.txt'", /smbclient command/], ["smbclient //10.10.10.20/Public -N <<< 'pu x.exe'", /smbclient command/],
+    ['smbmap -H 10.10.10.5 -u a -p b --upl x IT/x', /smbmap that runs a command/], ['smbmap -H 10.10.10.5 -u a -p b --dele IT/x', /smbmap that runs a command/],
+    ["nmap -sC '--datadir' /tmp/x 10.10.10.5", /nmap --datadir or --resume/],
+  ];
+  for (const [c, rx] of SPELLED) {
+    const d = gate(c);
+    ok(`REGRESSION: no longer auto-runs in any spelling (${d.readOnlyReason}): ${c}`, d.allowed === true && d.autoRun === false && d.readOnly === false && rx.test(d.readOnlyReason));
+  }
+  ok("REGRESSION: sqlmap's '-dump', '--sea' and '-a' leave the active tier quoted too", ["sqlmap -u http://10.10.10.5/?id=1 --dbs '-dump' --batch",
+    "sqlmap -u http://10.10.10.5/?id=1 --dbs '--sea' -T users --batch", "sqlmap -u http://10.10.10.5/?id=1 --dbs '-a' --batch"]
+    .every((c) => { const d = gate(c); return d.allowed && !d.autoRun && /sqlmap option that dumps, searches or reads files/.test(d.activeReconReason); }));
+  // the active tier's shapes belong to their program: a --script or --dbs word on another program auto-ran in the active
+  // tier, and so did the escapes the passive tier catches (nmap --datadir, rustscan custom scripts)
+  const NOT_ACTIVE = ['hydra -l admin -P /usr/share/wordlists/rockyou.txt ssh://10.10.10.5 --script=safe', 'python3 exploit.py 10.10.10.5 --script safe',
+    'python3 exploit.py 10.10.10.5 --dbs # sqlmap', 'nmap --datadir /tmp/x --script=safe 10.10.10.5', 'nmap --resume /tmp/x.log --script=safe 10.10.10.5',
+    'rustscan -a 10.10.10.5 --scripts custom -- --script=safe'];
+  const activeOff = NOT_ACTIVE.filter((c) => { const d = gate(c); return d.autoRun || d.activeRecon; });
+  ok(`REGRESSION: the active tier checks the program and its escapes (off: ${activeOff.join(' | ') || 'none'})`, activeOff.length === 0);
+  const STILL = [['nmap --script=safe,version 10.10.10.5', 'active_recon'], ['rustscan -a 10.10.10.5 -- --script safe', 'passive'],
+    ['sudo sqlmap -u http://10.10.10.5/?id=1 --dbs --batch', 'active_recon'], ['nmap "--script=default" -sV 10.10.10.5', 'passive'],
+    ['ncat --ssl 10.10.10.5 443', 'passive'], ['ncat -v --recv-only 10.10.10.5 80', 'passive'], ['smbmap -H 10.10.10.20 -R Data --depth 2', 'passive'],
+    ["smbclient //10.10.10.20/Data -N -c 'more notes.txt'", 'passive'], ["smbclient //10.10.10.20/Data -N -c 'reget notes.txt'", 'passive']];
+  const stillOff = STILL.filter(([c, tier]) => gate(c).tier !== tier).map(([c]) => c);
+  ok(`their compliant forms keep their tier (off: ${stillOff.join(' | ') || 'none'})`, stillOff.length === 0);
 }
 
 // ---- protected data (engagement protected_data): a name in a data position blocks; local positions, names apart, bulk
@@ -514,6 +551,56 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     'rustscan -a 10.10.10.5 --scripts default -- -sC', 'whatweb -a 3 -v http://10.10.10.5', 'wfuzz -c -z file,/usr/share/wordlists/dirb/common.txt --hc 404 http://10.10.10.5/FUZZ'];
   const compliantOff = COMPLIANT.filter((c) => pd(c, ['customers.csv']).autoRun !== true);
   ok(`protected data: their compliant forms still auto-run (off: ${compliantOff.join(' | ') || 'none'})`, compliantOff.length === 0);
+
+  // an output file named like an entry waits for a human in every spelling: whatever flag stands before it (curl -L and
+  // nmap -O take no value, so they cannot swallow the -o after them), in a short-option cluster (curl -sSLo, wget -qO),
+  // and under each read-only tool's own output options (masscan -oL, testssl.sh --jsonfile, nikto -output); a dotfile
+  // written that way goes to a human too. Accounts never count (smbmap -d, wget --http-user). Each of these was blocked
+  // ("command names protected data") or auto-ran before.
+  const LOCAL = 'protected data only in a local position: ';
+  const SPELLINGS = [
+    ["curl -sk -L -o customers.csv 'https://10.10.10.5/export?format=csv'", 'customers.csv', `${LOCAL}customers.csv (output file)`],
+    ["curl -sk -o customers.csv -L 'https://10.10.10.5/export?format=csv'", 'customers.csv', `${LOCAL}customers.csv (output file)`],
+    ['curl -s -i -o customers.csv http://10.10.10.5/robots.txt', 'customers.csv', `${LOCAL}customers.csv (output file)`],
+    ['nmap -sV -O -oA payroll payroll.lab', 'payroll', `${LOCAL}payroll (output file)`], ['nmap -F -oN payroll.txt payroll.lab', 'payroll', `${LOCAL}payroll (output file)`],
+    ['testssl.sh -U -oA payroll https://payroll.lab', 'payroll', `${LOCAL}payroll (output file)`],
+    ['gobuster dir -u http://payroll.lab -w /usr/share/wordlists/dirb/common.txt -l -o payroll.txt', 'payroll', `${LOCAL}payroll (output file)`],
+    ['dirb http://payroll.lab /usr/share/wordlists/dirb/common.txt -r -w -o payroll.txt', 'payroll', `${LOCAL}payroll (output file)`],
+    ['enum4linux-ng -A -P -oA payroll 10.10.10.20', 'payroll', `${LOCAL}payroll (output file)`],
+    ["curl -sSLo customers.csv 'https://10.10.10.5/export?format=csv'", 'customers.csv', `${LOCAL}customers.csv (output file)`],
+    ["wget -qO customers.csv 'http://10.10.10.5/export?format=csv'", 'customers.csv', `${LOCAL}customers.csv (output file)`],
+    ['curl -Lo backup/index.html http://10.10.10.5/', '/backup/', `${LOCAL}/backup/ (output file)`],
+    ['masscan -p80,443 10.10.10.0/24 -oL payroll.txt', 'payroll', `${LOCAL}payroll (output file)`],
+    ['testssl.sh --jsonfile payroll.json https://payroll.lab', 'payroll', `${LOCAL}payroll (output file)`],
+    ['nikto -h http://payroll.lab -output payroll.html', 'payroll', `${LOCAL}payroll (output file)`],
+    ['whatweb -a 3 --log-json=payroll.json http://payroll.lab', 'payroll', `${LOCAL}payroll (output file)`],
+    ['dnsrecon -d payroll.lab -t std --xml payroll.xml', 'payroll', `${LOCAL}payroll (output file)`],
+    ['enum4linux-ng -A 10.10.10.20 -oJ payroll', 'payroll', `${LOCAL}payroll (output file)`],
+    ['wget --directory-prefix=backup http://10.10.10.5/index.html', '/backup/', `${LOCAL}/backup/ (output file)`],
+    ['wget -qO ~/.wgetrc http://10.10.10.5/x', 'customers.csv', 'names read at run time while data is protected: writes a dotfile that can change later commands (~/.wgetrc)'],
+    ['curl -so .curlrc http://10.10.10.5/x', 'customers.csv', 'names read at run time while data is protected: writes a dotfile that can change later commands (.curlrc)'],
+    ['wget -P ~ http://10.10.10.5/.wgetrc', 'customers.csv', 'names read at run time while data is protected: writes a dotfile that can change later commands (.wgetrc)'],
+    ['curl -sO http://10.10.10.5/.curlrc', 'customers.csv', 'names read at run time while data is protected: writes a dotfile that can change later commands (.curlrc)'],
+  ];
+  const spellOff = SPELLINGS.filter(([c, entry, review]) => { const d = pd(c, [entry]); return !d.allowed || d.autoRun || d.dataReview[0] !== review; }).map(([c]) => c);
+  ok(`protected data: output files wait for a human in every spelling, dotfiles too (off: ${spellOff.join(' | ') || 'none'})`, spellOff.length === 0);
+  const ACCOUNTS = [["smbmap -H 10.10.10.20 -u jdoe -p 'Passw0rd' -d PAYROLL", 'payroll'], ['wget --http-user=payroll --http-password=Passw0rd http://payroll.lab/', 'payroll'],
+    ['nikto -h http://payroll.lab -id payroll:Passw0rd', 'payroll'], ['curl -su payroll:Passw0rd http://payroll.lab/', 'payroll']];
+  const accountOff = ACCOUNTS.filter(([c, entry]) => pd(c, [entry]).autoRun !== true).map(([c]) => c);
+  ok(`protected data: account options never count, in the tools' own spellings (off: ${accountOff.join(' | ') || 'none'})`, accountOff.length === 0);
+  // an in-scope host is no data wherever it stands in a name (SRV and mail records under the domain); what stands before
+  // it still counts
+  const HOSTS = [['dig -t SRV _ldap._tcp.payroll.lab @10.10.10.10', 'payroll', 'pass'], ['dig TXT _dmarc.payroll.lab @10.10.10.10', 'payroll', 'pass'],
+    ['dig TXT selector1._domainkey.payroll.lab @10.10.10.10', 'payroll', 'pass'], ['nslookup -type=SRV _kerberos._tcp.hr.lab 10.10.10.10', 'HR', 'pass'],
+    ['dig TXT customers.csv._tcp.payroll.lab @10.10.10.10', 'customers.csv', 'block']];
+  const hostOff = HOSTS.filter(([c, entry, want]) => outcome(pd(c, [entry])) !== want).map(([c]) => c);
+  ok(`protected data: in-scope hosts are blanked wherever they stand dot-aligned (off: ${hostOff.join(' | ') || 'none'})`, hostOff.length === 0);
+  // every READONLY_TOOLS member had its output, input and account options reviewed (PD_TOOL_OPTS), and a letter it takes
+  // no value for is one the shared tables give a value
+  const { PD_TOOL_OPTS = {} } = require('./policy');
+  const toolsUnreviewed = [...READONLY_TOOLS].filter((t) => !Object.prototype.hasOwnProperty.call(PD_TOOL_OPTS, t));
+  ok(`protected data: every READONLY_TOOLS member has reviewed option tables (unreviewed: ${toolsUnreviewed.join(', ') || 'none'})`, toolsUnreviewed.length === 0
+    && Object.values(PD_TOOL_OPTS).every((o) => [...o.none].every((c) => 'oOwLPCiFKuUlpW'.includes(c))));
 }
 
 // ---- copilot/judge_cases.json: every command the judge eval asks about passes these gates, so only the judge can stop it ----

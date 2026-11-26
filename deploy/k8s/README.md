@@ -377,7 +377,11 @@ or saves the engagement:
 - a file, folder, share or table that a sentence protects ("Do not download anything from `\\fs01\HR$`") and the list
   does not hold is marked *judge only*, with **add to Protected data** (**add anyway** for a common name);
 - an entry that is a short or common name (`HR`, `data`) is marked *broad*, one that reads like a description
-  (`HR share`) *check*, and a Prohibited entry that looks like data (`/backup/`) gets **move to Protected data**;
+  (`HR share`) *check*, and a Prohibited entry that looks like data (`/backup/`) gets **move to Protected data** when
+  Protected data accepts it and reads it at least as strictly (not `C$`, a URL or a tool path such as `/usr/bin/hydra`;
+  a save the console refuses puts a moved line back under Prohibited);
+- a sentence that states the scope ("Scope: the API at https://api.acme.lab/v2/") gives only the names a negated clause
+  protects, so the in-scope application is not offered as protected data;
 - while the list is empty, rules that protect personal data without naming any file, folder, share or table get a
   *judge only* warning: list the names you know, and keep auto-run off.
 

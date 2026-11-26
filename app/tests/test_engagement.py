@@ -22,6 +22,7 @@ import k8sjobs  # noqa: E402
 import copilot_runs as CR  # noqa: E402
 
 POLICY = os.path.join(HERE, "..", "..", "deploy", "n8n", "policy.js")
+APP_JS = os.path.join(HERE, "..", "static", "app.js")
 VECTORS = os.path.join(HERE, "..", "..", "copilot", "tests", "fixtures", "protected_vectors.json")   # shared with policy.test.js
 JUDGE_CASES = os.path.join(HERE, "..", "..", "copilot", "judge_cases.json")
 NODE = shutil.which("node")
@@ -267,8 +268,28 @@ class Store(unittest.TestCase):
                 ("Kundendaten nicht herunterladen: die Datei kunden.csv bleibt tabu.", ["kunden.csv"]),
                 ("Never touch \\\\fs01\\HR$ or the backups.", ["HR$"]),                   # a UNC path ends before lower-case words
                 ("Never touch \\\\fs01\\HR\\Personnel Files.", ["HR\\Personnel Files"]),
-                ("Do not copy http://10.10.10.5/a/customers.csv.", ["customers.csv"])):    # the longer form is refused (a)
+                ("Do not copy http://10.10.10.5/a/customers.csv.", ["customers.csv"]),     # the longer form is refused (a)
+                # one mention matched twice gives one name (a URL's path holds its file name); two mentions stay two, even
+                # when one name is part of the other: neither entry would block the other's commands
+                ("Do not copy http://10.10.10.5/backup/customers.csv.", ["/backup/customers.csv"]),
+                ("Do not download customers.csv or its backup customers.csv.bak.", ["customers.csv", "customers.csv.bak"]),
+                ("Do not copy data.csv or metadata.csv.", ["data.csv", "metadata.csv"]),
+                ("Do not access /backup or /backup2 on the web server.", ["/backup", "/backup2"]),
+                ("Do not copy anything from \\\\fs01\\HR$ or \\\\fs01\\HR$\\Payroll.", ["HR$", "HR$\\Payroll"]),
+                # shares written the smbclient way, and share URLs, keep their names ($ included)
+                ("Do not download anything from //fs01/HR$ or //fs01/Finance/Payroll.", ["HR$", "Finance/Payroll"]),
+                ("Never copy anything from smb://fs01/HR$", ["/HR$"]), ("Do not download anything from smb://10.10.10.20/Finance$", ["/Finance$"]),
+                # a sentence that states the scope gives only the names a negated clause protects
+                ("The web tier is in scope, but never download http://10.10.10.5/backup/customers.csv.", ["/backup/customers.csv"])):
             self.assertEqual(kinds({"roe": roe}), [("suggest", w) for w in want], roe)
+        # the in-scope application named by URL in a scope statement is the target, not protected data
+        for fields in ({"scope_statement": "Scope: the API at https://api.acme.lab/v2/ (no production data)."},
+                       {"scope_statement": "The API at https://api.acme.lab/v2/ (no production data)."},
+                       {"roe": "The shop at http://10.10.10.5/shop/ is in scope, but do not attack the payment gateway."},
+                       {"roe": "Testing is limited to http://10.10.10.5/app/ and must not touch production data."},
+                       {"roe": "In scope: https://portal.acme.lab/admin/ (the tenant portal), no access to other tenants' records."}):
+            self.assertEqual(kinds(fields), [], fields)
+        self.assertEqual(kinds({"scope_statement": "Never download http://10.10.10.5/backup/customers.csv."}), [("suggest", "/backup/customers.csv")])
         for roe in ("Directory listing is allowed, but do not download files.", "Do not copy anything from the share and report what you find.",
                     "The folder for HR is off-limits.", "Do not delete any table or database.", "Do not run scanners from /opt/tools.",
                     "Do not touch backup.db.lab."):
@@ -284,11 +305,26 @@ class Store(unittest.TestCase):
                              [("suggest", "/srv/exports/customers.csv")], listed)
         # the saved list: short or common names, descriptions, and Prohibited entries that look like data (not commands
         # or flags such as "rm -rf /"). A hidden share (HR$), a dotfile (.env) and an extension (*.csv) are narrow however short.
+        # A move only for an entry Protected data accepts (C$, a URL, ../, ~, a UNC host and a drive letter are refused
+        # there) and reads at least as strictly (a tool or wordlist path is a local position there: a human, not a block).
         saved = {"protected_data": ["HR", "/hr/", "db", "HR$", ".env", "*.csv", "customers.csv", "HR share", "customer files"],
-                 "prohibited": ["hydra", "-T5", "customers.csv", "/backup/", "Finance$", "rm -rf /", "-oN/tmp/x.csv"]}
+                 "prohibited": ["hydra", "-T5", "customers.csv", "/backup/", "Finance$", "rm -rf /", "-oN/tmp/x.csv", "C$", "D$",
+                                "http://10.10.10.5/admin/", "../etc", "~/.ssh/id_rsa", "\\\\dc01\\SYSVOL", "C:\\Windows\\System32",
+                                "/usr/bin/hydra", "/usr/share/wordlists/rockyou.txt", "/usr/share/wordlists/"]}
         self.assertEqual(kinds(saved), [("broad", "HR"), ("broad", "/hr/"), ("broad", "db"), ("descriptive", "HR share"),
                                         ("descriptive", "customer files"), ("move", "customers.csv"), ("move", "/backup/"),
                                         ("move", "Finance$")])
+        moves = [h["entry"] for h in EN.data_hints({"prohibited": ["hydra", "C$", "ADMIN$", "/backup/", "../x"]}, ["10.10.10.0/24"])]
+        self.assertEqual(moves, ["ADMIN$", "/backup/"])
+        self.assertEqual(self.e.validate({**GOOD, "protected_data": moves})["protected_data"], moves)      # each one saves
+        # a share or folder the rules spell as it is (a UNC path, a quoted name) is a name, not a description
+        for roe, suggested, entry in (("Do not copy anything from \\\\fs01\\Personnel Files.", "Personnel Files", "Personnel Files"),
+                                      ("Never touch \\\\fs01\\HR\\Personnel Files.", "HR\\Personnel Files", "HR\\Personnel Files"),
+                                      ("Never touch \\\\fs01\\HR\\Personnel Files.", "HR\\Personnel Files", "Personnel Files"),
+                                      ('Never download anything from the "Scanned Files" folder.', "Scanned Files", "Scanned Files")):
+            self.assertEqual(kinds({"roe": roe}), [("suggest", suggested)], roe)
+            self.assertNotIn(("descriptive", entry), kinds({"roe": roe, "protected_data": [entry]}), roe)
+        self.assertIn(("descriptive", "HR share"), kinds({"roe": "Do not copy anything from the HR share.", "protected_data": ["HR share"]}))
         rec = self.e.save({**GOOD, "roe": "Stop and report if you find customers.csv; do not copy it."}, {"user": "admin"})
         self.assertEqual([(h["kind"], h["entry"]) for h in rec["data_hints"]], [("suggest", "customers.csv")])
         self.assertNotIn("data_hints", self.e.get(rec["version"]))                              # worked out, not stored
@@ -302,6 +338,11 @@ class Store(unittest.TestCase):
             t0 = time.time()
             EN.data_hints({"roe": ("Do not copy " + body)[:8000], "protected_data": listed, "prohibited": ["a/b"] * 64}, ["10.10.10.0/24"])
             self.assertLess(time.time() - t0, 0.5, body[:20])
+        # a path may start only where a path starts: runs of "*/", "$/" or "-/" took about 0.5 s (quadratic), now milliseconds
+        for unit in ("*/", "$/", "-/", "*$/"):
+            t0 = time.time()
+            EN.data_hints({"roe": ("Do not copy data /" + unit * 4000)[:8000]}, ["10.10.10.0/24"])
+            self.assertLess(time.time() - t0, 0.15, unit)
 
     @unittest.skipUnless(NODE, "node not installed")
     def test_n8n_enforces_the_saved_list(self):
@@ -317,6 +358,43 @@ console.log(JSON.stringify([d('curl -s http://10.10.10.5/backup/customers.csv -o
         self.assertIn("command names protected data: customers.csv, /backup/", miss["reasons"])
         self.assertEqual((miss["protectedData"], miss["protectedEntries"]), (["customers.csv", "/backup/"], 2))
         self.assertEqual((robots["allowed"], robots["autoRun"], robots["dataReview"], robots["protectedEntries"]), (True, True, [], 2))
+
+    @unittest.skipUnless(NODE, "node not installed")
+    def test_gui_a_refused_move_keeps_the_prohibited_line(self):
+        # app.js's own engagement card (cpEngLoad, the move button, Save) on a stand-in page: a move takes the line out of
+        # Prohibited at once, and a save the console refuses puts it back, so the rule is never lost with the refused entry
+        status = {"current": {"name": "x", "prohibited": ["hydra", "C$", "ADMIN$"], "protected_data": [], "scope_in": [], "scope_out": []},
+                  "hints": [], "versions": [], "ceiling": {},
+                  "data_hints": [{"kind": "move", "entry": "C$", "sentence": None}, {"kind": "move", "entry": "ADMIN$", "sentence": None}]}
+        js = f"""
+const src = require('fs').readFileSync({json.dumps(APP_JS)}, 'utf8').replace(/\\r/g, '');
+const grab = (start, end) => {{ const i = src.indexOf(start), j = src.indexOf(end, i); if (i < 0 || j < 0) throw new Error(start); return src.slice(i, j + end.length); }};
+const code = grab('const addLine', "$('#engSave').disabled=false;\\n}};");
+const unesc = (s) => s.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+const els = {{}};
+const $ = (sel) => els[sel] || (els[sel] = {{ value: '', checked: false, textContent: '', innerHTML: '', disabled: false, onclick: null, buttons: {{}},
+  querySelectorAll(q) {{ const a = (q.match(/^\\[data-(\\w+)\\]$/) || [])[1]; if (!a) return [];
+    return [...this.innerHTML.matchAll(new RegExp('data-' + a + '="([^"]*)"', 'g'))].map((m) => this.buttons[a + m[1]]
+      || (this.buttons[a + m[1]] = {{ dataset: {{ [a]: unesc(m[1]) }}, disabled: false, textContent: '', onclick: null }})); }} }});
+const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({{ '&': '&amp;', '<': '&lt;', '>': '&gt;' }})[c]);
+const escA = (s) => esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+const toasts = [], CP = {{ moved: [] }}, status = {json.dumps(status)};
+let saves = 0;
+const api = async (path, body) => {{ if (!body) return status; saves++; throw new Error("protected_data: 'C$' is too broad"); }};
+const {{ cpEngLoad }} = new Function('$', 'esc', 'escA', 'lines', 'fmtTime', 'toast', 'CP', 'api', code + '; return {{ cpEngLoad }};')(
+  $, esc, escA, (v) => (v || []).join('\\n'), () => '', (m) => toasts.push(m), CP, api);
+(async () => {{
+  await cpEngLoad();
+  for (const b of $('#engHints').querySelectorAll('[data-dmove]')) b.onclick();
+  const moved = $('#engProhibited').value;
+  await $('#engSave').onclick();
+  console.log(JSON.stringify({{ moved, prohibited: $('#engProhibited').value, protected: $('#engProtected').value, saves, toasts }}));
+}})();"""
+        got = json.loads(subprocess.run([NODE, "-e", js], capture_output=True, text=True, check=True).stdout)
+        self.assertEqual((got["moved"], got["saves"]), ("hydra", 1))                       # both lines left Prohibited in the form
+        self.assertEqual(got["prohibited"].split("\n"), ["hydra", "C$", "ADMIN$"])          # the refused save put them back
+        self.assertEqual(got["protected"].split("\n"), ["C$", "ADMIN$"])
+        self.assertIn("back under Prohibited: C$, ADMIN$", got["toasts"][-1])
 
     @unittest.skipUnless(NODE, "node not installed")
     def test_n8n_reads_the_saved_scope_as_intended(self):

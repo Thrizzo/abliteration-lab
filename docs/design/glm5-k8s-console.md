@@ -290,7 +290,11 @@ flowchart LR
     add or change now count as active;
   - while red-teaming protected data: read-only tools that run a program, listen or change a share (`nc -e`, `nc -l`,
     awk `system()`, sed's `e`, `xargs`, smbclient `!` and `put`, `smbmap -x`), one-dash `nmap -script`, and sqlmap's
-    dump and search options in the active tier all auto-ran. They now wait for a human, with or without protected data.
+    dump and search options in the active tier all auto-ran. They now wait for a human, with or without protected data;
+  - while reviewing that fix: its checks read the raw text, so quoting (`nc '-e'`, `"--script=vuln"`), attached values
+    (`nc -e/bin/sh`) and abbreviations (`ncat --exe`, `smbmap --upl`) still auto-ran, and the active tier took any
+    program with a safe `--script` or an enumeration flag (`python3 x.py --dbs # sqlmap`). The checks now read the words
+    bash hands each program, and the active tier's shapes need nmap, rustscan or sqlmap themselves.
 - **The judge reads the scope too** (`SCOPE (LAB_ALLOWLIST): ...`, in every run), still never the operator's free text:
   that text is the likeliest carrier of an injection aimed at the judge.
 - **Measured, not assumed:** `copilot/eval_judge.py` runs labelled commands that pass every gate through a real judge

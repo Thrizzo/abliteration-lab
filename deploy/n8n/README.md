@@ -123,6 +123,10 @@ instead of guessing a scope.
      `ffuf -input-cmd`, nmap `--datadir` and `--resume`, rustscan `--config-path` and custom `--scripts`. nmap reads
      `-script` like `--script`, and so does the gate. sqlmap options that dump, search or
      read files leave the active tier, also in the spellings sqlmap accepts for them (`--sea`, `-dump`, Unicode dashes).
+     These checks read the words bash hands the program, so quoting hides nothing (`nc '-e'`, `"--script=vuln"`, awk
+     `'sys''tem('`), and an option counts in the spellings the tool accepts: attached values (`nc -e/bin/sh`,
+     `ncat -lp4444`), long-option prefixes (`ncat --exe`, `smbmap --upl`) and smbclient's command prefixes (`ren`).
+     Every `--script` counts, not only the first.
    - It decides the auto-run tier: a tier auto-runs only if its `LAB_AUTORUN_*` variable and the engagement both allow
      it.
 7. **Judge (regular model).** It sees the vetted command, the scope (`LAB_ALLOWLIST`, in every run) and the rules of
@@ -140,7 +144,8 @@ instead of guessing a scope.
      `workflow.test.js` checks the graph: no blocked run can reach approval or execution.
 9. **Auto-run tiers (code, fail-safe).**
    - **Passive** (`LAB_AUTORUN_READONLY=true`): read-only recon.
-   - **Active recon** (`LAB_AUTORUN_ACTIVE_RECON=true`, off by default): safe-category NSE and `sqlmap` enumerate-only.
+   - **Active recon** (`LAB_AUTORUN_ACTIVE_RECON=true`, off by default): safe-category NSE and `sqlmap` enumerate-only,
+     each from its own program (nmap or rustscan, sqlmap): a `--script` or `--dbs` word on another program is no shape.
    - **Everything else** goes to the **Human approval** Wait node.
 10. **Execute** is `disabled` on import and posts to your own `LAB_RUNNER_URL`.
 
@@ -154,8 +159,9 @@ There is no runner yet. The policy gate reads a command the way bash does, so th
 
 Otherwise comments, quoting, `;` and line breaks can mean something else to the runner than to the gate, and a file one
 command wrote can change what the next one fetches. The gate judges each command on its own. While protected data is
-listed, it sends a command that writes a dotfile or sets one of those variables to a human, but it cannot see what such
-a file does to a later command.
+listed, it sends a command that writes a dotfile (`wget -qO ~/.wgetrc`, `curl -so .curlrc`, or a wget or `curl -O`
+download named after a URL that ends in one) or sets one of those variables to a human, but it cannot see what such a
+file does to a later command.
 
 ## Files
 
@@ -164,9 +170,10 @@ a file does to a later command.
 | `workflows/pentest-copilot.json` | The importable workflow (44 nodes). **Generated**, do not hand-edit. |
 | `connect_console.py` | One-shot setup: credentials, the workflow (published), and, for the Kubernetes console, an n8n API key limited to reading and stopping executions plus the console's Secret. Safe to re-run. It first waits (`--wait`, 300 s) until `/healthz/readiness` answers 200: while n8n migrates its database, every request gets 200 "n8n is starting up", and its routes appear only after that, so it can run right after a deploy. `python -m unittest discover -s deploy/n8n` tests the wait against a fake n8n that starts like the real one. |
 | `build_workflow.js` | Generator: embeds `policy.js` into the Code nodes and reads the prompts from `copilot/operator_contract.json`. Every Code node is parsed at build time; `--check` fails if the JSON is stale. |
-| `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 153 tests. |
+| `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 184 tests. |
 | `protected_corpus.json` | 107 commands with protected data listed, each with the outcome it must get (37 blocked, 38 for a human, 32 pass) and its reason. `policy.test.js` runs them through `decide()`, along with the 59 entry vectors the console shares (`copilot/tests/fixtures/protected_vectors.json`). |
 | `workflow.test.js` | Runs each Code node's actual code with mocked n8n globals (neutralizer, `$env` fail-closed, parse, veto-only judge, store-down detection, result-page escaping, the protected-data bounds and prompt line). Also checks the graph: blocked runs never reach approval or execution, console runs never reach a form page, and the operator calls chat completions (not the Responses API). |
+| `test_ci_node_tests.py` | Checks that CI's n8n step runs every console test that needs node (`app/tests`, `skipUnless(NODE)`): the console image has no node, so there they pass by skipping. |
 | `docker-compose.n8n.yml` | n8n + Qdrant overlay on the lab stack. n8n listens on localhost only; Qdrant has no published port. |
 | `../../copilot/` | Ingestion, scrubbing, QLoRA pairs, trainer and eval ([copilot/README.md](../../copilot/README.md)). |
 
@@ -226,7 +233,7 @@ a file does to a later command.
 
 ## Verified here, and how
 
-- **Unit tests:** `policy.test.js` (153), `workflow.test.js` (127), `python -m unittest discover -s copilot/tests -t .`
+- **Unit tests:** `policy.test.js` (184), `workflow.test.js` (127), `python -m unittest discover -s copilot/tests -t .`
   (54, including checks that the JS and Python neutralizers and prompt renderings are identical).
 - **Protected data:**
   - every command in `protected_corpus.json` gets its outcome and reason, and every entry the console accepts among
