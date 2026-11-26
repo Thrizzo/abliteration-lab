@@ -494,7 +494,8 @@ class TestCopilotModels(unittest.TestCase):
     def test_free_prompt_to_a_chosen_model(self):
         feed = CR.Feed()
         list(CR.ModelChat(self.url, "glm-abl", feed).stream("hello there", 16, model="glm-abl-run7"))
-        self.assertEqual(model_standin.SEEN[-1]["model"], "glm-abl-run7")
+        mine = [r for r in model_standin.SEEN if r["path"].startswith("/v1/chat") and r["user"] == "hello there"]
+        self.assertEqual(mine[-1]["model"], "glm-abl-run7")              # SEEN is shared by every stand-in in this process
         self.assertEqual(feed.since(0)["events"][-1]["data"]["model"], "glm-abl-run7")
 
 

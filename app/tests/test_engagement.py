@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -233,6 +234,13 @@ class TestEngagementHTTP(unittest.TestCase):
         self.assertEqual((hook["mode"], hook["command"], hook["operator_model"], hook["judge_model"]),
                          ("manual", "nmap -p 445 --open 10.10.10.5", "glm-abl", "qwen3:8b"))
         self.assertEqual((hook["engagement"]["version"], hook["engagement"]["scope_in"]), (1, ["10.10.10.0/28", "10.10.10.0/24", "box.htb"]))
+        # let the run's follower finish against this fake n8n: left running, it would keep polling after the fake is gone
+        # and later write its "n8n's execution API kept failing" error into the shared feed, under another test
+        for _ in range(100):
+            if self.s.copilot.get(out["id"])["status"] not in ("running", "waiting"):
+                break
+            time.sleep(0.1)
+        self.assertEqual(self.s.copilot.get(out["id"])["status"], "done")
 
     def test_refusals_before_n8n_is_asked(self):
         for body, part in (({"task": "t", "target": "10.10.10.5", "judge_model": "glm-abl:latest"}, "refused"),
