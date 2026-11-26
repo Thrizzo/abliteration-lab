@@ -1,5 +1,5 @@
 /* Unit tests for the scope/command policy. Run: node deploy/n8n/policy.test.js  (no deps, exit 1 on failure) */
-const { decide, classifyReadOnly, classifyActiveRecon, detectInjection, targetInScope, extractTargets, inCidr } = require('./policy');
+const { decide, classifyReadOnly, classifyActiveRecon, detectInjection, targetInScope, extractTargets, inCidr, engagementConfig, windowCheck, prohibitedHits } = require('./policy');
 
 let failed = 0;
 function ok(name, cond) {
@@ -187,6 +187,74 @@ ok('//unc host extracted and in scope', (() => {
 ok('user@host extracted', decide({ command: 'ssh admin@10.10.10.5', target: '10.10.10.5' }, AR).mentioned.includes('10.10.10.5'));
 ok('localhost maps to 127.0.0.1 (allowlisted for tunnels)', decide({ command: 'nc -z localhost 8080', target: '127.0.0.1' }, AR).namesInScopeHost === true);
 ok('a command naming no host never auto-runs', decide({ command: 'whois', target: '10.10.10.5' }, AR).autoRun === false);
+
+// ---- the engagement narrows LAB_ALLOWLIST and the auto-run tiers, never widens them ----
+const CEIL = { allowlist: ['10.10.10.0/24', '192.168.56.0/24', 'box.htb'], autoRunReadOnly: true, autoRunActiveRecon: true };
+const eng = (e) => engagementConfig(e, CEIL);
+const nmap = (t) => ({ command: `nmap -sV ${t}`, target: t });
+ok('no engagement (web form): the ceiling alone, its tiers unchanged', (() => {
+  const c = eng(null);
+  return decide(nmap('192.168.56.7'), c).allowed === true && c.autoRunReadOnly === true && c.autoRunActiveRecon === true && !c.scopeIn;
+})());
+ok('engagement scope narrows: in LAB_ALLOWLIST but outside the engagement -> blocked', (() => {
+  const d = decide(nmap('192.168.56.7'), eng({ scope_in: ['10.10.10.0/28'] }));
+  return d.allowed === false && d.reasons.some((r) => r.includes('outside the engagement scope'));
+})());
+ok('engagement scope: a host inside it passes', decide(nmap('10.10.10.5'), eng({ scope_in: ['10.10.10.0/28'] })).allowed === true);
+ok('an engagement entry outside LAB_ALLOWLIST cannot widen it', (() => {
+  const d = decide(nmap('8.8.8.8'), eng({ scope_in: ['8.8.8.0/24'] }));
+  return d.allowed === false && d.reasons.some((r) => r.includes('LAB_ALLOWLIST'));
+})());
+ok('empty engagement scope: LAB_ALLOWLIST applies', decide(nmap('192.168.56.7'), eng({ scope_in: [] })).allowed === true);
+ok('host names: exact, in both lists', decide(nmap('box.htb'), eng({ scope_in: ['box.htb', '10.10.10.0/24'] })).allowed === true
+  && decide(nmap('box.htb'), eng({ scope_in: ['10.10.10.0/24'] })).allowed === false);
+ok('exclusions: a declared target the engagement excludes -> blocked', (() => {
+  const d = decide(nmap('10.10.10.1'), eng({ scope_in: ['10.10.10.0/24'], scope_out: ['10.10.10.1'] }));
+  return d.allowed === false && d.reasons.some((r) => r.includes('excluded by the engagement'));
+})());
+ok('exclusions: a command that also reaches an excluded host -> blocked', (() => {
+  const d = decide({ command: 'nmap -sV 10.10.10.5 10.10.10.1', target: '10.10.10.5' }, eng({ scope_out: ['10.10.10.0/31'] }));
+  return d.allowed === false && d.reasons.some((r) => r.includes('10.10.10.1 (excluded by the engagement)'));
+})());
+ok('engagement lists are bounded and ignore junk', (() => {
+  const c = eng({ scope_in: [' 10.10.10.5 ', '', null, ...Array.from({ length: 100 }, () => '10.10.10.6')], prohibited: 'hydra' });
+  return c.scopeIn[0] === '10.10.10.5' && c.scopeIn.length === 64 && Array.isArray(c.prohibited) && c.prohibited.length === 0;
+})());
+// prohibited tools / flags: whole tokens, case-insensitive, no regular expressions
+ok('prohibited: hydra hits hydra, /usr/bin/hydra and thc-hydra', ['hydra -l a -P p.txt ssh://10.10.10.5', '/usr/bin/hydra -L u ssh://10.10.10.5', 'thc-hydra x']
+  .every((c) => prohibitedHits(c, ['hydra']).length === 1));
+ok('prohibited: case-insensitive; "brute" hits nmap --script ssh-brute', prohibitedHits('NMAP --script ssh-brute 10.10.10.5', ['nmap', 'brute']).length === 2);
+ok('prohibited: no partial words (sqlmap does not hit sqlmapapi)', prohibitedHits('sqlmapapi -s', ['sqlmap']).length === 0);
+ok('prohibited: flags (-T5 hits, -T4 does not)', prohibitedHits('nmap -T5 10.10.10.5', ['-T5']).length === 1 && prohibitedHits('nmap -T4 10.10.10.5', ['-T5']).length === 0);
+ok('prohibited: entries are text, not patterns (a.b does not hit axb; (* is fine)', prohibitedHits('axb', ['a.b']).length === 0 && prohibitedHits('x (* y', ['(*']).length === 1);
+ok('prohibited: decide() blocks and names the entry', (() => {
+  const d = decide({ command: 'hydra -l admin -P rockyou.txt ssh://10.10.10.5', target: '10.10.10.5' }, eng({ prohibited: ['hydra', 'msfconsole'] }));
+  return d.allowed === false && d.prohibited.join() === 'hydra' && d.reasons.some((r) => r === 'prohibited by the rules of engagement: hydra');
+})());
+// the time window, fail-closed
+const T = Date.parse('2026-11-26T12:00:00Z');
+ok('window: inside -> open; no window -> open', windowCheck({ start: '2026-11-26T08:00:00Z', end: '2026-11-26T18:00:00Z' }, T).open === true && windowCheck(null, T).open === true
+  && windowCheck({ start: null, end: null }, T).open === true);
+ok('window: before the start / at or after the end -> closed', windowCheck({ start: '2026-11-26T13:00:00+00:00' }, T).open === false
+  && windowCheck({ end: '2026-11-26T12:00:00Z' }, T).open === false && windowCheck({ end: '2026-11-26T12:00:01Z' }, T).open === true);
+ok('window: a time zone offset counts (08:00-05:00 is 13:00 UTC)', windowCheck({ start: '2026-11-26T08:00:00-05:00' }, T).open === false);
+ok('window: an unreadable bound closes it', windowCheck({ start: 'tomorrow' }, T).open === false);
+ok('window: decide() blocks outside it', (() => {
+  const d = decide(nmap('10.10.10.5'), { ...eng({ window_end: '2026-11-25T18:00:00Z' }), now: T });
+  return d.allowed === false && d.reasons.some((r) => r.startsWith('outside the engagement window'));
+})());
+// auto-run: the variable AND the engagement
+ok('tiers: LAB_AUTORUN_READONLY=true but the engagement leaves passive off -> no auto-run', (() => {
+  const d = decide(nmap('10.10.10.5'), eng({ autorun_passive: false }));
+  return d.allowed === true && d.autoRun === false;
+})());
+ok('tiers: both on -> passive auto-run', decide(nmap('10.10.10.5'), eng({ autorun_passive: true })).tier === 'passive');
+ok('tiers: the engagement cannot switch on a tier the variable leaves off', (() => {
+  const c = engagementConfig({ autorun_passive: true, autorun_active: true }, { allowlist: CEIL.allowlist, autoRunReadOnly: false, autoRunActiveRecon: false });
+  return c.autoRunReadOnly === false && c.autoRunActiveRecon === false && decide(nmap('10.10.10.5'), c).autoRun === false;
+})());
+ok('tiers: active-recon needs both too', decide({ command: 'nmap --script=safe,version 10.10.10.5', target: '10.10.10.5' }, eng({ autorun_active: true })).tier === 'active_recon'
+  && decide({ command: 'nmap --script=safe,version 10.10.10.5', target: '10.10.10.5' }, eng({ autorun_active: false })).autoRun === false);
 
 console.log(failed ? `\n${failed} test(s) FAILED` : '\nall policy tests passed');
 process.exit(failed ? 1 : 0);

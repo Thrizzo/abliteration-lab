@@ -12,12 +12,15 @@ The operator's proposal depends on words in the TASK, so a test can walk every b
   "reject"   nmap -sV -Pn <target>            the judge answers REJECT
   "slow"     the operator answers after 4 s (to watch a run while it is still running)
 A chat request without a TARGET line (a free prompt) gets "stand-in answer to: <prompt>".
+GET /_seen lists the last model requests (path, model, last user message), so a test can check which model the copilot
+asked and what the prompt said (e.g. that the rules of engagement reached the operator and the judge).
 
     python app/tests/model_standin.py [PORT]      (default 11434; standard library only)
 
 Used by the console's unit tests (imported) and by the Kubernetes e2e test, which runs it in place of the copilot's
 Ollama (deploy/k8s/tests/pipeline-e2e.sh).
 """
+import collections
 import json
 import re
 import sys
@@ -25,6 +28,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DIM = 768                                     # nomic-embed-text
+SEEN = collections.deque(maxlen=200)          # model requests, newest last: GET /_seen
 
 
 def text_of(messages):
@@ -113,11 +117,16 @@ class H(BaseHTTPRequestHandler):
             return self._json({"version": "0.0.0-standin"})
         if self.path in ("/", "/healthz"):
             return self._json({"ok": True})
+        if self.path.startswith("/_seen"):
+            return self._json({"requests": list(SEEN)})
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self):
         b = self._body()
         now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if self.path.startswith(("/v1/chat/completions", "/api/chat", "/api/generate")):
+            msgs = b.get("messages") or [{"role": "user", "content": b.get("prompt", "")}]
+            SEEN.append({"path": self.path, "model": b.get("model"), "user": last_user(msgs)[:4000]})
         if self.path.startswith("/v1/chat/completions"):
             answer = operator_answer(b.get("messages"))
             model, cid = b.get("model", "glm-abl"), "chatcmpl-standin"

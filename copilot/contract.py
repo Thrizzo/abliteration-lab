@@ -1,7 +1,10 @@
 """The operator/judge prompt contract, shared with the n8n workflow (deploy/n8n/build_workflow.js reads the same
 operator_contract.json), so QLoRA training pairs and the eval talk to the operator exactly the way n8n does.
 
-    operator_messages(task, target, references="")  ->  [system, user] chat messages, identical to the n8n operator node
+    operator_messages(task, target, references="", engagement=None)  ->  [system, user] chat messages, identical to the
+                                                     n8n "Build operator prompt" node
+    judge_user(task, target, command, read_only, tier, engagement=None)  ->  the n8n "Build judge prompt" node's message
+    engagement_text(engagement)                      ->  the console's engagement (scope, rules) as both prompts show it
     neutral(text)                                    ->  the address neutralizer of the n8n "Build reference context" node
     OUTPUT_KEYS                                      ->  the JSON object the operator must answer with
 """
@@ -16,6 +19,8 @@ with open(os.path.join(_HERE, "operator_contract.json"), encoding="utf-8") as _f
 OPERATOR_SYSTEM = CONTRACT["operator_system"]
 JUDGE_SYSTEM = CONTRACT["judge_system"]
 REFERENCE_HEADER = CONTRACT["reference_header"]
+ENGAGEMENT_HEADER = CONTRACT["engagement_header"]
+ENGAGEMENT_MAX = 4000          # characters of engagement text in a prompt (the operator may have an 8k context)
 OUTPUT_KEYS = ("command", "target", "rationale")
 
 # mirrors the JS neutralizer in build_workflow.js; both are checked against tests/fixtures/neutral_vectors.json
@@ -31,15 +36,54 @@ def neutral(text):
     return _RX_LABHOST.sub("<other-host>", text)
 
 
-def operator_user(task, target, references=""):
+def engagement_text(e):
+    """The engagement as both prompts show it (mirrors engagementText in deploy/n8n/build_workflow.js). The rules come
+    last: past ENGAGEMENT_MAX characters it is their end that is cut."""
+    if not isinstance(e, dict):
+        return ""
+
+    def s(v):
+        return "" if v is None else str(v).strip()
+
+    def joined(v):
+        return ", ".join(s(x) for x in (v if isinstance(v, list) else []) if s(x))
+    lines = []
+    if s(e.get("name")):
+        lines.append(f"ENGAGEMENT: {s(e.get('name'))}" + (f" (version {s(e.get('version'))})" if s(e.get("version")) else ""))
+    for label, value in (("SCOPE STATEMENT", s(e.get("scope_statement"))), ("IN SCOPE", joined(e.get("scope_in"))),
+                         ("OUT OF SCOPE", joined(e.get("scope_out")))):
+        if value:
+            lines.append(f"{label}: {value}")
+    if s(e.get("window_start")) or s(e.get("window_end")):
+        lines.append(f"WINDOW: {s(e.get('window_start')) or 'open'} to {s(e.get('window_end')) or 'open'}")
+    for label, value in (("PROHIBITED", joined(e.get("prohibited"))), ("RULES", s(e.get("roe")))):
+        if value:
+            lines.append(f"{label}: {value}")
+    text = "\n".join(lines)
+    return text if len(text) <= ENGAGEMENT_MAX else text[:ENGAGEMENT_MAX] + " ..."
+
+
+def operator_user(task, target, references="", engagement=None):
     msg = f"TASK: {task}\nTARGET (authorized, in scope): {target}"
+    rules = engagement_text(engagement)
+    if rules:
+        msg += f"\n\n{ENGAGEMENT_HEADER}\n<<<\n{rules}\n>>>"
     if references:
         msg += f"\n\n{REFERENCE_HEADER}\n<<<\n{references}\n>>>"
     return msg
 
 
-def operator_messages(task, target, references=""):
-    return [{"role": "system", "content": OPERATOR_SYSTEM}, {"role": "user", "content": operator_user(task, target, references)}]
+def operator_messages(task, target, references="", engagement=None):
+    return [{"role": "system", "content": OPERATOR_SYSTEM},
+            {"role": "user", "content": operator_user(task, target, references, engagement)}]
+
+
+def judge_user(task, target, command, read_only, tier, engagement=None):
+    """What the judge reads (its system prompt is JUDGE_SYSTEM): the vetted command, never the operator's free text."""
+    rules = engagement_text(engagement)
+    return (f"TASK: {task}\nTARGET: {target}" + (f"\n{ENGAGEMENT_HEADER}\n<<<\n{rules}\n>>>" if rules else "")
+            + f"\nPROPOSED COMMAND (already passed the scope + denylist gate):\n{command}\nread-only: "
+            + ("true" if read_only else "false") + f"  tier: {tier or 'none'}")
 
 
 def operator_answer(command, target, rationale):

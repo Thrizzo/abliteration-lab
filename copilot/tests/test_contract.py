@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import unittest
 
-from copilot.contract import neutral, operator_messages, operator_user, parse_answer
+from copilot.contract import engagement_text, judge_user, neutral, operator_messages, operator_user, parse_answer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WF = os.path.join(ROOT, "deploy", "n8n", "workflows", "pentest-copilot.json")
@@ -40,20 +40,53 @@ console.log(JSON.stringify(out));"""
             self.assertEqual(got, neutral(v["in"]), v["in"])
 
 
+ENGAGEMENTS = [None, {}, {"name": "ACME internal", "version": 4, "scope_statement": "Only the web tier.", "scope_in": ["10.10.11.0/28", "box.htb"],
+                          "scope_out": ["10.10.11.1"], "window_start": "2026-11-26T08:00:00+01:00", "window_end": None,
+                          "prohibited": ["hydra", "-T5"], "roe": "No DoS.\nStop on PII: report it, do not copy it."},
+               {"name": "long", "roe": "r" * 9000}, {"scope_out": [" ", "10.10.11.9 "], "roe": "  "}]
+
+
 class OperatorPrompt(unittest.TestCase):
     @unittest.skipUnless(NODE, "node not installed")
-    def test_n8n_operator_expression_matches_python(self):
+    def test_n8n_operator_prompt_matches_python(self):
+        # run the real "Build operator prompt" Code node and compare with operator_messages()
         for refs in ("", "[ref 1 | htb | a.md | score 0.70]\nnmap -sV <other-host-ip>"):
-            js = f"""
+            for eng in ENGAGEMENTS:
+                js = f"""
 const wf = require({json.dumps(WF)});
+const code = wf.nodes.find(n => n.name === 'Build operator prompt').parameters.jsCode;
 const op = wf.nodes.find(n => n.name === 'Abliterated operator (suggest)');
-const $json = {{ task: 'Enumerate SMB', target: '10.10.11.42', refCount: {1 if refs else 0}, references: {json.dumps(refs)} }};
-const expr = op.parameters.text.replace(/^=\\{{\\{{\\s*/, '').replace(/\\s*\\}}\\}}$/, '');
-console.log(JSON.stringify({{ user: eval(expr), system: op.parameters.messages.messageValues[0].message }}));"""
-            got = json.loads(node_eval(js))
-            sys_msg, user_msg = operator_messages("Enumerate SMB", "10.10.11.42", refs)
-            self.assertEqual(got["user"], user_msg["content"])
-            self.assertEqual(got["system"], sys_msg["content"])
+const $json = {{ task: 'Enumerate SMB', target: '10.10.11.42', refCount: {1 if refs else 0}, references: {json.dumps(refs)}, engagement: {json.dumps(eng)} }};
+const out = new Function('$input','$json','$','$env', code)({{}}, $json, () => ({{}}), {{}})[0].json;
+console.log(JSON.stringify({{ user: out.operatorPrompt, chain: op.parameters.text, system: op.parameters.messages.messageValues[0].message }}));"""
+                got = json.loads(node_eval(js))
+                sys_msg, user_msg = operator_messages("Enumerate SMB", "10.10.11.42", refs, eng)
+                self.assertEqual(got["user"], user_msg["content"], eng)
+                self.assertEqual(got["system"], sys_msg["content"])
+                self.assertEqual(got["chain"], "={{ $json.operatorPrompt }}")
+
+    @unittest.skipUnless(NODE, "node not installed")
+    def test_n8n_judge_prompt_matches_python(self):
+        for eng in ENGAGEMENTS:
+            for read_only, tier in ((True, "passive"), (False, None)):
+                js = f"""
+const wf = require({json.dumps(WF)});
+const code = wf.nodes.find(n => n.name === 'Build judge prompt').parameters.jsCode;
+const $json = {{ task: 'Enumerate SMB', judgeModel: 'qwen3:8b', engagement: {json.dumps(eng)},
+  policy: {{ target: '10.10.11.42', command: 'smbclient -N -L //10.10.11.42', readOnly: {json.dumps(read_only)}, tier: {json.dumps(tier)} }} }};
+console.log(JSON.stringify(new Function('$input','$json','$','$env', code)({{}}, $json, () => ({{}}), {{}})[0].json.judgePrompt));"""
+                self.assertEqual(json.loads(node_eval(js)),
+                                 judge_user("Enumerate SMB", "10.10.11.42", "smbclient -N -L //10.10.11.42", read_only, tier, eng), eng)
+
+    def test_engagement_text(self):
+        self.assertEqual(engagement_text(None), "")
+        self.assertEqual(engagement_text({"scope_out": [" "], "roe": " "}), "")
+        t = engagement_text(ENGAGEMENTS[2])
+        self.assertTrue(t.startswith("ENGAGEMENT: ACME internal (version 4)\nSCOPE STATEMENT: Only the web tier.\nIN SCOPE: 10.10.11.0/28, box.htb\n"), t)
+        self.assertIn("\nWINDOW: 2026-11-26T08:00:00+01:00 to open\nPROHIBITED: hydra, -T5\nRULES: No DoS.", t)
+        long = engagement_text(ENGAGEMENTS[3])
+        self.assertEqual(len(long), 4000 + 4)
+        self.assertTrue(long.endswith("r ..."))
 
     def test_user_message_shape(self):
         self.assertEqual(operator_user("T", "10.0.0.1"), "TASK: T\nTARGET (authorized, in scope): 10.0.0.1")

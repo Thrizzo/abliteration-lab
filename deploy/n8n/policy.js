@@ -202,11 +202,57 @@ function detectInjection(command) {
   return { suspected: hits.length > 0, hits };
 }
 
+// ---- the engagement (from the console): narrows the scope, never widens it ---------------------
+// The console sends its active engagement with every run: scope entries, exclusions, a time window, prohibited tools or
+// flags, and whether its auto-run tiers are on. LAB_ALLOWLIST and the LAB_AUTORUN_* variables stay the ceiling: a host
+// has to be in LAB_ALLOWLIST AND in the engagement scope (when it lists any) AND not excluded, and a tier auto-runs only
+// when both the variable and the engagement allow it. A run without an engagement (the web form) uses the ceiling alone.
+// Mirrored for display and validation in app/engagement.py; this is the copy that decides.
+const asList = (v) => (Array.isArray(v) ? v : []).map((s) => String(s ?? '').trim()).filter(Boolean).slice(0, 64);
+
+function engagementConfig(eng, base) {
+  const cfg = { allowlist: base.allowlist || [], autoRunReadOnly: base.autoRunReadOnly === true,
+    autoRunActiveRecon: base.autoRunActiveRecon === true, now: base.now };
+  if (!eng || typeof eng !== 'object' || Array.isArray(eng)) return cfg;
+  return { ...cfg, scopeIn: asList(eng.scope_in), scopeOut: asList(eng.scope_out), prohibited: asList(eng.prohibited),
+    window: { start: eng.window_start || null, end: eng.window_end || null },
+    autoRunReadOnly: cfg.autoRunReadOnly && eng.autorun_passive === true,
+    autoRunActiveRecon: cfg.autoRunActiveRecon && eng.autorun_active === true };
+}
+
+// why a host is out of scope ('' when it is in): the ceiling first, then the engagement's scope and exclusions
+const SCOPE_WHY = { allowlist: 'not in the allowlist (LAB_ALLOWLIST)', engagement: 'outside the engagement scope', excluded: 'excluded by the engagement' };
+function scopeWhy(host, cfg) {
+  if (!targetInScope(host, cfg.allowlist || [])) return 'allowlist';
+  if ((cfg.scopeIn || []).length && !targetInScope(host, cfg.scopeIn)) return 'engagement';
+  if ((cfg.scopeOut || []).length && targetInScope(host, cfg.scopeOut)) return 'excluded';
+  return '';
+}
+
+// the engagement window, fail-closed: a bound that cannot be read closes it
+function windowCheck(win, now) {
+  if (!win || (!win.start && !win.end)) return { open: true, reason: '' };
+  const t = typeof now === 'number' ? now : Date.now();
+  const s = win.start ? Date.parse(win.start) : null;
+  const e = win.end ? Date.parse(win.end) : null;
+  if (Number.isNaN(s) || Number.isNaN(e)) return { open: false, reason: 'the engagement window cannot be read' };
+  if (s !== null && t < s) return { open: false, reason: `outside the engagement window (it starts ${win.start})` };
+  if (e !== null && t >= e) return { open: false, reason: `outside the engagement window (it ended ${win.end})` };
+  return { open: true, reason: '' };
+}
+
+// prohibited entries are words, flags or phrases (no regular expressions: the console checks the same list in Python),
+// matched case-insensitively as whole tokens: "hydra" hits /usr/bin/hydra and thc-hydra, "brute" hits ssh-brute
+function prohibitedHits(command, prohibited) {
+  const cmd = String(command || '');
+  return asList(prohibited).filter((p) => new RegExp('(?<![A-Za-z0-9_])' + p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![A-Za-z0-9_])', 'i').test(cmd));
+}
+
 // ---- the gate --------------------------------------------------------------------------------
-// proposal: { command, target, rationale }  (already parsed out of the abliterated model's text)
-// config:   { allowlist: string[], deny?: RegExp[], requireApproval?: boolean }
+// proposal: { command, target, rationale }  (already parsed out of the abliterated model's text, or typed by the operator)
+// config:   { allowlist: string[], deny?: RegExp[], scopeIn?, scopeOut?, prohibited?, window?, now?, autoRun* }
+//           (engagementConfig() builds it from LAB_ALLOWLIST, the LAB_AUTORUN_* variables and the engagement)
 function decide(proposal, config) {
-  const allowlist = config.allowlist || [];
   const deny = config.deny || DEFAULT_DENY;
   const reasons = [];
   const command = (proposal && proposal.command ? String(proposal.command) : '').trim();
@@ -215,22 +261,28 @@ function decide(proposal, config) {
   if (!command) reasons.push('empty command');
 
   // 1. the declared target must be in scope
-  if (!targetInScope(declared, allowlist)) {
-    reasons.push(`declared target "${declared || '(none)'}" is not in the allowlist`);
+  const declaredWhy = scopeWhy(declared, config);
+  if (declaredWhy) {
+    reasons.push(`declared target "${declared || '(none)'}" is ${SCOPE_WHY[declaredWhy]}`);
   }
 
   // 2. every host/IP mentioned in the command must be in scope (catches a command that quietly
   //    reaches a second, out-of-scope host even when the declared target is fine)
   const mentioned = extractTargets(command);
-  const outOfScope = mentioned.filter((h) => !targetInScope(h, allowlist));
+  const outOfScope = mentioned.filter((h) => scopeWhy(h, config));
   if (outOfScope.length) {
-    reasons.push(`command references out-of-scope host(s): ${outOfScope.join(', ')}`);
+    const short = { allowlist: 'not in LAB_ALLOWLIST', engagement: 'outside the engagement scope', excluded: 'excluded by the engagement' };
+    reasons.push(`command references out-of-scope host(s): ${outOfScope.map((h) => `${h} (${short[scopeWhy(h, config)]})`).join(', ')}`);
   }
 
-  // 3. hard denylist, target-independent
+  // 3. hard denylist, target-independent; the engagement's prohibited tools and its time window
   const hit = deny.find((rx) => rx.test(command));
   if (hit) reasons.push(`command matches a denied pattern: ${hit}`);
   if (/(^|\s)-iR\b/.test(command)) reasons.push('nmap -iR scans random internet hosts');
+  const banned = prohibitedHits(command, config.prohibited);
+  if (banned.length) reasons.push(`prohibited by the rules of engagement: ${banned.join(', ')}`);
+  const win = windowCheck(config.window, config.now);
+  if (!win.open) reasons.push(win.reason);
 
   const allowed = reasons.length === 0;
   const ro = classifyReadOnly(command);
@@ -260,6 +312,7 @@ function decide(proposal, config) {
     tier,
     requiresApproval: allowed && !autoRun,
     reasons,
+    prohibited: banned,
     command,
     target: declared,
     mentioned,
@@ -268,5 +321,6 @@ function decide(proposal, config) {
 
 // exported for the unit test; harmless inside an n8n Code node
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { decide, classifyReadOnly, classifyActiveRecon, detectInjection, findUnverifiable, targetInScope, extractTargets, inCidr, ipToInt, DEFAULT_DENY };
+  module.exports = { decide, classifyReadOnly, classifyActiveRecon, detectInjection, findUnverifiable, targetInScope, extractTargets, inCidr, ipToInt,
+    engagementConfig, scopeWhy, windowCheck, prohibitedHits, DEFAULT_DENY };
 }
