@@ -112,6 +112,39 @@ def _when(value, key, errors):
     return dt.isoformat(timespec="seconds")      # one canonical form, which n8n's Date.parse reads
 
 
+_SENTENCE = re.compile(r"(?<=[.;!?])\s+|\n+")                    # not at ":": "backup01.lab ...: do not touch it" is one
+_NEGATED = re.compile(r"\b(not|never|no|don't|avoid|exclude[ds]?|excluding|forbidden|prohibited|off-limits|out of scope)\b", re.I)
+_IP_IN_TEXT = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?![\w.])")
+_HOST_IN_TEXT = re.compile(r"\b(?:[a-z0-9-]+\.)+(?:lab|local|htb|thm|corp|internal|lan|intra|com|net|org|io|de)\b", re.I)
+
+
+def rule_hints(fields):
+    """Hosts that a sentence of the rules or the scope statement puts off-limits ("do not touch backup01.lab", "not a
+    target") while Out of scope leaves them open. Only Out of scope is enforced in code; measured with Qwen3-8B as the
+    judge, rules like that were missed in 2 of 2 cases (copilot/README.md, "Judge eval")."""
+    excluded = []
+    for raw in _lines(fields.get("scope_out")):
+        try:
+            excluded.append(scope_entry(raw))
+        except ValueError:
+            continue
+    out, seen = [], set()
+    for key in ("roe", "scope_statement"):
+        for sentence in _SENTENCE.split(str(fields.get(key) or "")):
+            if not _NEGATED.search(sentence):
+                continue
+            for m in list(_IP_IN_TEXT.finditer(sentence)) + list(_HOST_IN_TEXT.finditer(sentence)):
+                try:
+                    entry = scope_entry(m.group(0))
+                except ValueError:
+                    continue
+                if entry[1] in seen or any(within(entry, [x]) for x in excluded):
+                    continue
+                seen.add(entry[1])
+                out.append({"host": entry[1], "sentence": sentence.strip()[:200]})
+    return out
+
+
 class Engagements:
     def __init__(self, project, audit=None, feed=None, ceiling=None, autorun=None, http_error=None):
         self.dir = os.path.join(project, "engagement")
@@ -218,12 +251,13 @@ class Engagements:
         with self.lock:
             cur = self.current()
             if cur and all(cur.get(k) == v for k, v in clean.items()):
-                return cur
+                return {**cur, "hints": rule_hints(cur)}
             version = max([int(v["version"]) for v in self.versions(limit=1) if v.get("version")] + [0]) + 1
             rec = {"version": version, "saved": now_iso(), "by": (who or {}).get("user") or (who or {}).get("ip"), "note": note, **clean}
             self._write(self._path(version), rec)
             self._write(os.path.join(self.dir, "current.json"), rec)
         changed = sorted(k for k, v in clean.items() if not cur or cur.get(k) != v)
+        rec = {**rec, "hints": rule_hints(clean)}           # not stored: worked out from the fields each time
         msg = f"engagement v{version} saved" + (f": {clean['name']}" if clean["name"] else "") + ("" if clean["active"] else " (inactive)")
         data = {"version": version, "changed": changed, "note": note, "scope_in": clean["scope_in"], "scope_out": clean["scope_out"],
                 "prohibited": clean["prohibited"], "window": [clean["window_start"], clean["window_end"]], "active": clean["active"]}
@@ -245,6 +279,7 @@ class Engagements:
         return {k: cur.get(k) for k in keys}
 
     def status(self):
-        return {"current": self.current(), "versions": self.versions(20),
+        cur = self.current()
+        return {"current": cur, "hints": rule_hints(cur) if cur else [], "versions": self.versions(20),
                 "ceiling": {"known": self.ceiling is not None, "allowlist": self.ceiling_text,
                             "autorun_passive": self.autorun.get("passive"), "autorun_active": self.autorun.get("active")}}

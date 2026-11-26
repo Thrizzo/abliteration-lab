@@ -131,6 +131,19 @@ class Store(unittest.TestCase):
         st = self.e.status()
         self.assertEqual((st["current"]["version"], st["ceiling"]["allowlist"], st["ceiling"]["autorun_passive"]), (3, CEIL, True))
 
+    def test_hints_for_hosts_the_rules_put_off_limits(self):
+        # measured: the judge authorized "nmap -sV backup01.lab" under "do not touch backup01.lab"; Out of scope is code
+        f = {**GOOD, "roe": "Exploitation is allowed. The backup server backup01.lab holds production backups: do not touch it.",
+             "scope_statement": "The lab, 10.10.10.0/24. Its database server 10.10.10.31 is not a target."}
+        self.assertEqual([h["host"] for h in EN.rule_hints(f)], ["backup01.lab", "10.10.10.31"])
+        self.assertIn("do not touch it", EN.rule_hints(f)[0]["sentence"])
+        self.assertEqual(EN.rule_hints({**f, "scope_out": "backup01.lab\n10.10.10.16/28"}), [])     # excluded already (a CIDR covers .31)
+        self.assertEqual(EN.rule_hints({"scope_statement": "Only the web tier, 10.10.10.0/28.", "roe": "Test 10.10.10.5 first."}), [])
+        rec = self.e.save({**f, "scope_in": "10.10.10.0/24"}, {"user": "admin"})
+        self.assertEqual([h["host"] for h in rec["hints"]], ["backup01.lab", "10.10.10.31"])
+        self.assertNotIn("hints", self.e.get(rec["version"]))                                  # worked out, not stored
+        self.assertEqual([h["host"] for h in self.e.status()["hints"]], ["backup01.lab", "10.10.10.31"])
+
     @unittest.skipUnless(NODE, "node not installed")
     def test_n8n_reads_the_saved_scope_as_intended(self):
         # what the console saved, put through the real policy gate: inside the engagement, excluded, outside

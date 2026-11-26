@@ -585,6 +585,10 @@ async function cpEngLoad(){
   $('#cpEngCeiling').innerHTML = c.known
     ? `Ceiling (n8n enforces it, the engagement can only narrow it): LAB_ALLOWLIST <span class="mono">${esc(c.allowlist)}</span>`
     : 'The console does not know LAB_ALLOWLIST; n8n enforces it (ConfigMap copilot-scope).';
+  // a host the rules put off-limits belongs in Out of scope: that is code; the judge alone missed such rules when measured
+  const hints=s.hints||[];
+  $('#engHints').innerHTML = hints.map(h=>`<div class="cp-hint"><span class="badge warn">judge only</span> The rules put <span class="mono">${esc(h.host)}</span> off-limits, but Out of scope does not list it (&ldquo;${esc(h.sentence)}&rdquo;). Out of scope is enforced in code; the judge alone missed rules like this when measured. <button class="btn sm" data-hint="${escA(h.host)}">add to Out of scope</button></div>`).join('');
+  $('#engHints').querySelectorAll('[data-hint]').forEach(b=>b.onclick=()=>{ const t=$('#engOut'), v=t.value.trim(); t.value=(v?v+'\n':'')+b.dataset.hint; b.disabled=true; b.textContent='added: save to apply'; });
   const cap=[]; if(c.autorun_passive===false) cap.push('passive'); if(c.autorun_active===false) cap.push('active');
   $('#engAutoCap').textContent = cap.length ? `capped: the ${cap.join(' and ')} tier is off in LAB_AUTORUN_* (copilot.env)` : '';
   const off=-new Date().getTimezoneOffset(), a=Math.abs(off);

@@ -325,3 +325,5 @@ textarea.mono,input.mono{font-family:var(--mono);font-size:12.5px}
 .cp-staged-cmd{display:block;font:600 14px/1.5 var(--mono);background:var(--page);border:1px solid var(--axis);border-radius:9px;padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--accent)}
 .cp-staged-cmd::before{content:"$ ";color:var(--muted)}
 .cp-staged-cmd.muted{color:var(--muted)}
+.cp-hint{border:1px solid rgba(250,178,25,.45);background:rgba(250,178,25,.07);border-radius:9px;padding:8px 10px;margin:8px 0 0;font-size:12.5px;color:var(--ink2)}
+.cp-hint .btn{margin-left:6px}
