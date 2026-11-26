@@ -263,6 +263,7 @@ class FakeN8n:
 
     def close(self):
         self.httpd.shutdown()
+        self.httpd.server_close()                 # refused from now on, instead of accepted and never answered
 
 
 class TestCopilotRuns(unittest.TestCase):

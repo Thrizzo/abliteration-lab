@@ -57,6 +57,27 @@ def call(app, method, path, headers=None, body=None):
         return status, text
 
 
+def keep_server_state(server, add_cleanup):
+    """The HTTP test classes share one server module (imported once per process). Whatever a test points at its own
+    fakes is put back afterwards, so no later test talks to them: a stopped fake still accepts connections and never
+    answers, which cost the next model list two 5 s timeouts."""
+    saved = [(obj, attr, getattr(obj, attr)) for obj, attrs in (
+        (server, ("engagements",)),
+        (server.copilot, ("base", "secrets_dir")),
+        (server.copilot_models, ("operator_url", "judge_url", "_cache")),
+        (server.model_chat, ("base",)),
+        (server.knowledge, ("qdrant_url", "ollama_url")),
+        (server.control, ("k8s", "copy")),
+        (server.pipeline, ("k8s",)),
+        (server.serving, ("k8s",)),
+    ) for attr in attrs]
+
+    def restore():
+        for obj, attr, value in saved:
+            setattr(obj, attr, value)
+    add_cleanup(restore)
+
+
 @unittest.skipUnless(HAVE_FASTAPI, "the console's dependencies are not installed here")
 class TestControlHTTP(unittest.TestCase):
     @classmethod
@@ -81,6 +102,7 @@ class TestControlHTTP(unittest.TestCase):
         self.addCleanup(self.api.close)
         fake = self.k8sjobs.K8s(base=self.api.url, token="t", namespace="lab")
         s = self.server
+        keep_server_state(s, self.addCleanup)
         s.pipeline.k8s = s.serving.k8s = s.control.k8s = fake
         s.control.copy = None
         self.api.serve_running()
@@ -142,6 +164,7 @@ class TestCopilotHTTP(unittest.TestCase):
     def setUpClass(cls):
         TestControlHTTP.setUpClass()                                 # the same server module, in Kubernetes mode
         cls.server = TestControlHTTP.server
+        keep_server_state(cls.server, cls.addClassCleanup)
         import model_standin
         from http.server import ThreadingHTTPServer
         import threading
@@ -151,6 +174,7 @@ class TestCopilotHTTP(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()
 
     def test_feed_copilot_status_and_free_prompt(self):
         s = self.server
@@ -181,6 +205,7 @@ class TestKnowledgeHTTP(unittest.TestCase):
     def setUpClass(cls):
         TestControlHTTP.setUpClass()
         cls.server = TestControlHTTP.server
+        keep_server_state(cls.server, cls.addClassCleanup)
         import model_standin
         import test_knowledge
         from http.server import ThreadingHTTPServer
@@ -194,6 +219,7 @@ class TestKnowledgeHTTP(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.emb.shutdown()
+        cls.emb.server_close()
         cls.qdrant.close()
 
     def test_preview_upload_list_delete(self):

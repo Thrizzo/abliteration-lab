@@ -41,7 +41,7 @@ class FakeAPI:
         self.log_plan = {}            # pod -> list of "connections", each a list of (ts, text); then the pod ends
         self.exit_codes = {}
         self.block = threading.Event()   # set to release a blocking log stream (stop test)
-        self.blocking = set()
+        self.blocking = set()            # pods whose log stream blocks; a plan's "block": True puts its pod here
         srv = self
 
         class H(BaseHTTPRequestHandler):
@@ -155,7 +155,9 @@ class FakeAPI:
                 name = body["metadata"]["name"]
                 self.jobs[name] = {**body, "status": {"active": 1}}
                 plan = self.pod_plan.pop(name, None) or self.pod_plan.pop("*", None) or {"phases": ["Running"], "logs": [[]]}
-                self.add_pod(name, plan["phases"], plan.get("exit", 0), plan.get("logs"))
+                pod = self.add_pod(name, plan["phases"], plan.get("exit", 0), plan.get("logs"))
+                if plan.get("block"):    # with the pod, before the console can ask for its log: set later, the stream
+                    self.blocking.add(pod)   # could already be over and the Job ended (a test then sees no running Job)
                 return 201, body
             if path == base_jobs and method == "GET":
                 return 200, {"items": list(self.jobs.values())}
@@ -387,10 +389,9 @@ class TestJobs(Base):
         self.assertIn("ImagePullBackOff", waits[0])
 
     def test_stop_deletes_job_and_pod(self):
-        self.api.pod_plan["*"] = {"phases": ["Running"], "logs": [[("2026-11-24T10:00:00Z", "working")]]}
+        self.api.pod_plan["*"] = {"phases": ["Running"], "logs": [[("2026-11-24T10:00:00Z", "working")]], "block": True}
         self.pl.start(PY + ["--stage", "scan", "--model", "m"], "abliterate", "scan")
         pod = self.pl.job + "-pod"
-        self.api.blocking.add(pod)
         time.sleep(0.2)
         self.pl.stop()
         wait_done(self.pl)
@@ -401,9 +402,8 @@ class TestJobs(Base):
         self.assertFalse(self.pl.running())
 
     def test_conflict_while_running_and_wrong_engine(self):
-        self.api.pod_plan["*"] = {"phases": ["Running"], "logs": [[("2026-11-24T10:00:00Z", "x")]]}
+        self.api.pod_plan["*"] = {"phases": ["Running"], "logs": [[("2026-11-24T10:00:00Z", "x")]], "block": True}
         self.pl.start(PY + ["--stage", "scan", "--model", "m"], "abliterate", "scan")
-        self.api.blocking.add(self.pl.job + "-pod")
         with self.assertRaises(HTTPError) as e:
             self.pl.start(PY, "abliterate", "scan")
         self.assertEqual(e.exception.status, 409)

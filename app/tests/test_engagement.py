@@ -189,9 +189,12 @@ class TestEngagementHTTP(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.standin.shutdown()
+        cls.standin.server_close()
 
     def setUp(self):
         from test_copilot_runs import FakeN8n
+        from test_server_control import keep_server_state
+        keep_server_state(self.s, self.addCleanup)                    # the server module is shared with later test classes
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         secrets = os.path.join(self.tmp, "secrets")
