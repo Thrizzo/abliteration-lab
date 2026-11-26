@@ -70,14 +70,24 @@ instead of guessing a scope.
      credential). n8n answers at once with the execution id; the console follows the run through n8n's API and shows one
      event per stage. Console runs skip the result pages. The workflow stores each node's result as soon as it finishes
      (`saveExecutionProgress`), so the console can show the run while it is still going.
-2. **Scope gate (code).** The target must be in `LAB_ALLOWLIST` *before any model is called*. An out-of-scope run makes
-   zero model or vector-store calls (verified live).
+     - **The console can also send:**
+       - the operator and judge model;
+       - `mode: "manual"` with a typed `command`, which skips retrieval and the operator and goes through the same
+         gates and judge;
+       - its **engagement**: scope statement, rules of engagement, scope, exclusions, window, prohibited tools and
+         auto-run tiers.
+     - **"Define task + target"** (a Code node) bounds and types all of that. Form runs can set none of it.
+2. **Scope gate (code).** The target must be in `LAB_ALLOWLIST` *before any model is called*. With an engagement it must
+   also be in the engagement's scope, not excluded, and inside its window. An engagement narrows `LAB_ALLOWLIST` and
+   never widens it. An out-of-scope run makes zero model or vector-store calls (verified live).
 3. **Retrieval (RAG).** Top-4 chunks of your writeups from Qdrant (`copilot.ingest` fills it). They are bounded to 3.5k
    characters, labelled with their source, and addresses are masked. They go to the operator only and are dropped right
    after it, so they never reach the judge. An empty or unreachable store means the copilot runs without references and
    says so in `ragStatus`.
 4. **Abliterated operator.** A Basic LLM Chain with **no tools**, answering one line of JSON
-   `{command, target, rationale}`.
+   `{command, target, rationale}`. Its prompt is built in the "Build operator prompt" Code node, with the rules of
+   engagement and the references, so the console can show the exact text. `copilot/contract.py` mirrors it, and the tests
+   compare the two character by character.
 5. **Parse.** The model output is data. The JSON object is extracted, with a fenced block as fallback.
 6. **Policy gate (`policy.js`): the boundary.**
    - Every host the command names must be in scope. Hosts are read from URLs, `//unc` paths, `user@host`, bare names
@@ -85,9 +95,14 @@ instead of guessing a scope.
    - A denylist blocks destructive, exfil, pivot and anti-forensic patterns, and `nmap -iR`.
    - Commands it cannot verify never auto-run: placeholders, `$VAR`/`$(…)`, `-iL` files, integer/hex/octal IPs, IPv6.
    - Text aimed at the judge never auto-runs.
-   - It decides the auto-run tier.
-7. **Judge (regular model).** It sees the vetted command and answers `AUTHORIZE` or `REJECT`. Only a clean first word counts,
-   and the policy runs once more before anything executes. It runs with thinking off (`think: false`). Ollama switches
+   - A line break separates commands, as `;` does: every line is classified.
+   - The engagement's prohibited tools or flags (whole words, not patterns) and its window block a command.
+   - It decides the auto-run tier: a tier auto-runs only if its `LAB_AUTORUN_*` variable and the engagement both allow
+     it.
+7. **Judge (regular model).** It sees the vetted command and the rules of engagement, and answers `AUTHORIZE` or
+   `REJECT`. Only a clean first word counts, and the policy runs once more before anything executes. "Build judge prompt"
+   refuses a judge whose name marks it as abliterated (`glm-abl`, `*-abl`, `*abliterated*`, `uncensored`) or that is the
+   operator itself. The run then fails closed. It runs with thinking off (`think: false`). Ollama switches
    thinking on for qwen3 when a request leaves it unset, so every verdict would first generate a hidden reasoning trace:
    minutes per call on a CPU. On a model without thinking the flag does nothing.
 8. **Result page (form).**
@@ -153,9 +168,10 @@ instead of guessing a scope.
      - **Ollama** for the judge and the embeddings, and **Qdrant**;
      - a **Header Auth** credential for the console webhook, which the workflow needs before it can be published;
      - the workflow itself, imported with those credentials selected and published.
-   - **Model names:** the operator's comes from `COPILOT_OPERATOR_MODEL` (compose default `glm-edge-1.5b-chat-abl:latest`;
-     set it in `deploy/.env` to what `ollama list` shows); the judge (`qwen3:8b`) and embeddings (`nomic-embed-text`)
-     are set in their nodes.
+   - **Model names:** the console sends the operator and judge it chose. Without them, the operator comes from
+     `COPILOT_OPERATOR_MODEL` (compose default `glm-edge-1.5b-chat-abl:latest`; set it in `deploy/.env` to what
+     `ollama list` shows) and the judge from `COPILOT_JUDGE_MODEL` (default `qwen3:8b`). The embedding model
+     (`nomic-embed-text`) is set in its node.
    - **By hand instead:** create those four credentials (OpenAI with Base URL `http://ollama:11434/v1` and any API key),
      import `workflows/pentest-copilot.json`, pick them in the nodes, and **Publish**.
 6. **Optional:** to keep PWK material out of retrieval, add the filter

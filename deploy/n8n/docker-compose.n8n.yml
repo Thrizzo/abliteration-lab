@@ -26,6 +26,7 @@ services:
       LAB_RUNNER_URL: ${LAB_RUNNER_URL:-}          # your own executor endpoint; empty = nothing to run against
       # the operator is an OpenAI-compatible chat model: credential Base URL http://ollama:11434/v1, model name below
       COPILOT_OPERATOR_MODEL: ${COPILOT_OPERATOR_MODEL:-glm-edge-1.5b-chat-abl:latest}
+      COPILOT_JUDGE_MODEL: ${COPILOT_JUDGE_MODEL:-qwen3:8b}    # the regular judge when the console names none; never an abliterated model
       # n8n 2.x blocks $env in Code nodes and expressions by default; the copilot reads the settings above through it.
       # Trade-off: any Code node can then read this container's environment, including N8N_ENCRYPTION_KEY. Acceptable
       # for a single-user lab where only you author workflows (model output is data, never evaluated as code).

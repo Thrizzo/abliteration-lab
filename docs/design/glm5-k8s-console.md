@@ -221,6 +221,49 @@ sequenceDiagram
   by token, as the Compare stage does today with Ollama, and logs them in the feed. They skip the policy gate and the judge,
   since nothing can execute either way.
 
+### 5a. Engagement, model choice, manual commands (copilot v2)
+
+```mermaid
+flowchart LR
+  subgraph Console
+    E[Engagement v<sub>n</sub><br/>scope, exclusions, window,<br/>prohibited, rules] --> R[run request]
+    MD[models: operator, judge] --> R
+    MC[manual command] --> R
+  end
+  R -->|webhook| D[Define: bounded, typed]
+  D --> S{Scope gate<br/>LAB_ALLOWLIST AND engagement}
+  S -->|copilot| Q[Retrieval] --> OP[Build operator prompt] -->|prompt| M[(abliterated operator)]
+  M -->|answer| P[Parse proposal]
+  S -->|manual| MP[Manual proposal]
+  P --> G{Policy gate<br/>+ prohibited, window, tiers}
+  MP --> G
+  G --> JP[Build judge prompt<br/>refuses an abliterated judge] --> J[(regular judge)]
+  J --> A[Apply decision + re-check] --> ST[staged command] --> X[Human approval / Execute: disabled]
+```
+
+- **Decisions, taken with the defaults proposed to the user:**
+  - operator and judge are selectable, and the judge is never an abliterated model (refused in the console and in n8n);
+  - one active engagement, versioned and audited;
+  - `LAB_ALLOWLIST` stays the hard ceiling, which an engagement can only narrow;
+  - structured fields drive the deterministic gates, and free text (scope statement, rules) goes to both models;
+  - Execute stays disabled, and the staged command is display only.
+- **Why the rules reach the abliterated operator:** they come from the operator running the lab, so they are trusted text,
+  and they make compliant proposals likelier. Enforcement does not depend on the model reading them: the prohibited list,
+  the scope, the exclusions and the window are code in the policy gate.
+- **Why the rules reach the judge:** they let it veto what the code can't express, such as "no changes to production
+  accounts". The judge stays veto-only, so a judge talked into AUTHORIZE still can't widen anything.
+- **Manual mode** exists for the operator's own commands. It is not a bypass: the same scope gate, policy gate and judge
+  run, and only the abliterated model and retrieval are skipped.
+- **One file for the ceiling:** `copilot.env` feeds two ConfigMaps (`copilot-settings` for n8n, `copilot-scope` for the
+  console). Before, n8n's Deployment set `LAB_ALLOWLIST` and `LAB_AUTORUN_READONLY` itself and silently overrode the
+  ConfigMap.
+- **Prompts are built in Code nodes,** so the console shows the exact text each model received. The model stand-in's
+  `/_seen` lets CI compare the two.
+- **Found while building it:**
+  - the policy gate classified only the first line of a multi-line command, so `nmap ...` followed by a second line
+    could auto-run. A line break now separates commands as `;` does;
+  - the run view filtered `run.json`, which hid the dataset provenance from the API.
+
 ## 6. Knowledge uploads (retrieval)
 
 - **Upload:** md, txt, html and pdf, up to 50 MB per file, with a source type: `htb`, `blog`, `engagement` or `pwk`. Files

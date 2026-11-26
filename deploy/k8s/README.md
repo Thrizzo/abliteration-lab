@@ -268,25 +268,57 @@ python deploy/n8n/connect_console.py --email <your n8n login> --apply-secret
 - **Re-running** updates everything in place and rotates the key and the secret.
 - **Fresh n8n:** add `--setup-owner --password ...` to create the owner account.
 
-**In the panel:**
-- **Ask the copilot:** a task and one target from `LAB_ALLOWLIST`, which is set in n8n's environment in
-  `base/copilot/n8n.yaml` (`10.10.10.0/24,192.168.56.0/24`; EDIT it for your lab).
-  - **The run:** one event per stage (scope, retrieval, the operator's proposal, the policy gate, the judge), then a
-    result card with the exact command, the decisions and the next step.
-  - **Stop run** stops it in n8n.
-  - **Nothing executes:** the Execute node is disabled. Authorized runs wait at Human approval, since auto-run is off
-    in the cluster (`LAB_AUTORUN_READONLY`).
-- **Prompt the model directly:** straight to `glm-serve`'s OpenAI-compatible API, streamed. This is model testing:
-  there is no policy gate or judge, since nothing can execute either way.
-- **Live feed:** everything as it happens, from every source:
-  - copilot runs and free prompts;
-  - pipeline Jobs and their steps;
-  - Kill / Isolate / Release / Start, Promote / Rollback;
-  - changes of the model server's state.
+**Which model the copilot uses.** The *operator* is the abliterated model that suggests: whatever `glm-serve` serves.
+In vLLM mode that is the promoted run, as `glm-abl`; Promote another run in **Serving** to change it. The *judge* is a
+regular model in the copilot's Ollama that can veto the operator (`qwen3:8b` by default). The **Models** card lists both
+from the servers themselves; the choice is remembered per browser and sent with every run. The judge is never an
+abliterated model: the list leaves out `glm-abl`, `*-abl`, `*abliterated*` and `uncensored` names and embedding models,
+the console refuses such a judge (400), and n8n's "Build judge prompt" node refuses it again.
+
+**Scope and rules of engagement.** The **Engagement** card holds what the client agreed to:
+- **Fields:** a name, the scope statement, the rules of engagement (free text that the operator model and the judge
+  both read), the in-scope IPv4 addresses, CIDRs or host names, exclusions, a time window, prohibited tools or flags
+  (`hydra`, `-T5`; whole words, no patterns), and the auto-run tiers.
+- **One active engagement, versioned:** every save is a new version under `workspace/engagement/`, with who saved it and
+  a note, in the audit log. Earlier versions can be loaded and saved again. Switch it off with *active*, and runs use
+  `LAB_ALLOWLIST` alone.
+- **`LAB_ALLOWLIST` stays the ceiling.** A host must be in `LAB_ALLOWLIST` and in the engagement's scope, not excluded,
+  inside the window. A tier auto-runs only if both its `LAB_AUTORUN_*` variable and the engagement allow it. The console
+  refuses a scope entry outside the ceiling when it saves. n8n's scope gate and policy gate enforce all of it, again
+  after the judge.
+- **The ceiling has one place:** `base/copilot/copilot.env` (`LAB_ALLOWLIST`, `LAB_AUTORUN_READONLY`,
+  `LAB_AUTORUN_ACTIVE_RECON`, `COPILOT_JUDGE_MODEL`). Kustomize turns it into `copilot-settings`, which n8n reads, and
+  `copilot-scope`, which the console reads. Edit the file and apply the overlay again. Restart n8n and the console so
+  they read it.
+
+**Three ways to ask:**
+- **Copilot:** a task and one target. The run goes through the scope gate, retrieval, the abliterated operator, the
+  policy gate and the judge.
+- **Manual command:** you type the command (one line). It skips retrieval and the operator model, and the same policy
+  gate and judge check it.
+- **Direct prompt:** straight to the chosen operator model, streamed and audited. There is no copilot, gate or judge,
+  since nothing executes either way. **Use as command** takes the command out of the answer into Manual command, where
+  the gates check it.
+
+**The run as a flow.** Two lanes: the copilot's gates and judge, and the abliterated model.
+- **Prompt and answer:** the prompt crosses to the model and the answer comes back. "Show the prompt" has the exact text
+  the model got (rules of engagement and references included). "Show the raw answer" has what it sent back.
+- **Each gate:** passed, blocked with every reason, still deciding, or not reached. The judge's exact prompt is one
+  click away.
+- **About to be executed:** the policy-vetted command, the only thing the Execute node would ever get. It comes with
+  Copy and Edit as manual command. **Execute** is shown disabled: the workflow's Execute node is off, no runner is
+  configured, and authorized runs park at Human approval in n8n.
+- **Stop run** stops a run in n8n.
+
+**Live feed:** everything as it happens, from every source:
+- copilot runs, free prompts, engagement saves;
+- pipeline Jobs and their steps;
+- Kill / Isolate / Release / Start, Promote / Rollback;
+- changes of the model server's state.
 
 **Logged and kept:**
-- **Audit:** every run's start, stop and end, and every free prompt with its answer (up to 2,000 characters), go to the
-  audit log with who asked.
+- **Audit:** every run's start (mode, models, engagement version), stop and end, every engagement save, and every free
+  prompt with its answer (up to 2,000 characters), go to the audit log with who asked.
 - **The run list** lives in the console's memory, so a console restart forgets it. n8n keeps the executions.
 - **The webhook secret is in n8n's execution data**, as part of the request headers n8n stores for the webhook node.
   Only n8n's owner and the console's key can read executions, and both have the secret anyway. The console never shows
@@ -373,6 +405,16 @@ delete old runs you no longer need for Rollback.
     - the webhook refuses calls without the secret, and the console's n8n key can't list workflows;
     - a free prompt streams from `glm-serve`;
     - the feed and the audit log record all of it;
+  - copilot v2 through the same n8n:
+    - the model lists leave out abliterated and embedding judges, and an abliterated judge is refused;
+    - an engagement entry outside `LAB_ALLOWLIST` is refused;
+    - with an engagement saved, the rules of engagement reach the operator's and the judge's prompt. The stand-in
+      confirms it received exactly the prompts the console shows;
+    - a target inside `LAB_ALLOWLIST` but outside the engagement is blocked before any model runs;
+    - a prohibited tool is blocked by the policy gate;
+    - a manual command takes the gates without retrieval or the operator, and is staged;
+    - switched off, `LAB_ALLOWLIST` applies alone again;
+  - the prompt sets each run measured on (source, pinned commit, column) are recorded in `run.json`;
   - knowledge uploads into **real Qdrant**:
     - markdown and PDF are indexed, and a scanned PDF is refused;
     - the engagement preview shows its redactions;
