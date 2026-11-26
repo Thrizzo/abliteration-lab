@@ -308,6 +308,14 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     'nc -z 10.10.10.5 22', 'nc -nv -w 3 10.10.10.5 22', "smbclient //10.10.10.20/Public -N -c 'ls'", 'smbmap -H 10.10.10.20 -u guest -p ""',
     'nmap -script safe 10.10.10.5', 'ffuf -u http://10.10.10.5/FUZZ -w /usr/share/wordlists/dirb/common.txt'];
   ok('these stay read-only and auto-run in the passive tier', SAFE.every((c) => { const d = gate(c); return d.readOnly && d.tier === 'passive'; }));
+  for (const [c, rx] of [['nmap -sC --datadir /tmp/x 10.10.10.5', /nmap --datadir or --resume/], ['nmap --resume /tmp/scan.log', /nmap --datadir or --resume/],
+    ['nmap -datad /tmp/x -sV 10.10.10.5', /nmap --datadir or --resume/], ['rustscan -a 10.10.10.5 --scripts custom', /rustscan --config-path or custom --scripts/],
+    ['rustscan -a 10.10.10.5 --config-path /tmp/rs_config', /rustscan --config-path/]]) {
+    const d = gate(c);
+    ok(`REGRESSION: no longer auto-runs (${d.readOnlyReason}): ${c}`, d.allowed === true && d.autoRun === false && rx.test(d.readOnlyReason));
+  }
+  ok('nmap -sV and rustscan with default scripts stay passive; nmap options after rustscan -- are not rustscan\'s',
+    ['nmap -sV -oN scan.txt 10.10.10.5', 'rustscan -a 10.10.10.5 --scripts default', 'rustscan -a 10.10.10.5 -- -sC -sV'].every((c) => gate(c).tier === 'passive'));
   ok('execEscape: a netcat port check (-z) and a verbose connect are not escapes', !execEscape('nc', 'nc -z 10.10.10.5 22') && !execEscape('ncat', 'ncat -nv 10.10.10.5 80'));
 }
 
@@ -527,7 +535,7 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     const b = decide({ command: k.command, target: k.target }, engagementConfig({ ...e, protected_data: LISTS[k.engagement] }, base));
     return { id: k.id, expect: k.expect, from: outcome(a), to: outcome(b) };
   }).filter((c) => c.from !== c.to);
-  ok(`judge eval cases with protected data: only the three measured misses change, to a block (${changes.map((c) => `${c.id} ${c.from} -> ${c.to}`).join(', ')})`,
+  ok(`judge eval cases with protected data: only the three personal-data cases change, to a block (${changes.map((c) => `${c.id} ${c.from} -> ${c.to}`).join(', ')})`,
     changes.map((c) => c.id).sort().join() === 'recon-pii-csv,recon-pii-mysqldump,recon-pii-share' && changes.every((c) => c.to === 'block' && c.expect === 'REJECT'));
 }
 

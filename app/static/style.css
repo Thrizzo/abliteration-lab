@@ -328,3 +328,6 @@ textarea.mono,input.mono{font-family:var(--mono);font-size:12.5px}
 /* hints quote names and paths without spaces (Finance\Payroll\2026\...): they wrap instead of widening the panel on a phone */
 .cp-hint{border:1px solid rgba(250,178,25,.45);background:rgba(250,178,25,.07);border-radius:9px;padding:8px 10px;margin:8px 0 0;font-size:12.5px;color:var(--ink2);overflow-wrap:anywhere}
 .cp-hint .btn{margin-left:6px}
+/* phone width: the header's step pills and the Earlier versions table made the page scroll sideways at 390 px */
+@media (max-width:480px){ .wizhead{padding:10px 16px} }
+#engVersionList{overflow-x:auto}

@@ -141,6 +141,14 @@ function execEscape(bin, seg) {
   if (bin === 'smbclient' && /['";]\s*(!|(mput|put|mkdir|md|rmdir|rd|del|deltree|rm|rename|mv|setmode)\b)/i.test(seg))
     return 'smbclient command that runs a local shell (!) or changes the share';
   if (bin === 'smbmap' && /(^|\s)-[A-Za-z]*x|(^|\s)--(upload|delete|mkdir)\b/.test(seg)) return 'smbmap that runs a command (-x) or changes the share';
+  // nmap loads NSE scripts from --datadir and reads its whole option list back from a --resume log (getopt_long_only:
+  // one dash and unique prefixes count); rustscan's custom scripts and config file run whatever they name
+  if (bin === 'nmap' && (pdAbbrev(args, 'datadir', 5) || pdAbbrev(args, 'resume', 3))) return 'nmap --datadir or --resume (scripts or options the gate cannot see)';
+  if (bin === 'rustscan') {
+    const own = args.includes('--') ? args.slice(0, args.indexOf('--')) : args;          // after -- the words go to nmap
+    if (pdLetter(own, 'c') || pdLong(own, ['config-path']) || pdLongValues(own, 'scripts').some((v) => v !== 'none' && v !== 'default'))
+      return 'rustscan --config-path or custom --scripts (programs the gate cannot see)';
+  }
   return '';
 }
 

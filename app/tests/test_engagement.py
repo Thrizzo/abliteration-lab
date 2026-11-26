@@ -282,10 +282,10 @@ class Store(unittest.TestCase):
         for listed in (["exports2"], ["customers.csv.gz"], ["/customers/"]):                  # none of these blocks it
             self.assertEqual(kinds({"roe": "Do not copy /srv/exports/customers.csv.", "protected_data": listed}),
                              [("suggest", "/srv/exports/customers.csv")], listed)
-        # the saved list: short or common names, descriptions, and Prohibited entries that look like data. A hidden
-        # share (HR$), a dotfile (.env) and an extension (*.csv) are narrow however short.
+        # the saved list: short or common names, descriptions, and Prohibited entries that look like data (not commands
+        # or flags such as "rm -rf /"). A hidden share (HR$), a dotfile (.env) and an extension (*.csv) are narrow however short.
         saved = {"protected_data": ["HR", "/hr/", "db", "HR$", ".env", "*.csv", "customers.csv", "HR share", "customer files"],
-                 "prohibited": ["hydra", "-T5", "customers.csv", "/backup/", "Finance$"]}
+                 "prohibited": ["hydra", "-T5", "customers.csv", "/backup/", "Finance$", "rm -rf /", "-oN/tmp/x.csv"]}
         self.assertEqual(kinds(saved), [("broad", "HR"), ("broad", "/hr/"), ("broad", "db"), ("descriptive", "HR share"),
                                         ("descriptive", "customer files"), ("move", "customers.csv"), ("move", "/backup/"),
                                         ("move", "Finance$")])

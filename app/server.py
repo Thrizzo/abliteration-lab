@@ -922,6 +922,9 @@ def main():
     lab.project = PROJECT
     datasets.dir = os.path.join(PROJECT, "data")
     sbom.project, sbom.dir = PROJECT, os.path.join(PROJECT, "sbom")
+    # built at import time from ABL_PROJECT: without these, --project left engagement versions and uploads in the code folder
+    engagements.dir = os.path.join(PROJECT, "engagement")
+    knowledge.root = os.path.join(PROJECT, "writeups")
     import uvicorn
     print(f"Red Team LLM Lab: code {CODE}, project {PROJECT}, python {PY}, ollama {OLLAMA} -> http://{a.host}:{a.port}")
     if a.open:

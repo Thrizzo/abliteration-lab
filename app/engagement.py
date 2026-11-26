@@ -473,6 +473,8 @@ def data_hints(fields, hosts=()):
         elif _DESCRIPTIVE.search(e):
             out.append({"kind": "descriptive", "entry": e, "sentence": None})
     for p in _lines(fields.get("prohibited")):           # Prohibited matches the raw text only
+        if re.search(r"\s", p) or p.startswith("-"):    # a command or a flag (rm -rf /, -oN out/x), not a name
+            continue
         if re.search(r"[/\\]", p) or re.search(rf"\.(?:{_DATA_EXT})$", p, re.I) or re.search(r"\w\$$", p):
             out.append({"kind": "move", "entry": p, "sentence": None})
     return out
