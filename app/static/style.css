@@ -220,7 +220,7 @@ body.wiz{display:block;overflow:auto}
 #ctlReason{width:100%;max-width:520px;margin-top:10px}
 @media (max-width:700px){ .sysmini{flex-wrap:wrap;gap:8px} }
 /* copilot panel */
-.cp-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.cp-grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:16px}
 @media (max-width:900px){ .cp-grid{grid-template-columns:minmax(0,1fr)} .panel{padding:16px 16px 60px} }
 #copilotPanel label.small{display:block;margin:10px 0 4px}
 .cp-events{display:flex;flex-direction:column;max-height:440px;overflow:auto;font-size:12.5px;margin-top:8px}
@@ -241,3 +241,82 @@ body.wiz{display:block;overflow:auto}
 @media (max-width:1600px){ header .stages li small{display:none} }
 .wizhead{flex-wrap:wrap;row-gap:8px}
 .wizhead .sysmini{flex-wrap:wrap;justify-content:flex-end;row-gap:6px;margin-left:auto}
+/* copilot v2: models and engagement on top, three ways to ask, the run as two lanes, the staged command */
+#copilotPanel .inner{max-width:1480px}
+.cp-top{display:grid;grid-template-columns:minmax(260px,1fr) minmax(0,2.3fr);gap:16px;align-items:start}
+@media (max-width:1100px){ .cp-top{grid-template-columns:minmax(0,1fr)} }
+.cp-head{justify-content:space-between;margin-top:0}
+.cp-select{width:100%;margin:2px 0 4px}
+#cpModelsCard label,#cpEngCard label{display:block;margin:8px 0 3px}
+.cp-check{display:inline-flex !important;align-items:center;gap:6px;cursor:pointer;margin:0 !important}
+.cp-check input{accent-color:var(--accent);margin:0}
+.cp-eng-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px 12px;margin-top:4px}
+.cp-eng-grid .span2{grid-column:span 2}
+@media (max-width:1300px){ .cp-eng-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
+@media (max-width:640px){ .cp-eng-grid{grid-template-columns:minmax(0,1fr)} .cp-eng-grid .span2{grid-column:auto} }
+.cp-eng-grid input[type=datetime-local]{width:100%;background:var(--page);border:1px solid var(--axis);border-radius:9px;padding:7px 9px;color:var(--ink);color-scheme:dark}
+.cp-flags{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.cp-note{max-width:420px;flex:1}
+textarea.mono,input.mono{font-family:var(--mono);font-size:12.5px}
+.cp-modes{display:inline-flex;gap:4px;background:var(--page);border:1px solid var(--border);border-radius:11px;padding:3px;margin-bottom:8px;flex-wrap:wrap}
+.cp-modes button{border:0;background:none;color:var(--ink2);padding:6px 14px;border-radius:8px;cursor:pointer;font-size:13px}
+.cp-modes button:hover{color:var(--ink)}
+.cp-modes button.active{background:var(--accent-dim);color:var(--accent);font-weight:600}
+.cp-mode label{display:block;margin:8px 0 3px}
+/* the flow: the copilot's lane | the prompt and the answer crossing | the abliterated model's lane */
+.cp-flow{display:flex;flex-direction:column;margin:10px 0 4px}
+.cp-row{display:grid;grid-template-columns:minmax(0,1fr) 92px minmax(0,1fr)}
+.cp-cell{padding:5px 10px;min-width:0}
+.cp-cell.cop{background:rgba(57,135,229,.06);border-left:1px solid rgba(57,135,229,.28);border-right:1px solid rgba(57,135,229,.28)}
+.cp-cell.abl{background:rgba(144,133,233,.07);border-left:1px solid rgba(144,133,233,.3);border-right:1px solid rgba(144,133,233,.3)}
+.cp-row.head .cp-cell.cop,.cp-row.head .cp-cell.abl{border-top-width:1px;border-top-style:solid;border-radius:12px 12px 0 0;padding-top:8px}
+.cp-row.head .cp-cell.cop{border-top-color:rgba(57,135,229,.28)} .cp-row.head .cp-cell.abl{border-top-color:rgba(144,133,233,.3)}
+.cp-row:last-child .cp-cell.cop,.cp-row:last-child .cp-cell.abl{border-bottom-width:1px;border-bottom-style:solid;border-radius:0 0 12px 12px;padding-bottom:10px}
+.cp-row:last-child .cp-cell.cop{border-bottom-color:rgba(57,135,229,.28)} .cp-row:last-child .cp-cell.abl{border-bottom-color:rgba(144,133,233,.3)}
+.cp-lane-h{font-weight:600;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink2);display:flex;flex-direction:column;gap:2px}
+.cp-lane-h small{text-transform:none;letter-spacing:0;color:var(--muted);font:400 11px var(--mono)}
+.cp-box{border:1px solid var(--border);background:var(--surface);border-radius:10px;padding:7px 10px;font-size:12.5px}
+.cp-box-h{display:flex;align-items:center;gap:8px}
+.cp-box-h b{font-weight:600;font-size:12.5px;overflow-wrap:anywhere}
+.cp-box-b{margin-top:4px;color:var(--ink2);overflow-wrap:anywhere}
+.cp-box-b .cp-cmd{margin:4px 0 0}
+.cp-ic{width:18px;height:18px;border-radius:50%;display:inline-grid;place-items:center;font:700 11px/1 var(--mono);flex:none;background:var(--surface2);color:var(--muted)}
+.cp-box.ok{border-color:rgba(12,163,12,.38)} .cp-box.ok .cp-ic{background:rgba(12,163,12,.22);color:#6fdc6f}
+.cp-box.warn{border-color:rgba(250,178,25,.4)} .cp-box.warn .cp-ic{background:rgba(250,178,25,.2);color:var(--warn)}
+.cp-box.blocked{border-color:rgba(208,59,59,.6)} .cp-box.blocked .cp-ic{background:rgba(208,59,59,.28);color:#f5a3a3}
+.cp-box.error{border-color:rgba(208,59,59,.6)} .cp-box.error .cp-ic{background:var(--critical);color:#fff}
+.cp-box.active{border-color:rgba(94,234,212,.55);box-shadow:var(--glow)} .cp-box.active .cp-ic{background:var(--accent-dim);color:var(--accent);animation:pulse 1s infinite}
+.cp-box.pending,.cp-box.skipped{opacity:.48}
+/* the arrows sit level with the boxes' titles, however tall an opened prompt makes the row */
+.cp-arrow{position:relative;height:100%;min-height:34px;display:flex;align-items:flex-start;justify-content:center;padding-top:9px}
+.cp-arrow::before{content:"";position:absolute;left:2px;right:2px;top:19px;border-top:2px solid var(--axis)}
+.cp-arrow.right::after{content:"";position:absolute;right:0;top:14px;border-style:solid;border-width:6px 0 6px 9px;border-color:transparent transparent transparent var(--axis)}
+.cp-arrow.left::after{content:"";position:absolute;left:0;top:14px;border-style:solid;border-width:6px 9px 6px 0;border-color:transparent var(--axis) transparent transparent}
+.cp-arrow span{position:relative;z-index:1;background:var(--page);padding:1px 6px;border-radius:6px;font:11px var(--mono);color:var(--muted)}
+.cp-arrow.ok::before{border-top-color:var(--accent)} .cp-arrow.ok span{color:var(--accent)}
+.cp-arrow.ok.right::after{border-left-color:var(--accent)} .cp-arrow.ok.left::after{border-right-color:var(--accent)}
+.cp-arrow.active::before{border-top-style:dashed;border-top-color:var(--accent);animation:pulse 1s infinite}
+.cp-arrow.active span{color:var(--accent)}
+@media (max-width:760px){
+  .cp-row{grid-template-columns:minmax(0,1fr)}
+  .cp-row.head{display:none}
+  .cp-cell.mid:empty,.cp-cell.abl:empty{display:none}
+  .cp-cell.mid{background:none}
+  .cp-cell.abl::before{content:attr(data-lane);display:block;font:600 10.5px/1.6 var(--mono);color:#b9b1f5;letter-spacing:.04em;margin:0 0 3px}
+  .cp-arrow{min-height:28px;padding-top:4px;align-items:center}
+  .cp-arrow::before{left:50%;right:auto;top:0;bottom:0;border-top:0;border-left:2px solid var(--axis)}
+  .cp-arrow.ok::before,.cp-arrow.active::before{border-left-color:var(--accent)}
+  .cp-arrow.right::after,.cp-arrow.left::after{display:none}
+  .cp-row .cp-cell.cop,.cp-row .cp-cell.abl{border-radius:0}
+}
+.cp-pre summary{cursor:pointer;color:var(--accent);font-size:12px;margin-top:4px}
+.cp-pre pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--page);border:1px solid var(--axis);border-radius:8px;padding:8px;font:11.5px/1.5 var(--mono);max-height:320px;overflow:auto;margin:6px 0 0;color:var(--ink)}
+/* about to be executed */
+.cp-staged{border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin:12px 0 8px;background:var(--surface2)}
+.cp-staged.ok{border-color:rgba(94,234,212,.45);box-shadow:var(--glow)}
+.cp-staged.blocked{border-color:rgba(208,59,59,.45)}
+.cp-staged-h{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.cp-staged-h b{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink2)}
+.cp-staged-cmd{display:block;font:600 14px/1.5 var(--mono);background:var(--page);border:1px solid var(--axis);border-radius:9px;padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--accent)}
+.cp-staged-cmd::before{content:"$ ";color:var(--muted)}
+.cp-staged-cmd.muted{color:var(--muted)}

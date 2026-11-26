@@ -506,31 +506,232 @@ async function ctlAct(action){
 $('#modelMini').onclick=()=>$('#serveToggle').click();
 ctlLoad().then(ok=>{ if(ok) setInterval(ctlLoad, 5000); });
 
-// ------------------------------------------------------------------ copilot runs, free prompts, live feed (Kubernetes)
-// Everything from n8n, the models or the form is data: it reaches the page only through esc() / textContent.
-const CP = {run:null, runT:null, feedT:null, feedNext:0, feed:[]};
+// ------------------------------------------------------------------ copilot: models, engagement, modes, the run's flow (Kubernetes)
+// Everything from n8n, the models or the form is data: it reaches the page only through esc() / escA() / textContent.
+const CP = {run:null, runT:null, feedT:null, feedNext:0, feed:[], mode:'copilot', models:null, eng:null, serving:null};
 const escA = s => esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const fmtTime = ts => { const d=new Date(ts); return isNaN(d) ? '' : d.toLocaleTimeString(); };
 const lvl = l => l==='error' ? 'error' : (l==='warn' ? 'warn' : '');
 const evRow = (e, withSource) => `<div class="cp-ev ${lvl(e.level)}"><span class="t">${esc(fmtTime(e.ts))}</span><span class="s">${esc(withSource ? e.source+' · '+e.stage : e.stage)}</span><span class="m">${esc(e.message)}</span></div>`;
 const RUN_BADGE = {running:'warn', waiting:'warn', done:'pass', error:'fail', crashed:'fail', lost:'fail', canceled:'ghost'};
-function cpResultHtml(r){
-  if(!r) return '';
-  const kv = [['target', r.target, 'mono'], ['rationale', r.rationale], ['judge', r.judge==null ? null : (r.judge || '(empty answer)')], ['tier', r.tier, 'mono']]
-    .filter(x => x[1]).map(([k, v, c]) => `<b>${k}</b><span class="${c||''}">${esc(v)}</span>`).join('');
-  return `<div class="cp-result"><div class="row" style="margin:0 0 6px"><span class="badge ${r.allowed?'pass':'fail'}">${r.allowed?'authorized':'blocked'}</span><b>${esc(r.title)}</b></div>`
-    + (r.command ? `<code class="cp-cmd">${esc(r.command)}</code>` : '')
-    + (kv ? `<div class="kv">${kv}</div>` : '')
-    + ((r.reasons||[]).length ? `<ul class="small cp-reasons">${r.reasons.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>` : '')
-    + `<div class="small" style="margin-top:6px"><b>Next:</b> ${esc(r.next)}</div></div>`;
+// per-browser conveniences only (the chosen models, the mode): the page works the same without storage
+const cpStore = { get(k, d){ try{ const v=localStorage.getItem('cp.'+k); return v===null ? d : v; }catch(e){ return d; } },
+                  set(k, v){ try{ localStorage.setItem('cp.'+k, v); }catch(e){} } };
+const sameModel = (a, b) => String(a||'').replace(/:latest$/,'') === String(b||'').replace(/:latest$/,'');
+
+// ---- models: operators from glm-serve, judges from the copilot's Ollama (never abliterated)
+function cpFillSelect(sel, role, list, def){
+  const names = list.length ? list : [def];
+  const want = cpStore.get('model.'+role, '');
+  const pick = names.find(n => want && n===want) || names.find(n => sameModel(n, def)) || names[0];
+  sel.innerHTML = names.map(n => `<option value="${escA(n)}"${n===pick?' selected':''}>${esc(n)}${sameModel(n, def)?' (default)':''}</option>`).join('');
+}
+async function cpModelsLoad(fresh){
+  let m; try{ m=await api('/copilot/models'+(fresh?'?fresh=true':'')); }catch(e){ $('#cpOpInfo').innerHTML=`<span class="vuln">${esc(e.message)}</span>`; return; }
+  CP.models=m;
+  cpFillSelect($('#cpOpModel'), 'operator', m.operator.models||[], m.operator.default);
+  cpFillSelect($('#cpJudgeModel'), 'judge', m.judge.models||[], m.judge.default);
+  const ex = (m.judge.excluded||[]).map(x => `${esc(x.name)} (${esc(String(x.why).split(':')[0])})`).join(', ');
+  $('#cpJudgeInfo').innerHTML = (m.judge.error ? `<span class="vuln">${esc(m.judge.error)}</span>` : '') + (ex ? `left out: ${ex}` : '');
+  try{ CP.serving=await api('/serving'); }catch(e){ CP.serving=null; }
+  const cur = CP.serving && CP.serving.current;
+  $('#cpOpInfo').innerHTML = (m.operator.error ? `<span class="vuln">${esc(m.operator.error)}</span> · ` : '')
+    + (cur ? `glm-serve serves run <span class="mono">${esc(cur.run_id)}</span>${cur.layer!=null?' (layer '+esc(cur.layer)+')':''}` : 'no run promoted yet')
+    + ` · <a href="#" id="cpToServing">change the run in Serving</a>`;
+  const toServe=$('#cpToServing'); if(toServe) toServe.onclick=(e)=>{ e.preventDefault(); $('#serveToggle').click(); };
+}
+$('#cpOpModel').onchange=()=>cpStore.set('model.operator', $('#cpOpModel').value);
+$('#cpJudgeModel').onchange=()=>cpStore.set('model.judge', $('#cpJudgeModel').value);
+$('#cpModelsRefresh').onclick=()=>cpModelsLoad(true);
+
+// ---- the engagement: one active version, saved as a new version each time, audited
+const lines = v => (v||[]).join('\n');
+const toLocalInput = iso => { const d=new Date(iso||''); if(!iso || isNaN(d)) return ''; return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16); };
+const fromLocalInput = v => { if(!v) return ''; const off=-new Date(v).getTimezoneOffset(), a=Math.abs(off);
+  return (v.length===16 ? v+':00' : v) + (off>=0?'+':'-') + String(Math.floor(a/60)).padStart(2,'0') + ':' + String(a%60).padStart(2,'0'); };
+function cpEngFill(r){
+  r=r||{};
+  $('#engName').value=r.name||''; $('#engScopeStmt').value=r.scope_statement||''; $('#engRoe').value=r.roe||'';
+  $('#engIn').value=lines(r.scope_in); $('#engOut').value=lines(r.scope_out); $('#engProhibited').value=lines(r.prohibited);
+  $('#engStart').value=toLocalInput(r.window_start); $('#engEnd').value=toLocalInput(r.window_end);
+  $('#engAutoPassive').checked=!!r.autorun_passive; $('#engAutoActive').checked=!!r.autorun_active;
+  $('#engActive').checked = r.active!==false; $('#engNote').value='';
+}
+async function cpEngLoad(){
+  let s; try{ s=await api('/engagement'); }catch(e){ return; }
+  CP.eng=s; const cur=s.current, c=s.ceiling||{};
+  cpEngFill(cur);
+  $('#cpEngVer').textContent = cur ? `v${cur.version} · ${cur.active===false?'inactive':'active'} · saved ${fmtTime(cur.saved)}${cur.by?' by '+cur.by:''}` : 'none yet: runs use LAB_ALLOWLIST alone';
+  $('#cpEngCeiling').innerHTML = c.known
+    ? `Ceiling (n8n enforces it, the engagement can only narrow it): LAB_ALLOWLIST <span class="mono">${esc(c.allowlist)}</span>`
+    : 'The console does not know LAB_ALLOWLIST; n8n enforces it (ConfigMap copilot-scope).';
+  const cap=[]; if(c.autorun_passive===false) cap.push('passive'); if(c.autorun_active===false) cap.push('active');
+  $('#engAutoCap').textContent = cap.length ? `capped: the ${cap.join(' and ')} tier is off in LAB_AUTORUN_* (copilot.env)` : '';
+  const off=-new Date().getTimezoneOffset(), a=Math.abs(off);
+  $('#engTz').textContent = `your browser's time, UTC${off>=0?'+':'-'}${String(Math.floor(a/60)).padStart(2,'0')}:${String(a%60).padStart(2,'0')}`;
+  const vs=s.versions||[];
+  $('#engVersionList').innerHTML = vs.length ? `<table><tr><th>version</th><th>saved</th><th>by</th><th>name</th><th>note</th><th></th></tr>${vs.map(v=>`<tr><td class="mono">v${esc(v.version)}${v.active===false?' (inactive)':''}</td><td>${esc(fmtTime(v.saved))}</td><td>${esc(v.by||'')}</td><td>${esc(v.name||'')}</td><td>${esc(v.note||'')}</td><td><button class="btn sm" data-engv="${escA(v.version)}">load into the form</button></td></tr>`).join('')}</table>` : 'none yet';
+  $('#engVersionList').querySelectorAll('[data-engv]').forEach(b=>b.onclick=async()=>{
+    try{ cpEngFill(await api('/engagement/versions/'+encodeURIComponent(b.dataset.engv))); toast(`v${b.dataset.engv} loaded: save it to make it the active version again`); }catch(e){ toast(e.message, true); } });
+}
+$('#engSave').onclick=async()=>{
+  const body={name:$('#engName').value, scope_statement:$('#engScopeStmt').value, roe:$('#engRoe').value, scope_in:$('#engIn').value,
+    scope_out:$('#engOut').value, prohibited:$('#engProhibited').value, window_start:fromLocalInput($('#engStart').value),
+    window_end:fromLocalInput($('#engEnd').value), autorun_passive:$('#engAutoPassive').checked, autorun_active:$('#engAutoActive').checked,
+    active:$('#engActive').checked, note:$('#engNote').value};
+  $('#engSave').disabled=true;
+  try{ const r=await api('/engagement', body); toast(`engagement v${r.version} saved`); await cpEngLoad(); }catch(e){ toast(e.message, true); }
+  $('#engSave').disabled=false;
+};
+
+// ---- modes: copilot (the abliterated model proposes), manual (a typed command), direct prompt (no copilot)
+function cpSetMode(m){
+  CP.mode=m; cpStore.set('mode', m);
+  document.querySelectorAll('.cp-modes [data-mode]').forEach(b=>{ const on=b.dataset.mode===m; b.classList.toggle('active', on); b.setAttribute('aria-selected', on?'true':'false'); });
+  document.querySelectorAll('.cp-mode').forEach(d=>{ d.hidden = !d.dataset.for.split(' ').includes(m); });
+}
+document.querySelectorAll('.cp-modes [data-mode]').forEach(b=>b.onclick=()=>cpSetMode(b.dataset.mode));
+async function cpStart(body){
+  try{
+    const r=await api('/copilot/run', {...body, operator_model:$('#cpOpModel').value||'', judge_model:$('#cpJudgeModel').value||''});
+    toast(`copilot run ${r.id} started`); cpShowRun(r.id);
+  }catch(e){ toast(e.message, true); }
+}
+$('#cpRun').onclick=async()=>{
+  const task=$('#cpTask').value.trim(), target=$('#cpTarget').value.trim();
+  if(!task || !target) return toast('task and target are both needed', true);
+  $('#cpRun').disabled=true; await cpStart({task, target, mode:'copilot'}); $('#cpRun').disabled=false;
+};
+$('#cpCheck').onclick=async()=>{
+  const command=$('#cpCommand').value.trim(), target=$('#cpTarget').value.trim();
+  if(!command || !target) return toast('target and command are both needed', true);
+  $('#cpCheck').disabled=true; await cpStart({target, command, task:$('#cpWhy').value.trim(), mode:'manual'}); $('#cpCheck').disabled=false;
+};
+// the same extraction as the workflow's Parse proposal: a JSON object, else a fenced block, else the first line
+function cpExtractCommand(raw){
+  const m=String(raw||'').match(/\{[\s\S]*\}/);
+  if(m){ try{ const p=JSON.parse(m[0]); if(p && p.command) return {command:String(p.command), target:p.target?String(p.target):''}; }catch(e){} }
+  const fenced=(String(raw||'').match(/```(?:bash|sh)?\n([\s\S]*?)```/)||[])[1];
+  return {command:(fenced||String(raw||'')).split('\n').map(s=>s.trim()).find(Boolean)||'', target:''};
+}
+function cpToManual(command, target){
+  const all=String(command||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  cpSetMode('manual'); $('#cpCommand').value=all[0]||'';
+  if(target && !$('#cpTarget').value.trim()) $('#cpTarget').value=target;
+  $('#cpCommand').focus();
+  toast(all.length>1 ? 'only the first line was taken: one command per check' : 'taken over: check it, then "Check and stage"');
+}
+$('#cpUseCmd').onclick=()=>{ const x=cpExtractCommand($('#cpAnswer').textContent); if(!x.command) return toast('no command in the answer', true); cpToManual(x.command, x.target); };
+$('#cpSend').onclick=async()=>{
+  const prompt=$('#cpPrompt').value.trim(); if(!prompt) return;
+  const out=$('#cpAnswer'), info=$('#cpPromptInfo'); out.textContent=''; info.textContent='streaming…'; $('#cpSend').disabled=true; $('#cpUseCmd').disabled=true;
+  try{
+    const r=await fetch('/api/model/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prompt, max_tokens:+$('#cpMax').value || 512, model:$('#cpOpModel').value||''})});
+    if(!r.ok){ let m=r.statusText; try{ m=(await r.json()).detail || m; }catch(e){} throw new Error(m); }
+    const rd=r.body.getReader(), dec=new TextDecoder(); let buf='';
+    for(;;){
+      const {value, done}=await rd.read(); if(done) break;
+      buf+=dec.decode(value, {stream:true}); let i;
+      while((i=buf.indexOf('\n'))>=0){
+        const line=buf.slice(0, i); buf=buf.slice(i+1); if(!line.trim()) continue;
+        const ev=JSON.parse(line);
+        if(ev.token) out.textContent+=ev.token;
+        else if(ev.done) info.textContent=`${ev.tokens} pieces in ${ev.ms} ms from ${$('#cpOpModel').value||'the served model'}`;
+        else if(ev.error){ info.textContent=''; toast(ev.error, true); }
+      }
+    }
+  }catch(e){ info.textContent=''; toast(e.message, true); }
+  $('#cpSend').disabled=false; $('#cpUseCmd').disabled=!out.textContent.trim();
+};
+
+// ---- the run as a flow: the copilot's lane (gates, judge) and the abliterated model's lane, the prompt crossing over
+// and the answer coming back, then "about to be executed"
+const STATE_ICON = {ok:'✓', blocked:'✕', active:'…', pending:'·', skipped:'–', error:'!', warn:'!'};
+function cpBox(state, title, body, extra){
+  return `<div class="cp-box ${state}"><div class="cp-box-h"><span class="cp-ic" aria-hidden="true">${STATE_ICON[state]||'·'}</span><b>${title}</b></div>${body?`<div class="cp-box-b">${body}</div>`:''}${extra||''}</div>`;
+}
+const cpPre = (label, text) => text ? `<details class="cp-pre"><summary>${esc(label)}</summary><pre>${esc(text)}</pre></details>` : '';
+function cpFlowHtml(r){
+  const evs=r.events||[], first=s=>evs.find(e=>e.stage===s);
+  const live=r.status==='running', manual=r.mode==='manual';
+  const fatal=evs.find(e=>e.stage==='error' && e.level==='error');
+  const scope=first('scope'), retr=first('retrieval'), prompt=first('prompt'), prop=first('proposal'), pol=first('policy'), jp=first('judge_prompt'), judge=first('judge');
+  // each step from the one before: its own event decides; without one it is in progress (the run lives), failed (the
+  // run failed there) or never reached; after a step in progress, pending; after a block, skipped
+  const next = (prev, ev, fromEv) => {
+    if(ev) return fromEv(ev);
+    if(prev==='ok' || prev==='warn') return live ? 'active' : (fatal ? 'error' : 'skipped');
+    return (prev==='active' || prev==='pending') ? 'pending' : 'skipped';
+  };
+  const opModel=(prompt&&prompt.data.model)||r.operator_model||'glm-abl', judgeModel=(jp&&jp.data.model)||r.judge_model||'judge';
+  const eng=r.engagement, rows=[];
+  // on a phone the lanes stack: each box of the model's lane says so itself (data-lane)
+  const lane = escA('ABLITERATED MODEL · '+opModel);
+  const row = (cop, mid, abl, cls) => rows.push(`<div class="cp-row ${cls||''}"><div class="cp-cell cop">${cop||''}</div><div class="cp-cell mid">${mid||''}</div><div class="cp-cell abl" data-lane="${lane}">${abl||''}</div></div>`);
+  const fail = st => (st==='error' && fatal) ? esc(fatal.message) : '';
+  row(`<div class="cp-lane-h">Copilot<small>n8n gates · judge ${esc(judgeModel)}</small></div>`, '', `<div class="cp-lane-h">Abliterated model<small>${esc(opModel)} on glm-serve</small></div>`, 'head');
+  row(cpBox('ok', manual ? 'Manual command' : 'Task', `<span class="mono">${esc(manual ? (r.command||'') : r.task)}</span><div class="small">target <span class="mono">${esc(r.target)}</span> · ${eng ? `engagement v${esc(eng.version)}${eng.name?' '+esc(eng.name):''}` : 'no engagement: LAB_ALLOWLIST alone'}</div>`));
+  const S = next('ok', scope, e => e.data.scopeOk ? 'ok' : 'blocked');
+  row(cpBox(S, 'Scope gate', scope ? esc(scope.message) : (S==='active' ? 'checking…' : fail(S))));
+  let P;                                                   // the proposal step: the model's answer, or the typed command
+  if(manual){
+    row(cpBox('skipped', 'Retrieval', 'manual command: no references'), '', cpBox('skipped', 'Not asked', 'a typed command goes straight to the gates'));
+    P = next(S, prop, () => 'ok');
+    row(cpBox(P, 'Typed by the operator', prop ? `<code class="cp-cmd">${esc(prop.data.proposal.command)}</code>` : fail(P)));
+  } else {
+    const R = next(S, retr, e => e.level==='warn' ? 'warn' : 'ok');
+    row(cpBox(R, 'Retrieval', retr ? esc(retr.message) : (R==='active' ? 'searching the writeups…' : fail(R))));
+    const B = next(R, prompt, () => 'ok');
+    P = next(B, prop, () => 'ok');
+    const recv = B!=='ok' ? (B==='skipped' ? 'skipped' : 'pending') : P;            // the model's side of the same step
+    row(cpBox(B, 'Prompt built', prompt ? `${esc(prompt.data.prompt.length)} characters${prompt.data.refCount?' · '+esc(prompt.data.refCount)+' references':''}${cpPre('show the prompt', prompt.data.prompt)}` : fail(B)),
+        `<div class="cp-arrow right ${B}"><span>prompt</span></div>`,
+        cpBox(recv, `${esc(opModel)} receives it`, recv==='active' ? 'thinking…' : (recv==='ok' ? 'answered' : fail(recv))), 'cross');
+    const ans = P==='active' ? 'pending' : P;
+    row(cpBox(ans, 'Proposal', prop ? `<code class="cp-cmd">${esc(prop.data.proposal.command || '(no command)')}</code>${prop.data.proposal.rationale?`<div class="small">${esc(prop.data.proposal.rationale)}</div>`:''}` : ''),
+        `<div class="cp-arrow left ${ans}"><span>answer</span></div>`,
+        cpBox(ans, 'Answer', prop ? (cpPre('show the raw answer', prop.data.raw) || '<span class="small">(empty)</span>') : ''), 'cross');
+  }
+  const G = next(P, pol, e => e.data.allowed ? 'ok' : 'blocked');
+  // passed: why it does or doesn't auto-run; blocked: every reason, once
+  row(cpBox(G, 'Policy gate', pol ? (pol.data.allowed || !(pol.data.reasons||[]).length ? esc(pol.message)
+    : `blocked<ul class="small cp-reasons">${pol.data.reasons.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`) : (G==='active' ? 'checking…' : fail(G))));
+  const J = next(G, judge, e => e.data.allowed ? 'ok' : 'blocked');
+  row(cpBox(J, `Judge · ${esc(judgeModel)}`, (jp ? cpPre(`show the judge's prompt (${jp.data.prompt.length} characters)`, jp.data.prompt) : '')
+    + (judge ? `<div>${esc(judge.data.verdict || judge.message)}</div>` : (J==='active' ? 'deciding…' : fail(J)))));
+  return rows.join('');
+}
+function cpStagedHtml(r){
+  const res=r.result, evs=r.events||[], judge=evs.find(e=>e.stage==='judge');
+  const fatal=evs.find(e=>e.stage==='error' && e.level==='error');
+  const staged=(res && res.staged) || (judge && judge.data.staged) || '';
+  const execBtn = `<button class="btn sm" disabled title="Execute is disabled by design: the workflow's Execute node is off and no lab runner is configured (LAB_RUNNER_URL). Run it yourself if you decide to.">Execute (disabled)</button>`;
+  if(staged){
+    const how = res ? (res.autoRun ? `auto-run tier ${esc(res.tier||'')}` : 'waiting for approval in n8n') : 'authorized';
+    return `<div class="cp-staged ok"><div class="cp-staged-h"><b>About to be executed</b><span class="badge pass">${how}</span></div>`
+      + `<code class="cp-staged-cmd">${esc(staged)}</code>`
+      + `<div class="row"><button class="btn sm" id="cpCopy">Copy</button><button class="btn sm" id="cpEdit">Edit as manual command</button>${execBtn}</div>`
+      + `<div class="small">target <span class="mono">${esc(r.target)}</span>${judge?` · judge: ${esc((judge.data.verdict||'').split('\n')[0])}`:''}${res&&res.engagement?` · engagement v${esc(res.engagement.version)}`:''}${res?` · ${esc(res.next)}`:''}</div></div>`;
+  }
+  if(res && !res.allowed){
+    return `<div class="cp-staged blocked"><div class="cp-staged-h"><b>About to be executed</b><span class="badge fail">nothing</span></div>`
+      + `<div><b>${esc(res.title)}</b></div>${(res.reasons||[]).length?`<ul class="small cp-reasons">${res.reasons.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`:''}<div class="small">${esc(res.next)}</div></div>`;
+  }
+  if(['running','waiting'].includes(r.status)) return `<div class="cp-staged pending"><div class="cp-staged-h"><b>About to be executed</b><span class="badge warn">the gates are still deciding</span></div><code class="cp-staged-cmd muted">…</code></div>`;
+  return `<div class="cp-staged blocked"><div class="cp-staged-h"><b>About to be executed</b><span class="badge ghost">nothing</span></div><div class="small">${fatal ? 'The run failed: '+esc(fatal.message) : 'The run ended ('+esc(r.status)+') before anything was staged.'}</div></div>`;
 }
 function cpRenderRun(){
   const r=CP.run; if(!r) return;
   $('#cpRunCard').style.display='';
-  $('#cpRunTitle').innerHTML = `Run ${esc(r.id)} <span class="badge ${RUN_BADGE[r.status]||'ghost'}">${esc(r.status)}</span>`;
+  $('#cpRunTitle').innerHTML = `Run ${esc(r.id)} <span class="badge ${RUN_BADGE[r.status]||'ghost'}">${esc(r.status)}</span> <span class="small">${esc(r.mode||'copilot')}</span>`;
   $('#cpStop').disabled = !['running','waiting'].includes(r.status);
-  $('#cpResult').innerHTML = cpResultHtml(r.result);
+  $('#cpFlow').innerHTML = cpFlowHtml(r);
+  $('#cpStaged').innerHTML = cpStagedHtml(r);
   $('#cpEvents').innerHTML = (r.events||[]).map(e=>evRow(e, false)).join('');
+  const staged = (r.result && r.result.staged) || ((r.events||[]).find(e=>e.stage==='judge')||{data:{}}).data.staged;
+  const copy=$('#cpCopy'); if(copy) copy.onclick=async()=>{ try{ await navigator.clipboard.writeText(staged); toast('copied'); }catch(e){ toast('copy failed: select the command and copy it', true); } };
+  const edit=$('#cpEdit'); if(edit) edit.onclick=()=>cpToManual(staged, r.target);
 }
 async function cpShowRun(id){
   clearTimeout(CP.runT);
@@ -546,11 +747,10 @@ async function cpLoad(){
   $('#cpConn').innerHTML = s.configured
     ? `<span class="badge pass">connected</span> n8n at <span class="mono">${esc(s.n8n)}</span>`
     : `<span class="badge warn">not connected</span> missing: <span class="mono">${esc((s.missing||[]).join(', '))}</span>. Run <span class="mono">deploy/n8n/connect_console.py</span> once (deploy/k8s/README.md, section Copilot).`;
-  $('#cpRun').disabled = !s.configured;
-  $('#cpModelName').textContent = (s.model && s.model.name) || 'glm-abl';
+  $('#cpRun').disabled = $('#cpCheck').disabled = !s.configured;
   $('#cpSend').disabled = !(s.model && s.model.configured);
   const runs=s.runs||[];
-  $('#cpRuns').innerHTML = runs.length ? `<table><tr><th>run</th><th>task</th><th>target</th><th>status</th><th>result</th></tr>${runs.map(r=>`<tr data-run="${escA(r.id)}" class="cp-runrow"><td class="mono">${esc(r.id)}</td><td>${esc(r.task)}</td><td class="mono">${esc(r.target)}</td><td><span class="badge ${RUN_BADGE[r.status]||'ghost'}">${esc(r.status)}</span></td><td>${esc(r.title||'')}</td></tr>`).join('')}</table>` : '<div class="empty">No runs from this console yet.</div>';
+  $('#cpRuns').innerHTML = runs.length ? `<table><tr><th>run</th><th>mode</th><th>task / command</th><th>target</th><th>status</th><th>result</th></tr>${runs.map(r=>`<tr data-run="${escA(r.id)}" class="cp-runrow"><td class="mono">${esc(r.id)}</td><td>${esc(r.mode||'copilot')}</td><td>${r.mode==='manual'?`<span class="mono">${esc(r.command||'')}</span>`:esc(r.task)}</td><td class="mono">${esc(r.target)}</td><td><span class="badge ${RUN_BADGE[r.status]||'ghost'}">${esc(r.status)}</span></td><td>${esc(r.title||'')}</td></tr>`).join('')}</table>` : '<div class="empty">No runs from this console yet.</div>';
   $('#cpRuns').querySelectorAll('[data-run]').forEach(tr=>tr.onclick=()=>cpShowRun(tr.dataset.run));
   return true;
 }
@@ -565,48 +765,21 @@ function cpFeedRender(){
   $('#cpFeed').innerHTML = ev.length ? ev.map(e=>evRow(e, true)).join('') : '<div class="empty">Nothing yet.</div>';
 }
 $('#cpFeedSrc').onchange=cpFeedRender;
-$('#cpRun').onclick=async()=>{
-  const task=$('#cpTask').value.trim(), target=$('#cpTarget').value.trim();
-  if(!task || !target) return toast('task and target are both needed', true);
-  $('#cpRun').disabled=true;
-  try{ const r=await api('/copilot/run', {task, target}); toast(`copilot run ${r.id} started`); cpShowRun(r.id); }catch(e){ toast(e.message, true); }
-  $('#cpRun').disabled=false;
-};
 $('#cpStop').onclick=async()=>{
   const r=CP.run; if(!r || !confirm(`Stop copilot run ${r.id} in n8n?`)) return;
   try{ await api('/copilot/runs/'+encodeURIComponent(r.id)+'/stop', {}); toast('stopped'); }catch(e){ toast(e.message, true); }
   cpShowRun(r.id);
 };
-$('#cpSend').onclick=async()=>{
-  const prompt=$('#cpPrompt').value.trim(); if(!prompt) return;
-  const out=$('#cpAnswer'), info=$('#cpPromptInfo'); out.textContent=''; info.textContent='streaming…'; $('#cpSend').disabled=true;
-  try{
-    const r=await fetch('/api/model/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({prompt, max_tokens:+$('#cpMax').value || 512})});
-    if(!r.ok){ let m=r.statusText; try{ m=(await r.json()).detail || m; }catch(e){} throw new Error(m); }
-    const rd=r.body.getReader(), dec=new TextDecoder(); let buf='';
-    for(;;){
-      const {value, done}=await rd.read(); if(done) break;
-      buf+=dec.decode(value, {stream:true}); let i;
-      while((i=buf.indexOf('\n'))>=0){
-        const line=buf.slice(0, i); buf=buf.slice(i+1); if(!line.trim()) continue;
-        const ev=JSON.parse(line);
-        if(ev.token) out.textContent+=ev.token;
-        else if(ev.done) info.textContent=`${ev.tokens} pieces in ${ev.ms} ms`;
-        else if(ev.error){ info.textContent=''; toast(ev.error, true); }
-      }
-    }
-  }catch(e){ info.textContent=''; toast(e.message, true); }
-  $('#cpSend').disabled=false;
-};
 $('#copilotToggle').onclick=()=>{
   ['#dataPanel','#sbomPanel','#servePanel'].forEach(p=>$(p).classList.remove('open'));
-  $('#copilotPanel').classList.add('open'); cpLoad(); cpFeedLoad();
+  $('#copilotPanel').classList.add('open'); cpLoad(); cpFeedLoad(); cpModelsLoad(false); cpEngLoad();
   clearInterval(CP.feedT); CP.feedT=setInterval(cpFeedLoad, 1500);
   if(CP.run) cpShowRun(CP.run.id);
 };
 const cpClose=()=>{ $('#copilotPanel').classList.remove('open'); clearInterval(CP.feedT); clearTimeout(CP.runT); };
 $('#copilotClose').onclick=cpClose;
 ['#dataToggle','#sbomToggle','#serveToggle'].forEach(b=>$(b).addEventListener('click', cpClose));
+cpSetMode(['copilot','manual','direct'].includes(cpStore.get('mode','copilot')) ? cpStore.get('mode','copilot') : 'copilot');
 cpLoad();
 
 // ------------------------------------------------------------------ knowledge uploads (the copilot's retrieval)

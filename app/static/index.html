@@ -161,29 +161,69 @@
   <div class="card" id="auditCard" style="display:none"><h3>Audit log</h3><div class="small">Kill / Isolate / Release / Start and every Promote / Rollback, with who asked: <span class="mono">workspace/audit/YYYY-MM-DD.jsonl</span>, and a copy in the console's container log.</div><div id="auditList"></div></div>
 </div></section>
 <section class="panel" id="copilotPanel"><div class="inner">
-  <div class="row" style="justify-content:space-between"><div><h2>Copilot</h2><div class="small">Ask the pentest copilot for the next step against an in-scope lab target, or prompt the served model directly. The abliterated model only suggests; the policy gate and a regular judge decide. Nothing runs from here: the workflow's Execute node is disabled.</div></div><button class="btn sm" id="copilotClose">close</button></div>
+  <div class="row" style="justify-content:space-between"><div><h2>Copilot</h2><div class="small">The abliterated model suggests, the policy gate (scope, rules of engagement) and a regular judge decide, and what passes is staged for execution. Nothing runs from here: the workflow's Execute node is disabled and no lab runner is configured.</div></div><button class="btn sm" id="copilotClose">close</button></div>
+  <div class="cp-top">
+    <div class="card" id="cpModelsCard">
+      <div class="row cp-head"><h3>Models</h3><button class="btn sm" id="cpModelsRefresh" title="ask glm-serve and the copilot's Ollama again">refresh</button></div>
+      <label class="small" for="cpOpModel">Operator: the abliterated model that suggests (glm-serve)</label>
+      <select id="cpOpModel" class="cp-select"></select>
+      <div class="small" id="cpOpInfo"></div>
+      <label class="small" for="cpJudgeModel">Judge: the regular model that can veto (the copilot's Ollama)</label>
+      <select id="cpJudgeModel" class="cp-select"></select>
+      <div class="small" id="cpJudgeInfo"></div>
+    </div>
+    <div class="card" id="cpEngCard">
+      <div class="row cp-head"><h3>Engagement <small id="cpEngVer"></small></h3><label class="small cp-check"><input type="checkbox" id="engActive" checked> active: sent with every run</label></div>
+      <div class="small" id="cpEngCeiling"></div>
+      <div class="cp-eng-grid">
+        <div class="span2"><label class="small" for="engName">Name</label><input type="text" id="engName" maxlength="120" placeholder="e.g. ACME internal pentest, phase 2"></div>
+        <div class="span2"><label class="small" for="engScopeStmt">Scope statement</label><textarea id="engScopeStmt" rows="2" maxlength="4000" placeholder="e.g. what is in scope and why, as agreed with the client"></textarea></div>
+        <div class="span2"><label class="small" for="engRoe">Rules of engagement (the operator model and the judge read them)</label><textarea id="engRoe" rows="3" maxlength="8000" placeholder="e.g. No denial of service. Stop and report if you find personal data. No changes to production accounts."></textarea></div>
+        <div><label class="small" for="engIn">In scope: IPv4, CIDR or host name, one per line</label><textarea id="engIn" rows="3" class="mono" placeholder="e.g. 10.10.10.0/28"></textarea></div>
+        <div><label class="small" for="engOut">Out of scope (excluded)</label><textarea id="engOut" rows="3" class="mono" placeholder="e.g. 10.10.10.1"></textarea></div>
+        <div><label class="small" for="engProhibited">Prohibited tools or flags, one per line</label><textarea id="engProhibited" rows="3" class="mono" placeholder="e.g. hydra&#10;-T5"></textarea></div>
+        <div><label class="small" for="engStart">Window start</label><input type="datetime-local" id="engStart"><label class="small" for="engEnd">Window end</label><input type="datetime-local" id="engEnd"><div class="small" id="engTz"></div></div>
+        <div class="span2 cp-flags"><label class="small cp-check"><input type="checkbox" id="engAutoPassive"> auto-run passive recon</label><label class="small cp-check"><input type="checkbox" id="engAutoActive"> auto-run active recon</label><span class="small" id="engAutoCap"></span></div>
+      </div>
+      <div class="row"><input type="text" id="engNote" maxlength="300" placeholder="what changed (kept with the version)" class="cp-note"><button class="btn primary" id="engSave">Save as new version</button></div>
+      <details id="engVersions"><summary class="small">Earlier versions</summary><div id="engVersionList" class="small"></div></details>
+    </div>
+  </div>
   <div class="cp-grid">
     <div>
-      <div class="card"><h3>Ask the copilot</h3>
-        <div id="cpConn" class="small"></div>
-        <label class="small" for="cpTask">Task</label><textarea id="cpTask" rows="3" maxlength="2000" placeholder="Enumerate SMB on the box and suggest the next step."></textarea>
-        <label class="small" for="cpTarget">Target: one host or address in LAB_ALLOWLIST</label><input type="text" id="cpTarget" maxlength="253" placeholder="10.10.10.5" autocomplete="off">
-        <div class="row"><button class="btn primary" id="cpRun">Run</button><span class="small">scope gate, retrieval, operator, policy gate, judge</span></div>
+      <div class="card">
+        <div class="cp-modes" role="tablist" aria-label="how to ask">
+          <button role="tab" data-mode="copilot" aria-selected="true" class="active">Copilot</button>
+          <button role="tab" data-mode="manual" aria-selected="false">Manual command</button>
+          <button role="tab" data-mode="direct" aria-selected="false">Direct prompt</button>
+        </div>
+        <div id="cpConn" class="small cp-mode" data-for="copilot manual"></div>
+        <div class="cp-mode" data-for="copilot manual"><label class="small" for="cpTarget">Target: one host or address in scope</label><input type="text" id="cpTarget" maxlength="253" placeholder="10.10.10.5" autocomplete="off" spellcheck="false"></div>
+        <div class="cp-mode" data-for="copilot">
+          <label class="small" for="cpTask">Task for the abliterated model</label><textarea id="cpTask" rows="3" maxlength="2000" placeholder="Enumerate SMB on the box and suggest the next step."></textarea>
+          <div class="row"><button class="btn primary" id="cpRun">Run</button><span class="small">scope gate, retrieval, abliterated model, policy gate, judge, staged</span></div>
+        </div>
+        <div class="cp-mode" data-for="manual" hidden>
+          <label class="small" for="cpCommand">Command, one line: the same policy gate and judge check it, no model is asked</label><input type="text" id="cpCommand" maxlength="2000" placeholder="nmap -sV -p 139,445 10.10.10.5" autocomplete="off" spellcheck="false" class="mono">
+          <label class="small" for="cpWhy">Why (optional; the judge reads it)</label><input type="text" id="cpWhy" maxlength="2000" placeholder="SMB versions before choosing an exploit">
+          <div class="row"><button class="btn primary" id="cpCheck">Check and stage</button><span class="small">scope gate, policy gate, judge, staged</span></div>
+        </div>
+        <div class="cp-mode" data-for="direct" hidden>
+          <div class="small">Straight to the operator model chosen above, without the copilot, the policy gate or the judge: model testing. Every prompt and answer goes into the audit log.</div>
+          <textarea id="cpPrompt" rows="3" maxlength="20000" placeholder="Ask the model anything"></textarea>
+          <div class="row"><button class="btn" id="cpSend">Send</button><label class="small" for="cpMax">max tokens</label><input type="number" id="cpMax" value="512" min="1" max="4096" style="width:90px"><button class="btn sm" id="cpUseCmd" disabled title="take the command out of the answer into Manual command, where the gates check it">Use as command</button><span class="small" id="cpPromptInfo"></span></div>
+          <pre id="cpAnswer" class="cp-answer"></pre>
+        </div>
       </div>
       <div class="card" id="cpRunCard" style="display:none">
         <div class="row" style="justify-content:space-between;margin-top:0"><h3 id="cpRunTitle">Run</h3><button class="btn danger" id="cpStop">Stop run</button></div>
-        <div id="cpResult"></div>
-        <div id="cpEvents" class="cp-events"></div>
+        <div id="cpFlow" class="cp-flow" aria-live="polite"></div>
+        <div id="cpStaged"></div>
+        <details><summary class="small">Every event of this run</summary><div id="cpEvents" class="cp-events"></div></details>
       </div>
       <div class="card"><h3>Runs from this console</h3><div id="cpRuns"></div></div>
     </div>
     <div>
-      <div class="card"><h3>Prompt the model directly</h3>
-        <div class="small">Straight to the served model (<span class="mono" id="cpModelName">glm-abl</span>): model testing without the policy gate or the judge, since nothing can execute either way. Every prompt and answer goes into the audit log.</div>
-        <textarea id="cpPrompt" rows="3" maxlength="20000" placeholder="Ask the model anything"></textarea>
-        <div class="row"><button class="btn" id="cpSend">Send</button><label class="small" for="cpMax">max tokens</label><input type="number" id="cpMax" value="512" min="1" max="4096" style="width:90px"><span class="small" id="cpPromptInfo"></span></div>
-        <pre id="cpAnswer" class="cp-answer"></pre>
-      </div>
       <div class="card"><div class="row" style="justify-content:space-between;margin-top:0"><h3>Live feed</h3><select id="cpFeedSrc" aria-label="feed source"><option value="">everything</option><option>copilot</option><option>model</option><option>pipeline</option><option>control</option><option>serving</option></select></div>
         <div id="cpFeed" class="cp-events"></div>
       </div>

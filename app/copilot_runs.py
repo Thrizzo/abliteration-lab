@@ -146,7 +146,18 @@ def node_event(name, entry):
     if name == "Policy gate":
         pol = j.get("policy") or {}
         if pol.get("allowed"):
-            how = "auto-run tier " + str(pol.get("tier")) if pol.get("autoRun") else "needs a human: " + cut(pol.get("readOnlyReason") or "not read-only", 160)
+            if pol.get("autoRun"):
+                how = f"auto-run tier {pol.get('tier')}"
+            elif pol.get("injectionSuspected"):
+                how = "needs a human: text aimed at the judge"
+            elif pol.get("unverifiable"):
+                how = "needs a human: a target the gate cannot verify (" + "; ".join(cut(u, 60) for u in pol["unverifiable"][:2]) + ")"
+            elif pol.get("namesInScopeHost") is False:
+                how = "needs a human: the command names no in-scope host"
+            elif pol.get("readOnly") or pol.get("activeRecon"):
+                how = "needs a human: auto-run is off for this tier (LAB_AUTORUN_* or the engagement)"
+            else:
+                how = "needs a human: " + cut(pol.get("readOnlyReason") or "not read-only", 160)
             msg, level = f"policy: passed ({how})", "info"
         else:
             msg, level = "policy: blocked - " + "; ".join(cut(r, 160) for r in (pol.get("reasons") or [])[:3]), "warn"
