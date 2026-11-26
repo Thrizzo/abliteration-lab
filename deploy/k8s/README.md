@@ -90,6 +90,10 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
     - a free prompt.
   - **`-Pipeline`** (optional, a few minutes): a tiny random GLM through every stage as Jobs, then Promote.
   - **`-Teardown`:** deletes both namespaces with all their data, after asking.
+  - **`-EvalJudge`** (optional, 10 to 30 minutes on a CPU): how reliably the judge model enforces rules of engagement
+    written as text. It runs 49 labelled commands through the copilot's Ollama with the workflow's exact prompt
+    (`copilot/eval_judge.py`, in the console pod) and reports false accepts and false rejects. The report goes to
+    `workspace/eval/`; `-JudgeModel` picks another judge.
 - **It asks for:**
   - a console password the first time (only its bcrypt hash is stored, in Secret `lab/basic-auth`);
   - an n8n login (a fresh n8n gets it as its owner account).

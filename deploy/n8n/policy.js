@@ -122,6 +122,8 @@ const FILTER_TOOLS = new Set([
 const MUTATING_PATTERNS = [
   /\b(curl|wget)\b[^|;&]*(-d\b|--data|-F\b|--form|-T\b|--upload-file|-X\s*(POST|PUT|DELETE|PATCH)|--request\s*(POST|PUT|DELETE|PATCH))/i,
   /\bsmbclient\b[^|;&]*-c\b[^|;&]*\b(put|mkdir|rmdir|del|rename|rm)\b/i,
+  // rpcclient subcommands that change the domain: setuserinfo2 (a password), createdomuser, deletedomuser, chgpasswd, ...
+  /\brpcclient\b[^|;&]*-c\b[^|;&]*(^|[\s'"])(create|delete|del|set|add|chg)\w*/i,
   /\bnc\b(?![^|;&]*-z)[^|;&]*-[a-z]*l/i, // netcat listener (-l) that isn't a -z port check
 ];
 const PASSIVE_NSE = new Set(['safe', 'default']); // the only NSE categories cheap enough for the passive tier

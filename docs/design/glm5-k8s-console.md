@@ -262,7 +262,14 @@ flowchart LR
 - **Found while building it:**
   - the policy gate classified only the first line of a multi-line command, so `nmap ...` followed by a second line
     could auto-run. A line break now separates commands as `;` does;
-  - the run view filtered `run.json`, which hid the dataset provenance from the API.
+  - the run view filtered `run.json`, which hid the dataset provenance from the API;
+  - while writing the judge eval's cases: `rpcclient ... -c 'setuserinfo2 jdoe 23 NewPass1!'` changes a password but
+    counted as read-only, so it could have auto-run in the passive tier. rpcclient subcommands that create, delete, set,
+    add or change now count as active.
+- **The judge reads the scope too** (`SCOPE (LAB_ALLOWLIST): ...`, in every run), still never the operator's free text:
+  that text is the likeliest carrier of an injection aimed at the judge.
+- **Measured, not assumed:** `copilot/eval_judge.py` runs labelled commands that pass every gate through a real judge
+  with the workflow's exact prompt, and counts false accepts and false rejects (`copilot/README.md`, "Judge eval").
 
 ## 6. Knowledge uploads (retrieval)
 

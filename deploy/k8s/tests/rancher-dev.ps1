@@ -17,6 +17,9 @@ rancher-dev-<time>.log in the current folder, without passwords or keys: paste t
              the kill switch, the copilot's models, a knowledge upload that a copilot run retrieves, a free prompt
   -Pipeline  a tiny random GLM through every stage as Kubernetes Jobs, then Promote (a few minutes on a laptop)
   -Teardown  deletes the namespaces lab and lab-copilot with all their data (asks first)
+  -EvalJudge how reliably the judge model enforces rules of engagement written as text: 49 labelled commands through
+             the copilot's Ollama with the workflow's exact prompt (copilot/eval_judge.py, run in the console pod;
+             10 to 30 seconds per command on a CPU). The report goes to workspace/eval/. -JudgeModel picks the model.
 
 It talks to the cluster through the kubectl context "rancher-desktop" (-Context), whatever context is current, and
 installs nothing. Needs: Rancher Desktop with Kubernetes and Traefik enabled, and Python 3 for the n8n step.
@@ -28,6 +31,7 @@ param(
     [switch]$Check,
     [switch]$Pipeline,
     [switch]$Teardown,
+    [switch]$EvalJudge,                                  # measure the judge on rules of engagement (copilot/eval_judge.py)
     [switch]$SkipBuild,                                  # use the console image that is already there
     [switch]$Force,                                      # -Teardown without asking
     [switch]$NonInteractive,                             # never prompt: secrets come from the environment
@@ -38,6 +42,7 @@ param(
     [string]$IngressUrl = 'http://127.0.0.1',            # where Traefik answers (Rancher Desktop: localhost:80)
     [string]$IngressHost = 'lab.localhost',
     [string]$N8nEmail = $env:N8N_EMAIL,
+    [string]$JudgeModel = 'qwen3:8b',
     [int]$ConsolePort = 18080,
     [int]$N8nPort = 15678
 )
@@ -752,13 +757,28 @@ function Invoke-Teardown {
     if ($LASTEXITCODE -eq 0) { Ok 'namespaces lab and lab-copilot deleted (the console image stays in the engine)' } else { Bad "teardown: $out" }
 }
 
+function Invoke-EvalJudge {
+    Section "The judge on rules of engagement ($JudgeModel, copilot/eval_judge.py)"
+    $have = (kc @('-n', 'lab-copilot', 'exec', 'deploy/ollama', '--', 'ollama', 'list')) -match [regex]::Escape($JudgeModel)
+    if (-not $have) { Skip "$JudgeModel is not pulled in the copilot's Ollama yet (-Check shows the pull); run -EvalJudge again later"; return }
+    $out = '/workspace/eval/judge-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'
+    Note 'one line per command, 10 to 30 seconds each on a CPU'
+    $a = @('--context', $Context, '-n', 'lab', 'exec', 'deploy/console', '-c', 'app', '--', '/opt/venv/bin/python', '-m',
+           'copilot.eval_judge', '--ollama', 'http://ollama.lab-copilot.svc:11434', '--model', $JudgeModel, '--out', $out)
+    & kubectl @a                                         # live output: the eval prints each verdict as it comes
+    $code = $global:LASTEXITCODE
+    if ($code -eq 0) { Ok "judge eval done; the full report is in the workspace: $out" }
+    else { Bad "judge eval: exit $code (is the console pod running? kubectl -n lab get pods)" }
+}
+
 # ------------------------------------------------------------------------------------------------ main
-if (-not ($Setup -or $Check -or $Pipeline -or $Teardown)) { $Setup = $true; $Check = $true }
+if (-not ($Setup -or $Check -or $Pipeline -or $Teardown -or $EvalJudge)) { $Setup = $true; $Check = $true }
 $what = @()
 if ($Setup) { $what += 'Setup' }
 if ($Pipeline) { $what += 'Pipeline' }
 if ($Check) { $what += 'Check' }
 if ($Teardown) { $what += 'Teardown' }
+if ($EvalJudge) { $what += 'EvalJudge' }
 $log = Join-Path (Get-Location).Path ('rancher-dev-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
 $null = New-Item -ItemType Directory -Path $script:Tmp -Force
 if (-not $OnWindows) { $null = Exe 'chmod' @('700', $script:Tmp) }
@@ -777,6 +797,7 @@ try {
                 if ($script:ConsoleOk -and $Pipeline) { Invoke-Pipeline }
                 if ($script:ConsoleOk -and $Check) { Invoke-Check }
             }
+            if ($setupOk -and $EvalJudge) { Invoke-EvalJudge }
         }
     }
 } finally {

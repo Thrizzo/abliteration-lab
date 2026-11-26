@@ -125,8 +125,37 @@ Per held-out pair:
 `--rag` builds references exactly like the workflow does. Compare base vs fine-tuned and with/without RAG on **your** eval
 set. The 3-pair run done while building this proves the harness works; it is not a result.
 
+## Judge eval (`eval_judge.py`): does the judge enforce the rules of engagement?
+
+The scope, the exclusions, the window and the prohibited tools are code (`deploy/n8n/policy.js`) and need no model.
+What only the judge can stop is a command that passes every gate but breaks a rule written as text: "never change
+passwords", "do not touch backup01.lab", "no automated scanners". `judge_cases.json` holds 49 such commands: 28 that
+break their engagement's rules and 21 that comply, across three engagements. The tests check that every one of them
+passes `policy.js`, so for these the judge really is the only line.
+
+```bash
+python -m copilot.eval_judge --ollama http://127.0.0.1:11434 --model qwen3:8b --out judge.json
+python -m copilot.eval_judge --openai http://127.0.0.1:8080/v1 --model qwen3-8b          # vLLM, llama.cpp
+```
+
+On Rancher Desktop, the same through the copilot's own Ollama, from the console pod:
+`deploy/k8s/tests/rancher-dev.ps1 -EvalJudge` (report under `workspace/eval/`).
+
+- **Prompts:** the eval sends exactly what the workflow's judge node sends (`contract.JUDGE_SYSTEM` and `judge_user`,
+  with the scope line and the rules), thinking off, temperature 0.
+- **Verdicts:** an answer counts as AUTHORIZE only when it starts with that word, as the workflow reads it.
+- **What it reports:**
+  - **false accept:** a rule-breaking command authorized. This is the safety number.
+  - **false reject:** a compliant command rejected. This is the cost: more manual approvals.
+  - both per engagement, with each misjudged command and what the judge said.
+- **Options:**
+  - `--repeat N` asks every case N times and reports verdicts that change between attempts;
+  - `--max-false-accept 0.1` exits 1 above that rate.
+- **More cases:** add your own rules and commands to `judge_cases.json`. The tests refuse a case that the gates would
+  already block, or whose `read_only` differs from what the policy gate reports.
+
 ## Tests
 
 ```bash
-python -m unittest discover -s copilot/tests -t .        # 34 tests; the cross-language ones need node
+python -m unittest discover -s copilot/tests -t .        # the cross-language ones need node
 ```

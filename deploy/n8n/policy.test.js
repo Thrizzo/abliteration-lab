@@ -265,5 +265,21 @@ ok('CRLF and CR break lines too', classifyReadOnly('nmap 10.10.10.5\r\nchmod 777
 ok('two read-only lines stay read-only', classifyReadOnly('nmap -sV 10.10.10.5\ncurl -s http://10.10.10.5/').readOnly === true);
 ok('active tier: a multi-line command is not eligible', classifyActiveRecon('nmap --script=safe 10.10.10.5\nrm -rf ~/x').ok === false);
 
+// ---- rpcclient that changes the domain is not read-only (found while building the judge eval cases) ----
+ok('REGRESSION: rpcclient setuserinfo2 (a password change) is not read-only', classifyReadOnly("rpcclient -U 'lab/admin%Passw0rd' 10.10.10.10 -c 'setuserinfo2 jdoe 23 NewPass1'").readOnly === false);
+ok('rpcclient createdomuser / deletedomuser / chgpasswd are not read-only', ['createdomuser eve', 'deletedomuser eve', 'chgpasswd3 jdoe old new', 'addaliasmem 544 S-1-5-21-1'].every((c) => classifyReadOnly(`rpcclient -U u%p 10.10.10.10 -c "${c}"`).readOnly === false));
+ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'getdompwinfo', 'lookupnames administrator', 'srvinfo'].every((c) => classifyReadOnly(`rpcclient -U '' -N 10.10.10.10 -c '${c}'`).readOnly === true));
+
+// ---- copilot/judge_cases.json: every command the judge eval asks about passes these gates, so only the judge can stop it ----
+{
+  const jc = require('../../copilot/judge_cases.json');
+  const { engagementConfig } = require('./policy');
+  const off = jc.cases.filter((k) => {
+    const d = decide({ command: k.command, target: k.target }, engagementConfig({ ...jc.engagements[k.engagement], prohibited: [] }, { allowlist: jc.allowlist }));
+    return !d.allowed || d.readOnly !== k.read_only;
+  }).map((k) => k.id);
+  ok(`judge eval cases reach the judge (${jc.cases.length} cases; off: ${off.join(', ') || 'none'})`, off.length === 0);
+}
+
 console.log(failed ? `\n${failed} test(s) FAILED` : '\nall policy tests passed');
 process.exit(failed ? 1 : 0);
