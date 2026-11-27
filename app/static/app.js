@@ -1,8 +1,8 @@
-/* Red Team LLM Lab: Model -> Abliterate -> Compare. */
+/* Red Team LLM Lab: Model -> Abliterate -> Compare, and once n8n is connected 4 Pentest (the copilot). */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const fmt = (x, d=1) => (x==null||isNaN(x)) ? '–' : Number(x).toFixed(d);
-const S = { env:null, models:[], presets:[], model:null, runs:[], runId:null, run:null, events:[], ES:{}, pipe:{running:false}, logNext:0, evNext:0, lab:null, chatHist:[], stage:'model' };
+const S = { env:null, models:[], presets:[], model:null, runs:[], runId:null, run:null, events:[], ES:{}, pipe:{running:false}, logNext:0, evNext:0, lab:null, chatHist:[], stage:'model', pentest:false };
 // Ollama is reached through the server (/api/ollama/*), so the browser works from any machine and inside Docker
 const slugOf = repo => repo.replace(/\/+$/,'').split('/').pop().toLowerCase();
 
@@ -66,18 +66,50 @@ function lineChart(el, series, labels, o){
 }
 
 // ------------------------------------------------------------------ stages
+// tab 4 (Pentest) is never locked and exists once the copilot is connected (S.pentest, set by cpGate). Entering it loads
+// the copilot's data and starts its pollers, leaving it stops them (cpEnter, cpLeave). true when the step is shown.
 function go(stage){
   if(stage==='abl' && !S.model) return toast('pick a model first', true);
   if(stage==='compare' && !cmpReady()) return toast('finish an abliteration through Ollama first', true);
-  S.stage=stage; document.querySelectorAll('.stage').forEach(x=>x.classList.toggle('active', x.id==='s-'+stage));
-  document.querySelectorAll('.stages li').forEach(li=>li.classList.toggle('active', li.dataset.stage===stage));
+  if(stage==='pentest' && !S.pentest) return;
+  const was=S.stage; S.stage=stage; document.querySelectorAll('.stage').forEach(x=>x.classList.toggle('active', x.id==='s-'+stage));
+  document.querySelectorAll('.stages li').forEach(li=>{ const on=li.dataset.stage===stage; li.classList.toggle('active', on); li.setAttribute('aria-selected', on?'true':'false'); });
+  $('main.wizmain').classList.toggle('wide', stage==='pentest');        // tab 4's two columns get main's wide layout,
+  document.body.classList.toggle('pentest', stage==='pentest');         // and the header stays on screen there (style.css)
   location.hash=stage; window.scrollTo(0,0); if(stage==='compare') chatStatus();
+  if(stage==='pentest' && was!=='pentest') cpEnter(); else if(was==='pentest' && stage!=='pentest') cpLeave();
+  return true;
 }
-document.querySelectorAll('.stages li').forEach(li=>li.onclick=()=>go(li.dataset.stage));
+// a step tab (a click, or Enter or Space while it has the focus) shows that step: a panel open over the page (datasets, SBOM,
+// serving, knowledge) closes through its own close button, so its poller stops too; a closed panel's poller (an SBOM that is
+// still being generated) goes on, and the log drawer is a side drawer and stays. true when the step is shown.
+const PANEL_CLOSE=[['#dataPanel','#dataClose'],['#sbomPanel','#sbomClose'],['#servePanel','#serveClose'],['#knowledgePanel','#knowledgeClose']];
+function showStage(stage){
+  if(!go(stage)) return false;
+  PANEL_CLOSE.forEach(([p,b])=>{ if($(p).classList.contains('open')) $(b).click(); });
+  return true;
+}
+document.querySelectorAll('.stages li').forEach(li=>{
+  li.onclick=()=>showStage(li.dataset.stage);
+  li.onkeydown=e=>{
+    if(e.key==='Enter' || e.key===' '){ e.preventDefault(); showStage(li.dataset.stage); return; }
+    if(e.key!=='ArrowRight' && e.key!=='ArrowLeft') return;                // the arrows move the focus between the steps shown
+    const tabs=[...document.querySelectorAll('.stages li')].filter(x=>x.style.display!=='none'), i=tabs.indexOf(li);
+    e.preventDefault(); tabs[(i+(e.key==='ArrowRight'?1:tabs.length-1))%tabs.length].focus();
+  };
+});
+// Back and Forward walk the steps the address recorded (go sets location.hash); a step that is locked now, or tab 4 in a
+// console without it, keeps the shown step and puts its name back in the address
+addEventListener('hashchange', ()=>{
+  const h=location.hash.slice(1);
+  if(h===S.stage || !['model','abl','compare','pentest'].includes(h)) return;
+  if(!showStage(h)) history.replaceState(null, '', '#'+S.stage);
+});
 $('#toAbl').onclick=()=>go('abl'); $('#backModel').onclick=()=>go('model'); $('#toCmp').onclick=()=>go('compare'); $('#backAbl').onclick=()=>go('abl'); $('#toModelAgain').onclick=()=>go('model');
 $('#logToggle').onclick=()=>$('#drawer').classList.toggle('open'); $('#drawerClose').onclick=()=>$('#drawer').classList.remove('open');
 // panels, the log drawer and the run box start where the header ends (--head-h in style.css): the header wraps to two or
-// three rows on narrower screens, and after about a screen of scrolling it leaves with the page (the body is 100% tall)
+// three rows on narrower screens, and after about a screen of scrolling it leaves with the page (the body is 100% tall),
+// except on tab 4, where it stays (body.pentest in style.css)
 const wizhead=$('header.wizhead'); let headH='';
 function syncHeadH(){ const v=Math.max(0, wizhead.getBoundingClientRect().bottom)+'px'; if(v!==headH) document.documentElement.style.setProperty('--head-h', headH=v); }
 syncHeadH(); addEventListener('scroll', syncHeadH, {passive:true}); addEventListener('resize', syncHeadH);
@@ -107,6 +139,7 @@ async function loadEnv(){
   $('#envChecks').innerHTML=chk.map(([l,ok,cls])=>`<div class="check"><span class="dot ${cls||(ok?'on':'bad')}"></span>${l}</div>`).join('');
   $('#ollInfo').innerHTML = e.ollama.reachable ? `<b>models</b><span class="mono">${e.ollama.models.filter(m=>/glm/i.test(m)).join(', ')||'none'}</span><b>in VRAM</b><span class="mono">${e.ollama.loaded.map(m=>`${m.name} (${m.vram_gb} GB)`).join(', ')||'none'}</span>` : `<b>status</b><span>not reachable - start Ollama</span>`;
   updateHeader();
+  cpGate();                                 // the Kubernetes runner shows tab 4 too: see cpGate
 }
 
 // ------------------------------------------------------------------ models
@@ -135,7 +168,7 @@ async function selectModel(e, silent){
   else if(a) $('#optDevice').value = a.fits_16gb_bf16===false ? 'auto' : 'cuda'; else if(p&&!p.local_ok) $('#optDevice').value='auto';
   if(a) $('#optRemote').checked=!!a.needs_remote_code;
   await loadRuns(); updateHeader();
-  if(!silent) go('abl');
+  if(!silent && S.stage==='model') go('abl');          // not when another step was chosen while the runs loaded
 }
 $('#useRepo').onclick=()=>{ const repo=$('#repoInput').value.trim(); if(!repo) return; selectModel({repo, slug:slugOf(repo), preset:null, local:S.models.find(x=>x.slug===slugOf(repo))}); };
 
@@ -387,10 +420,11 @@ $('#chatSend').onclick=async()=>{ const prompt=$('#chatPrompt').value.trim(); if
 $('#chatStop').onclick=()=>ctrl&&ctrl.abort();
 
 // ------------------------------------------------------------------ boot
+const envReady=loadEnv();              // tab 4 waits for it too (which runner: cpReady, at the end of the copilot code)
 (async function boot(){
-  await loadEnv(); await pollPipeline(); await loadModels(); await labStatus();
+  await envReady; await pollPipeline(); await loadModels(); await labStatus();
   const h=location.hash.slice(1);
-  if(h==='compare' && cmpReady()) go('compare'); else if(h==='abl' && S.model) go('abl'); else if(S.pipe.running && S.model) go('abl'); else go('model');
+  if(h==='pentest' && await cpReady) go('pentest'); else if(h==='compare' && cmpReady()) go('compare'); else if(h==='abl' && S.model) go('abl'); else if(S.pipe.running && S.model) go('abl'); else go('model');
   setInterval(pollPipeline, 2000); setInterval(loadEnv, 8000); setInterval(labStatus, 5000);
 })();
 
@@ -512,9 +546,9 @@ async function ctlAct(action){
 $('#modelMini').onclick=()=>$('#serveToggle').click();
 ctlLoad().then(ok=>{ if(ok) setInterval(ctlLoad, 5000); });
 
-// ------------------------------------------------------------------ copilot: models, engagement, modes, the run's flow (Kubernetes)
+// ------------------------------------------------------------------ tab 4, Pentest: the copilot's models, engagement, modes, the run's flow
 // Everything from n8n, the models or the form is data: it reaches the page only through esc() / escA() / textContent.
-const CP = {run:null, runT:null, feedT:null, feedNext:0, feed:[], mode:'copilot', models:null, eng:null, serving:null, moved:[]};
+const CP = {run:null, runId:null, runT:null, runSeq:0, feedT:null, feedNext:0, feed:[], mode:'copilot', models:null, eng:null, conn:null, asked:false, serving:null, moved:[]};
 const escA = s => esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const fmtTime = ts => { const d=new Date(ts); return isNaN(d) ? '' : d.toLocaleTimeString(); };
 const lvl = l => l==='error' ? 'error' : (l==='warn' ? 'warn' : '');
@@ -555,7 +589,7 @@ async function cpModelsLoad(fresh){
   $('#cpLoad').disabled = !cands.some(r=>r.promotable) || !!(sv && sv.busy);
   $('#cpLoadInfo').innerHTML = sv && sv.busy ? `<span class="badge warn">${esc(sv.busy)}</span> glm-serve is switching…` : (sv && sv.error ? `<span class="vuln">${esc(sv.error)}</span>` : '');
   clearTimeout(CP.loadT);
-  if(sv && sv.busy && $('#copilotPanel').classList.contains('open')) CP.loadT=setTimeout(()=>cpModelsLoad(true), 3000);
+  if(sv && sv.busy && S.stage==='pentest') CP.loadT=setTimeout(()=>cpModelsLoad(true), 3000);
   const toServe=$('#cpToServing'); if(toServe) toServe.onclick=(e)=>{ e.preventDefault(); $('#serveToggle').click(); };
 }
 $('#cpLoad').onclick=async()=>{
@@ -601,11 +635,24 @@ function cpDataHint(h){
     `<button class="btn sm" data-dmove="${escA(h.entry)}">move to Protected data</button>`);
   return '';                                                    // a kind this page does not know yet
 }
-async function cpEngLoad(){
+// tab 4's subtitle: what the pentest part works with, from the copilot's connection (cpLoad) and the engagement (cpEngLoad)
+function cpTabInfo(){
+  const c=CP.conn, cur=CP.eng && CP.eng.current;
+  $('#stPentest').textContent = c && !c.configured ? 'n8n not connected' : !CP.eng ? 'copilot · engagement'
+    : cur && cur.active!==false ? `v${cur.version} · ${cur.name || 'engagement'}` : 'no engagement · LAB_ALLOWLIST';
+}
+// the form as it stands, every field: compared with what cpEngLoad last filled in (CP.engForm)
+const cpEngForm = () => JSON.stringify(['#engName','#engScopeStmt','#engRoe','#engIn','#engOut','#engProhibited','#engProtected','#engStart','#engEnd','#engNote']
+  .map(s=>$(s).value).concat(['#engActive','#engAutoPassive','#engAutoActive'].map(s=>$(s).checked)));
+async function cpEngLoad(saved){
   let s; try{ s=await api('/engagement'); }catch(e){ return; }
   CP.eng=s; const cur=s.current, c=s.ceiling||{};
-  cpEngFill(cur);
-  $('#cpEngVer').textContent = cur ? `v${cur.version} · ${cur.active===false?'inactive':'active'} · saved ${fmtTime(cur.saved)}${cur.by?' by '+cur.by:''}` : 'none yet: runs use LAB_ALLOWLIST alone';
+  cpTabInfo();
+  // entering tab 4 again keeps a form with unsaved edits (typed, a hint's button, an earlier version loaded); a save fills it
+  const kept = !saved && CP.engForm!==undefined && cpEngForm()!==CP.engForm;
+  if(!kept){ cpEngFill(cur); CP.engForm=cpEngForm(); }
+  $('#cpEngVer').textContent = (cur ? `v${cur.version} · ${cur.active===false?'inactive':'active'} · saved ${fmtTime(cur.saved)}${cur.by?' by '+cur.by:''}` : 'none yet: runs use LAB_ALLOWLIST alone')
+    + (kept ? ' · the form below has unsaved changes' : '');
   $('#cpEngCeiling').innerHTML = c.known
     ? `Ceiling (n8n enforces it, the engagement can only narrow it): LAB_ALLOWLIST <span class="mono">${esc(c.allowlist)}</span>`
     : 'The console does not know LAB_ALLOWLIST; n8n enforces it (ConfigMap copilot-scope).';
@@ -637,7 +684,7 @@ $('#engSave').onclick=async()=>{
     window_end:fromLocalInput($('#engEnd').value), autorun_passive:$('#engAutoPassive').checked, autorun_active:$('#engAutoActive').checked,
     active:$('#engActive').checked, note:$('#engNote').value};
   $('#engSave').disabled=true;
-  try{ const r=await api('/engagement', body); CP.moved=[]; toast(`engagement v${r.version} saved`); await cpEngLoad(); }
+  try{ const r=await api('/engagement', body); CP.moved=[]; toast(`engagement v${r.version} saved`); await cpEngLoad(true); }
   catch(e){ const back=CP.moved.splice(0); back.forEach(x=>addLine($('#engProhibited'), x));
     toast(e.message + (back.length ? ` (not saved, so back under Prohibited: ${back.join(', ')})` : ''), true); }
   $('#engSave').disabled=false;
@@ -773,6 +820,9 @@ function cpStagedHtml(r){
   // it sent) stages nothing, whatever the judge said before
   if(fatal && !(res && !res.allowed)) return `<div class="cp-staged blocked"><div class="cp-staged-h"><b>About to be executed</b><span class="badge fail">nothing</span></div>`
     + `<div class="small">${r.status==='canceled' ? 'The run was stopped' : ['running','waiting'].includes(r.status) ? 'The run is being stopped' : 'The run failed'}: ${esc(fatal.message)}</div></div>`;
+  // stopped with Stop run after the judge authorized its command: nothing waits for approval any more
+  if(staged && r.status==='canceled') return `<div class="cp-staged blocked"><div class="cp-staged-h"><b>About to be executed</b><span class="badge ghost">nothing</span></div>`
+    + `<div class="small">The run was stopped after the judge authorized its command: nothing is staged or executed.</div></div>`;
   if(staged){
     const how = res ? (res.autoRun ? `auto-run tier ${esc(res.tier||'')}` : 'waiting for approval in n8n') : 'authorized';
     return `<div class="cp-staged ok"><div class="cp-staged-h"><b>About to be executed</b><span class="badge pass">${how}</span></div>`
@@ -799,17 +849,20 @@ function cpRenderRun(){
   const copy=$('#cpCopy'); if(copy) copy.onclick=async()=>{ try{ await navigator.clipboard.writeText(staged); toast('copied'); }catch(e){ toast('copy failed: select the command and copy it', true); } };
   const edit=$('#cpEdit'); if(edit) edit.onclick=()=>cpToManual(staged, r.target);
 }
+// the run tab 4 shows. CP.runId is the one asked for last, which entering tab 4 shows again: a run started or clicked just
+// before leaving is not lost. A newer call (another run, or leaving tab 4) ends this one: one poller at most.
 async function cpShowRun(id){
-  clearTimeout(CP.runT);
-  try{ CP.run=await api('/copilot/runs/'+encodeURIComponent(id)); }catch(e){ toast(e.message, true); return; }
-  cpRenderRun();
-  if(['running','waiting'].includes(CP.run.status) && $('#copilotPanel').classList.contains('open'))
-    CP.runT=setTimeout(()=>cpShowRun(id), CP.run.status==='waiting' ? 5000 : 1000);
+  clearTimeout(CP.runT); const seq=++CP.runSeq; CP.runId=id;
+  let r; try{ r=await api('/copilot/runs/'+encodeURIComponent(id)); }catch(e){ if(seq===CP.runSeq){ CP.runId=CP.run && CP.run.id; toast(e.message, true); } return; }
+  if(seq!==CP.runSeq) return;
+  CP.run=r; cpRenderRun();
+  if(['running','waiting'].includes(r.status) && S.stage==='pentest')
+    CP.runT=setTimeout(()=>cpShowRun(id), r.status==='waiting' ? 5000 : 1000);
   else cpLoad();
 }
 async function cpLoad(){
-  let s; try{ s=await api('/copilot'); }catch(e){ return false; }        // 404 outside Kubernetes: no copilot button
-  $('#copilotToggle').style.display='';
+  let s; try{ s=await api('/copilot'); }catch(e){ return false; }        // no answer: no tab 4 (yet: cpGate)
+  CP.conn=s; cpGate(); cpTabInfo();
   $('#cpConn').innerHTML = s.configured
     ? `<span class="badge pass">connected</span> n8n at <span class="mono">${esc(s.n8n)}</span>`
     : `<span class="badge warn">not connected</span> missing: <span class="mono">${esc((s.missing||[]).join(', '))}</span>. Run <span class="mono">deploy/n8n/connect_console.py</span> once (deploy/k8s/README.md, section Copilot).`;
@@ -821,8 +874,9 @@ async function cpLoad(){
   return true;
 }
 async function cpFeedLoad(){
-  let f; try{ f=await api('/feed?after='+CP.feedNext+'&limit=300'); }catch(e){ return; }
-  if(!f.events.length) return;
+  const after=CP.feedNext;
+  let f; try{ f=await api('/feed?after='+after+'&limit=300'); }catch(e){ return; }
+  if(after!==CP.feedNext || !f.events.length) return;   // a request from the same point answered first: these are shown already
   CP.feed=CP.feed.concat(f.events).slice(-500); CP.feedNext=f.next; cpFeedRender();
   if(f.events.some(e=>e.source==='copilot')) cpLoad();
 }
@@ -836,17 +890,29 @@ $('#cpStop').onclick=async()=>{
   try{ await api('/copilot/runs/'+encodeURIComponent(r.id)+'/stop', {}); toast('stopped'); }catch(e){ toast(e.message, true); }
   cpShowRun(r.id);
 };
-$('#copilotToggle').onclick=()=>{
-  ['#dataPanel','#sbomPanel','#servePanel'].forEach(p=>$(p).classList.remove('open'));
-  $('#copilotPanel').classList.add('open'); cpLoad(); cpFeedLoad(); cpModelsLoad(false); cpEngLoad();
+// entering tab 4 (go) loads everything, polls the live feed every 1.5 s and follows a run that is still going again; leaving
+// it stops them. A panel opened over tab 4 leaves it running underneath.
+function cpEnter(){
+  cpLoad(); cpFeedLoad(); cpModelsLoad(false); cpEngLoad();
   clearInterval(CP.feedT); CP.feedT=setInterval(cpFeedLoad, 1500);
-  if(CP.run) cpShowRun(CP.run.id);
-};
-const cpClose=()=>{ $('#copilotPanel').classList.remove('open'); clearInterval(CP.feedT); clearTimeout(CP.runT); clearTimeout(CP.loadT); };
-$('#copilotClose').onclick=cpClose;
-['#dataToggle','#sbomToggle','#serveToggle'].forEach(b=>$(b).addEventListener('click', cpClose));
+  if(CP.runId) cpShowRun(CP.runId);
+}
+function cpLeave(){ CP.runSeq++; clearInterval(CP.feedT); clearTimeout(CP.runT); clearTimeout(CP.loadT); }
 cpSetMode(['copilot','manual','direct'].includes(cpStore.get('mode','copilot')) ? cpStore.get('mode','copilot') : 'copilot');
-cpLoad();
+// tab 4 shows once the copilot is connected: GET /api/copilot (cpLoad) reports an n8n address (N8N_URL, which the
+// Kubernetes manifest always sets; a plain console can set it too), or GET /api/env (loadEnv) names the Kubernetes runner,
+// where tab 4 then says what is missing. A plain console without N8N_URL answers /api/copilot with no address and has no
+// tab 4. Both call this on every answer, so a request that failed once does not hide tab 4 until a reload: loadEnv asks
+// every 8 s, and through this the copilot is asked again until it answers.
+function cpGate(){
+  if(S.pentest) return true;
+  if(!CP.conn){ if(CP.asked) cpLoad(); return false; }
+  if(!CP.conn.n8n && S.env?.runner!=='k8s') return false;
+  S.pentest=true; $('.stages li[data-stage=pentest]').style.display='';
+  cpEngLoad();                                // the tab's subtitle names the active engagement
+  return true;
+}
+const cpReady=Promise.all([cpLoad(), envReady]).then(()=>{ CP.asked=true; return cpGate(); }).catch(()=>false);
 
 // ------------------------------------------------------------------ knowledge uploads (the copilot's retrieval)
 const KN = {info:null, previewed:null, t:null};
@@ -911,11 +977,11 @@ $('#knUpload').onclick=async()=>{
 };
 $('#knFile').onchange=knGate; $('#knSource').onchange=knGate;
 $('#knowledgeToggle').onclick=()=>{
-  ['#dataPanel','#sbomPanel','#servePanel','#copilotPanel'].forEach(p=>$(p).classList.remove('open'));
-  cpClose(); clearInterval(serveT);                    // their pollers stop with their panels
+  ['#dataPanel','#sbomPanel','#servePanel'].forEach(p=>$(p).classList.remove('open'));
+  clearInterval(serveT);                               // its poller stops with its panel; tab 4 underneath goes on
   $('#knowledgePanel').classList.add('open'); knLoad();
 };
 const knClose=()=>{ $('#knowledgePanel').classList.remove('open'); clearTimeout(KN.t); };
 $('#knowledgeClose').onclick=knClose;
-['#dataToggle','#sbomToggle','#serveToggle','#copilotToggle'].forEach(b=>$(b).addEventListener('click', knClose));
+['#dataToggle','#sbomToggle','#serveToggle'].forEach(b=>$(b).addEventListener('click', knClose));
 knLoad();

@@ -11,8 +11,8 @@ of the pentest copilot (`deploy/n8n/`). One web console drives all of it:
 
 - **Abliterate:** each stage runs as a Kubernetes Job with its log live in the console. After reading the eval report you
   promote or roll back with one click.
-- **Copilot:** prompts and tasks go in, and every stage arrives in a live feed: scope gate, retrieval, operator, policy
-  gate, judge, result.
+- **Copilot** (the console's tab 4, **Pentest**): prompts and tasks go in, and every stage arrives in a live feed: scope
+  gate, retrieval, operator, policy gate, judge, result.
 - **Knowledge:** upload writeups and notes into the retrieval store, list them, delete them.
 - **Kill / Isolate:** stop the container running the abliterated model, or cut its network while it keeps running.
 
@@ -241,6 +241,8 @@ flowchart LR
   J --> A[Apply decision + re-check] --> ST[staged command] --> X[Human approval / Execute: disabled]
 ```
 
+- **In the console:** tab 4 **Pentest** (shown once n8n is connected, never locked) holds the Models and Engagement cards, the three
+  ways to ask (copilot, manual command, direct prompt), the run as a flow, the runs and the live feed.
 - **Decisions, taken with the defaults proposed to the user:**
   - operator and judge are selectable, and the judge is never an abliterated model (refused in the console and in n8n);
   - one active engagement, versioned and audited;

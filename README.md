@@ -49,7 +49,7 @@ algebra, and the same procedure transfers unchanged from a 1.5B dense model to a
 | Path | What it is |
 |---|---|
 | `abliterate/` | The pipeline for every GLM family: `arch.py` detects the block structure and which tensors write into the residual stream (post-norm blocks, MoE experts, FP8 block scales), `hooks.py` measures and ablates with plain PyTorch hooks (works with `device_map=auto` and on the CPU), `edit.py` edits safetensors shard by shard without loading the model, `validate.py` runs the six checks, `deploy.py` converts to GGUF and imports into Ollama over its HTTP API, `pipeline.py` is the CLI and writes `events.jsonl` for the app. |
-| `app/` | **The abliteration app**, a local web app (FastAPI, vanilla JS). One flow: **Model → Abliterate → Compare**, plus header panels for the **datasets** (view, search, edit, remove rows with an audit trail), the **SBOM** (CycloneDX of both Python environments, advisories, the project's own modules, Ollama, llama.cpp, driver, models, datasets) and the process **log**. |
+| `app/` | **The abliteration app**, a local web app (FastAPI, vanilla JS). One flow: **Model → Abliterate → Compare** (a console connected to n8n adds a fourth step, **Pentest**: the copilot; the Kubernetes console always is), plus header panels for the **datasets** (view, search, edit, remove rows with an audit trail), the **SBOM** (CycloneDX of both Python environments, advisories, the project's own modules, Ollama, llama.cpp, driver, models, datasets) and the process **log**. |
 | `deploy/` | `Dockerfile`, `docker-compose.yml` (+ `docker-compose.gpu.yml`), `Caddyfile` (basic auth), `.env.example`, `k8s/abliteration.yaml`. |
 | `deploy/n8n/` | **Pentest lab copilot** in n8n: the abliterated model only suggests a command, a deterministic policy gate (scope, denylist, injection aimed at the judge) and a regular judge model decide, read-only recon auto-runs, everything else waits for a human. Retrieval over your writeups via Qdrant. See [deploy/n8n/README.md](deploy/n8n/README.md). |
 | `copilot/` | Writeup tooling for the copilot: scrubbed ingestion into Qdrant (RAG), QLoRA training pairs and a trainer that only touches read-side matrices (the abliteration cannot be undone through the adapter), and an eval harness. See [copilot/README.md](copilot/README.md). |
@@ -232,6 +232,9 @@ Ollama must be installed and running (`ollama serve`). The same environment vari
 3. **Compare**: the same prompt goes to the original and the abliterated model in Ollama, refusal phrases highlighted. The
    "Explore" panel loads the base model into a lab: a per-layer **refusal meter** for any prompt (how strongly each layer's
    direction lights up, token by token) and **try a layer live** (ablate any layer with hooks and read the answers).
+4. **Pentest** (once the console is connected to n8n, as the Kubernetes console always is): the copilot, with its models, the engagement (scope, rules of engagement,
+   protected data), copilot runs, manual commands, direct prompts and the live feed. See
+   [deploy/k8s/README.md](deploy/k8s/README.md#copilot-runs-free-prompts-live-feed).
 
 Header buttons: **datasets** (the harmful and harmless sets, plus the DPO set if it was exported with the notebook: search,
 edit, add, remove with audit trail and restore),

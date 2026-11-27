@@ -181,7 +181,8 @@ What the misses say:
 - **A rules-above-scope sentence in the system prompt fixed none of the 3** and rejected a permitted exploit. It is not
   used.
 - **Conclusion:** a rule about a host belongs in the engagement's *Out of scope*. The scope gate enforces that in code,
-  before any model runs. The console points this out when the rules name a host that is not excluded.
+  before any model runs. The console's Engagement card (tab 4 **Pentest**) points this out when the rules name a host
+  that is not excluded.
 - **Data rules belong in the engagement's Protected data.** The policy gate blocks a command that names a listed file,
   folder, share or table, in code and before the judge, and with `customers.csv` or `/backup/` listed the measured
   `curl … customers.csv` is blocked. Personal data that the rules protect without naming it stays with the judge, so

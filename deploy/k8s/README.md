@@ -158,7 +158,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
 ## Running abliteration
 
 The console works as it does locally (Model → Abliterate → Compare), but every stage runs as a Kubernetes **Job** in
-`lab`. Its log streams into the same GUI, and the header shows the Job.
+`lab`. Its log streams into the same GUI, and the header shows the Job. A fourth step, **Pentest**, holds the copilot
+([below](#copilot-runs-free-prompts-live-feed)).
 
 - **What the Jobs get:**
   - the stage's resources and placement from ConfigMap `lab-jobs` (the overlay's `jobs.json`);
@@ -249,7 +250,13 @@ Network policies only ever allow traffic, so isolation removes the allow and `de
 
 ## Copilot: runs, free prompts, live feed
 
-The **copilot** button in the console's header opens the copilot panel.
+Tab **4 Pentest** in the console's header holds the copilot: the **Models** and **Engagement** cards, the three ways to
+ask, the run, the runs from this console and the live feed. It shows once the copilot is connected: always in the
+Kubernetes console (its manifest sets `N8N_URL`), and in a console started without Kubernetes only when `N8N_URL` is set.
+It is never locked, so an engagement can be prepared before any model is abliterated. Its subtitle (on wide screens)
+names the active engagement (`v3 · ACME internal pentest`),
+says `no engagement · LAB_ALLOWLIST` when none is active, or `n8n not connected`. `#pentest` at the end of the
+console's address opens it.
 
 **Connect n8n once.** The console starts runs through n8n's webhook and follows them through n8n's API. One script sets up
 both sides:
@@ -336,10 +343,10 @@ the console refuses such a judge (400), and n8n's "Build judge prompt" node refu
 
 ## Protected data
 
-The Engagement card's **Protected data** lists files, folders, shares, tables or buckets that no command may name, one
-per line: `customers.csv`, `/backup/`, `HR$`, `\Users\jdoe\Documents`, `*.kdbx`. n8n's policy gate enforces the list in
-code, before the judge and again after it. It reads each argument the way bash hands it to the program, folded and
-decoded: case, fullwidth letters, percent-encoding (`%63ustomers.csv`), `\` as `/`.
+In tab **4 Pentest**, the Engagement card's **Protected data** lists files, folders, shares, tables or buckets that no
+command may name, one per line: `customers.csv`, `/backup/`, `HR$`, `\Users\jdoe\Documents`, `*.kdbx`. n8n's policy
+gate enforces the list in code, before the judge and again after it. It reads each argument the way bash hands it to
+the program, folded and decoded: case, fullwidth letters, percent-encoding (`%63ustomers.csv`), `\` as `/`.
 
 - **Blocked:** a command that names an entry where it reaches the target: a URL, a share or remote path, an SQL string,
   a positional argument. Like an out-of-scope host, a blocked command cannot be approved. With `customers.csv` or

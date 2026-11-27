@@ -397,6 +397,21 @@ class TestCopilotRuns(unittest.TestCase):
             self.runs.stop(out["id"], {})
         self.assertEqual(e.exception.status, 409)
 
+    @unittest.skipUnless(NODE, "node not installed")
+    def test_gui_shows_a_run_the_operator_stopped_as_stopped(self):
+        # Stop run after the judge authorized the command: the staged box must not read as waiting for approval (with Copy
+        # and Edit buttons) any more
+        self.n8n.plan = [fixture("waiting")]
+        out = self.runs.start("brute force ssh", "10.10.10.5", {"user": "admin"})
+        self.assertIn("waiting for approval in n8n", render(self.wait(out["id"], ("waiting",)))["staged"])
+        self.runs.stop(out["id"], {"user": "admin"})
+        run = self.wait(out["id"], ("canceled",))
+        self.assertFalse([e for e in run["events"] if e["stage"] == "error" and e["level"] == "error"])
+        got = render(run)
+        self.assertIn("The run was stopped after the judge authorized its command: nothing is staged or executed.", got["staged"])
+        for shown in ("waiting for approval", 'id="cpCopy"', 'id="cpEdit"', "hydra -l admin"):
+            self.assertNotIn(shown, got["staged"])
+
     def test_records_come_before_the_status_that_shows_them(self):
         # Whoever sees a run ended must find its "end" in the audit and the feed. A stop is recorded before n8n answers,
         # since the follower can see the run canceled, and record its end, before that answer is back.

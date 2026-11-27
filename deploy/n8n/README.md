@@ -68,8 +68,8 @@ instead of guessing a scope.
      on purpose: the scope gate checks one exact target and never has to pick one out of free text.
    - **Console (Kubernetes):** `POST /webhook/copilot-run` with the shared secret in `X-Lab-Secret` (a Header Auth
      credential). n8n answers at once with the execution id; the console follows the run through n8n's API and shows one
-     event per stage. Console runs skip the result pages. The workflow stores each node's result as soon as it finishes
-     (`saveExecutionProgress`), so the console can show the run while it is still going.
+     event per stage, in its tab 4 **Pentest**. Console runs skip the result pages. The workflow stores each node's result
+     as soon as it finishes (`saveExecutionProgress`), so the console can show the run while it is still going.
      - **The console can also send:**
        - the operator and judge model;
        - `mode: "manual"` with a typed `command`, which skips retrieval and the operator and goes through the same
