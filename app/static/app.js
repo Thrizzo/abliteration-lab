@@ -23,6 +23,24 @@ const badge = t => isRefusal(t) ? '<span class="badge ref">refusal</span>' : '<s
 const answerBox = (label, text) => `<div class="ans"><div class="h"><span>${label}</span><span>${cjkRatio(text)>0.2?'<span class="badge cjk">mostly Chinese</span> ':''}${badge(text)}</span></div>${highlight(text)}</div>`;
 const statusBadge = s => `<span class="badge ${s==='PASS'?'pass':(s==='FAIL'?'fail':'warn')}">${s}</span>`;
 const pairs = (prompts, left, right, ll, rl, n=16) => prompts.slice(0,n).map((p,i)=>`<div class="prompt"><span class="i">${String(i+1).padStart(2,'0')}</span>${esc(p)}</div><div class="pair">${answerBox(ll,left[i])}${answerBox(rl,right[i])}</div>`).join('');
+// ------------------------------------------------------------------ several layers
+// A run removes one layer's direction, or the directions of several layers together (run.json "layers"; runs from before
+// that have "layer" only). Shown as "layer 17" or "layers 15+17+19".
+const layersOf = x => (Array.isArray(x?.layers) && x.layers.length) ? x.layers : (x?.layer!=null ? [x.layer] : []);
+const layerNums = l => [...l].sort((a,b)=>a-b).join('+');
+const layerText = x => { const l=layersOf(x); return l.length>1 ? 'layers '+layerNums(l) : (l.length ? 'layer '+l[0] : ''); };
+const sameLayers = (a, b) => !!(a && b) && a.length===b.length && layerNums(a)===layerNums(b);
+// "15, 19" or "15-17" (as the CLI's --layers): the layer numbers in that order, each once; null when it is not such a list
+const parseLayers = t => { const out=[]; for(const p of String(t||'').split(/[\s,]+/).filter(Boolean)){ const m=p.match(/^(\d+)(?:-(\d+))?$/); if(!m) return null;
+  const a=+m[1], b=m[2]!=null?+m[2]:a; if(b<a||b-a>512) return null; for(let x=a;x<=b;x++) if(!out.includes(x)) out.push(x); } return out; };
+// the scan's --combine pass (scan.json): the best layers tested together. chosen marks the applied set, use adds buttons that
+// put a combination into the layer choice, answers ({prompts, baseline}) adds every answer per combination.
+function combosHtml(combos, NT, chosen, o={}){
+  if(!combos?.length) return '';
+  const rows=combos.map(c=>`<tr class="${sameLayers(c.layers, chosen)?'chosen':''}"><td class="mono">${layerNums(c.layers)}</td><td class="num">${c.refusals}/${NT}</td><td class="num">${fmt(c.cjk*100,0)}%</td><td class="small">${esc((c.generations?.[0]||'').slice(0,100))}…</td>${o.use?`<td><button class="btn sm" data-use="${c.layers.join(',')}">use</button></td>`:''}</tr>`).join('');
+  const answers = o.answers ? combos.map(c=>`<details><summary>answers with layers ${layerNums(c.layers)} removed — ${c.refusals}/${NT} refusals</summary>${pairs(o.answers.prompts, o.answers.baseline, c.generations, 'untouched', `layers ${layerNums(c.layers)} removed`)}</details>`).join('') : '';
+  return `<details${o.open?' open':''}><summary>The best layers together (--combine): ${combos.map(c=>`${layerNums(c.layers)} → ${c.refusals}/${NT}`).join(' · ')}</summary><p class="small">Their directions removed together, as one subspace. The rule takes a combination only if it leaves strictly fewer refusals than the best single layer and its answers are not mostly Chinese.</p><div class="combos"><table><tr><th>layers</th><th class="num">refusals</th><th class="num">Chinese</th><th>first answer</th>${o.use?'<th></th>':''}</tr>${rows}</table></div>${answers}</details>`;
+}
 
 // ------------------------------------------------------------------ charts
 function barChart(el, values, o){
@@ -118,7 +136,7 @@ function cmpReady(){ const n=S.run?.meta?.ollama || S.run?.ollama?.names; return
 function updateHeader(){
   $('#stModel').textContent = S.model ? S.model.repo : 'choose a GLM model';
   const r=S.run, running=S.pipe.running && S.pipe.run_id===S.runId;
-  $('#stAbl').textContent = running ? `running · ${S.pipe.current||''}` : (r ? (r.meta?.status==='awaiting_choice' ? 'paused at the layer choice' : (r.validation ? `done · layer ${r.choice.layer} · ${r.validation.verdict}` : (r.scan ? 'scanned' : 'started'))) : 'not run');
+  $('#stAbl').textContent = running ? `running · ${S.pipe.current||''}` : (r ? (r.meta?.status==='awaiting_choice' ? 'paused at the layer choice' : (r.validation ? `done · ${layerText(r.choice)||'layer '+r.choice.layer} · ${r.validation.verdict}` : (r.scan ? 'scanned' : 'started'))) : 'not run');
   $('#stCmp').textContent = cmpReady() ? `${S.run.meta?.ollama?.base||''} vs …-abl` : 'needs a finished run';
   document.querySelector('.stages li[data-stage=abl]').classList.toggle('done', !!(r&&r.validation)); document.querySelector('.stages li[data-stage=abl]').classList.toggle('locked', !S.model);
   document.querySelector('.stages li[data-stage=compare]').classList.toggle('locked', !cmpReady()); document.querySelector('.stages li[data-stage=model]').classList.toggle('done', !!S.model);
@@ -182,7 +200,7 @@ async function loadRuns(keep){
   const running = S.pipe.running && S.pipe.run_id && S.runs.find(r=>r.id===S.pipe.run_id);
   if(!(keep && S.runs.find(r=>r.id===S.runId))) S.runId = running ? running.id : (S.runs[0]?.id||null);
   $('#runsBox').style.display = S.runs.length>1 ? '' : 'none';
-  $('#runSel').innerHTML=S.runs.map(r=>`<option value="${r.id}">${r.id.replace('_',' ')} · ${r.status}${r.layer!=null?' · layer '+r.layer:''}${r.verdict?' · '+r.verdict:''}</option>`).join(''); $('#runSel').value=S.runId;
+  $('#runSel').innerHTML=S.runs.map(r=>`<option value="${r.id}">${r.id.replace('_',' ')} · ${r.status}${r.layer!=null?' · '+layerText(r):''}${r.verdict?' · '+r.verdict:''}</option>`).join(''); $('#runSel').value=S.runId;
   await selectRun(S.runId);
 }
 async function selectRun(id){
@@ -207,11 +225,13 @@ function chatNames(){ return S.run?.meta?.ollama || S.run?.ollama?.names || {bas
 function foldEvents(evs){
   const ES={};
   for(const e of evs){
-    const st = ES[e.step] || (ES[e.step]={status:'pending', first:e.t, layers:[], progress:null});
+    const st = ES[e.step] || (ES[e.step]={status:'pending', first:e.t, layers:[], combos:[], progress:null});
     st.last=e.t;
-    if(e.status==='start'){ st.status='running'; Object.assign(st, e); }
+    // the scan's start names the layers it will test: kept apart from the results its 'layer' events add
+    if(e.status==='start'){ st.status='running'; Object.assign(st, e); if(e.step==='scan'){ st.layers_planned=e.layers; st.layers=[]; } }
     else if(e.status==='progress'){ st.status='running'; st.progress=e; }
     else if(e.status==='layer'){ st.status='running'; st.layers.push(e); }
+    else if(e.status==='combo'){ st.status='running'; st.combos.push(e); }
     else if(e.status==='baseline'){ st.status='running'; st.baseline=e; }
     else if(e.status==='waiting'){ st.status='waiting'; Object.assign(st, e); }
     else if(e.status==='done'){ st.status='done'; Object.assign(st, e); }
@@ -232,14 +252,14 @@ function stepState(key){
 
 // ------------------------------------------------------------------ hero
 function renderHero(){
-  const R=S.run, n=R?.model?.n_layers||S.model?.local?.arch?.n_layers||40, W=420, H=200, bw=W/n, sc=R?.measure?.scan_range||[0,-1], ch=R?.choice?.layer;
+  const R=S.run, n=R?.model?.n_layers||S.model?.local?.arch?.n_layers||40, W=420, H=200, bw=W/n, sc=R?.measure?.scan_range||[0,-1], chL=layersOf(R?.choice);
   let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice" style="width:100%;height:100%">`;
-  for(let l=0;l<n;l++){ const sep=R?.measure?.separation_pct?.[l]||20, h=36+sep*1.4; s+=`<rect class="band ${l>=sc[0]&&l<=sc[1]?'scan':''} ${l===ch?'chosen':''}" x="${l*bw+1}" y="${(H-h)/2}" width="${Math.max(1,bw-2)}" height="${h}" rx="2"/>`; }
+  for(let l=0;l<n;l++){ const sep=R?.measure?.separation_pct?.[l]||20, h=36+sep*1.4; s+=`<rect class="band ${l>=sc[0]&&l<=sc[1]?'scan':''} ${chL.includes(l)?'chosen':''}" x="${l*bw+1}" y="${(H-h)/2}" width="${Math.max(1,bw-2)}" height="${h}" rx="2"/>`; }
   for(let k=0;k<7;k++){ const yy=50+k*16+(k%2)*6, d=3.2+k*0.35; s+=`<circle class="pulse" r="2.2" cy="${yy}" cx="0"><animate attributeName="cx" from="-4" to="${W+4}" dur="${d}s" begin="${-k*0.9}s" repeatCount="indefinite"/><animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="${d}s" begin="${-k*0.9}s" repeatCount="indefinite"/></circle>`; }
   s+=`<text x="6" y="${H-8}">layer 0</text><text x="${W-6}" y="${H-8}" text-anchor="end">layer ${n-1}</text>`;
-  if(ch!=null) s+=`<text x="${ch*bw+bw/2}" y="14" text-anchor="middle" style="fill:var(--s3)">▼ ${ch}</text>`;
+  for(const ch of chL) s+=`<text x="${ch*bw+bw/2}" y="14" text-anchor="middle" style="fill:var(--s3)">▼ ${ch}</text>`;
   $('#stream').innerHTML=s+'</svg>';
-  const st = R ? [[R.choice.layer??'–','chosen layer',true],[R.scan?`${R.scan.n_base}→${R.apply?.n_after??'?'}`:'–',`refusals of ${R.config.n_inst_test||16}`],[R.validation?.verdict||R.meta?.status||'–','validation'],[R.validation?fmt(R.validation.kl,3):'–','KL on harmless'],[R.meta?.ollama?'ready':'–','in Ollama']] : [['–','no run yet for this model']];
+  const st = R ? [[chL.length>1?layerNums(chL):(R.choice.layer??'–'),chL.length>1?'chosen layers':'chosen layer',true],[R.scan?`${R.scan.n_base}→${R.apply?.n_after??'?'}`:'–',`refusals of ${R.config.n_inst_test||16}`],[R.validation?.verdict||R.meta?.status||'–','validation'],[R.validation?fmt(R.validation.kl,3):'–','KL on harmless'],[R.meta?.ollama?'ready':'–','in Ollama']] : [['–','no run yet for this model']];
   $('#heroStats').innerHTML=st.map(([v,l,a])=>`<div class="stat"><div class="v ${a?'accent':''}">${esc(v)}</div><div class="l">${l}</div></div>`).join('');
 }
 
@@ -249,7 +269,7 @@ function renderGuide(){
   const g=$('#guide');
   if(!guideBuilt){ g.innerHTML=GUIDE.map((s,i)=>`<div class="gstep" id="g-${s.key}"><div class="ghead"><span class="gnum">${i+1}</span><h3>${s.title}</h3><span class="gstate badge ghost">pending</span><span class="gtime small"></span></div>
       <div class="gbody"><div class="gtext"><p>${s.plain}</p><p><b>Why it matters.</b> ${s.why}</p><p><b>What to look for.</b> ${s.look}</p></div><div class="glive" id="gl-${s.key}"></div>
-      <details><summary>Under the hood</summary><p class="small">${s.hood}</p></details><details><summary>For GLM-5.x</summary><p class="small">${s.glm5}</p></details></div></div>`).join(''); guideBuilt=true; }
+      <details><summary>Under the hood</summary><p class="small">${s.hood}</p></details>${s.several?`<details><summary>Several directions</summary><p class="small">${s.several}</p></details>`:''}<details><summary>For GLM-5.x</summary><p class="small">${s.glm5}</p></details></div></div>`).join(''); guideBuilt=true; }
   document.querySelectorAll('#guide > .narr').forEach(x=>x.remove());
   let done=0;
   for(const s of GUIDE){ const st=stepState(s.key), el=$('#g-'+s.key); el.className='gstep st-'+st; const b=el.querySelector('.gstate'); b.textContent=st; b.className='gstate badge '+({done:'pass',running:'info',waiting:'warn',error:'fail'}[st]||'ghost'); if(st==='done') done++;
@@ -284,25 +304,25 @@ const RENDER = {
     const prompts = SC?.prompts || null, baseline = SC?.baseline || es.baseline?.baseline, n_base = SC?.n_base ?? es.baseline?.n_base, NT = SC?.prompts.length ?? es.baseline?.n_test ?? es.n_test ?? 16;
     if(!layers.length && n_base==null){ el.innerHTML = live?'<div class="narr">generating the baseline…</div>':''; return; }
     const allLayers = es.layers_planned || (R?.measure ? Array.from({length:R.measure.scan_range[1]-R.measure.scan_range[0]+1},(_,i)=>R.measure.scan_range[0]+i) : layers);
-    const chosen=R?.choice?.layer;
+    const chosenL=layersOf(R?.choice), several=chosenL.length>1;
     if(live || !SC){
-      const last = layers.length ? by[layers[layers.length-1]] : null;
-      el.innerHTML=`<div class="narr">Baseline: <b>${n_base}/${NT}</b> refusals. ${layers.length?`Tested ${layers.length}/${allLayers.length} layers; last: layer <b>${last.layer}</b> → <b>${last.refusals}/${NT}</b> refusals${last.cjk_ratio>0.2?' (mostly Chinese!)':''}.`:'Scanning the first layer…'}</div><div id="chartScan"></div><div class="legend"><span style="--c:var(--s1)">refusals with this layer's direction removed</span><span style="--c:var(--s2)">mostly Chinese</span><span style="--c:var(--muted)">— baseline</span></div>
+      const last = layers.length ? by[layers[layers.length-1]] : null, cs = es.combos||[];
+      el.innerHTML=`<div class="narr">Baseline: <b>${n_base}/${NT}</b> refusals. ${layers.length?`Tested ${layers.length}/${allLayers.length} layers; last: layer <b>${last.layer}</b> → <b>${last.refusals}/${NT}</b> refusals${last.cjk_ratio>0.2?' (mostly Chinese!)':''}.`:'Scanning the first layer…'}</div>${cs.length?`<div class="narr">The best layers together: ${cs.map(c=>`${layerNums(c.layers)} → <b>${c.refusals}/${NT}</b>${c.cjk>0.2?' (mostly Chinese!)':''}`).join(' · ')}</div>`:''}<div id="chartScan"></div><div class="legend"><span style="--c:var(--s1)">refusals with this layer's direction removed</span><span style="--c:var(--s2)">mostly Chinese</span><span style="--c:var(--muted)">— baseline</span></div>
         ${last?`<div class="prompt" style="margin-top:12px">latest answer (layer ${last.layer}) to: ${esc(prompts?prompts[0]:'the first test prompt')}</div><div class="pair">${answerBox('untouched', baseline?baseline[0]:'')}${answerBox(`layer ${last.layer} removed`, last.generations[0])}</div>`:''}`;
       barChart($('#chartScan'), allLayers.map(l=>by[l]?by[l].refusals:null), {max:NT+1, ticks:Math.min(NT,8), height:220, xlab:i=>allLayers[i], cls:i=>(by[allLayers[i]]?.cjk_ratio>0.2?'cjk':''), hline:n_base, hlineLabel:`baseline ${n_base}/${NT}`, xlabel:'layer the direction was taken from', ylabel:`refusals of ${NT}`, tip:i=>{const r=by[allLayers[i]]; return r?`layer ${r.layer}: ${r.refusals}/${NT} · Chinese ${fmt(r.cjk_ratio*100,0)}%`:`layer ${allLayers[i]}: pending`;}});
       return;
     }
     el.innerHTML=`<div class="row"><button class="btn sm primary" id="nextScan">Next layer ▶</button><button class="btn sm" id="playScan">▶ play all</button><button class="btn sm" id="resetScan">reset</button><label class="small">layer <input type="range" id="scanSlider" min="0" max="${layers.length-1}" value="0"> <b class="mono" id="scanLbl"></b></label></div>
-      <div class="narr" id="narrScan"></div><div class="layers" id="strip"></div><div id="chartScan"></div><div class="legend"><span style="--c:var(--s1)">refusals with this layer's direction removed</span><span style="--c:var(--s2)">mostly Chinese</span><span style="--c:var(--s3)">chosen layer</span><span style="--c:var(--muted)">— baseline</span></div>
-      <details id="gensWrap"><summary id="genTitle">answers</summary><p class="small">Left: untouched model. Right: the selected layer's direction removed. Refusal phrases are <mark>highlighted</mark>.</p><div id="gens"></div></details>`;
+      <div class="narr" id="narrScan"></div><div class="layers" id="strip"></div><div id="chartScan"></div><div class="legend"><span style="--c:var(--s1)">refusals with this layer's direction removed</span><span style="--c:var(--s2)">mostly Chinese</span><span style="--c:var(--s3)">${several?'chosen layers':'chosen layer'}</span><span style="--c:var(--muted)">— baseline</span></div>
+      <details id="gensWrap"><summary id="genTitle">answers</summary><p class="small">Left: untouched model. Right: the selected layer's direction removed. Refusal phrases are <mark>highlighted</mark>.</p><div id="gens"></div></details>${combosHtml(SC.combos, NT, chosenL, {answers:{prompts, baseline}})}`;
     const NL=R.model.n_layers;
     const draw=()=>{
       $('#strip').innerHTML=Array.from({length:NL},(_,l)=>{ const i=layers.indexOf(l); return `<div class="${i>=0&&i<=scanRevealed?'on':''} ${i===scanRevealed?'now':''}">${l}</div>`; }).join('');
-      barChart($('#chartScan'), layers.map((l,i)=>i<=scanRevealed?by[l].refusals:null), {max:NT+1, ticks:Math.min(NT,8), height:220, xlab:i=>layers[i], cls:i=>(layers[i]===chosen?'chosen':(by[layers[i]].cjk_ratio>0.2?'cjk':''))+(i===scanRevealed?' sel':''), hline:n_base, hlineLabel:`baseline ${n_base}/${NT}`, xlabel:'layer the direction was taken from', ylabel:`refusals of ${NT}`, tip:i=>{const r=by[layers[i]]; return `layer ${layers[i]}: ${r.refusals}/${NT} · Chinese ${fmt(r.cjk_ratio*100,0)}%\n${(r.generations[0]||'').slice(0,90)}…`;}, click:i=>{ clearInterval(scanTimer); scanRevealed=i; $('#scanSlider').value=i; draw(); }});
+      barChart($('#chartScan'), layers.map((l,i)=>i<=scanRevealed?by[l].refusals:null), {max:NT+1, ticks:Math.min(NT,8), height:220, xlab:i=>layers[i], cls:i=>(chosenL.includes(layers[i])?'chosen':(by[layers[i]].cjk_ratio>0.2?'cjk':''))+(i===scanRevealed?' sel':''), hline:n_base, hlineLabel:`baseline ${n_base}/${NT}`, xlabel:'layer the direction was taken from', ylabel:`refusals of ${NT}`, tip:i=>{const r=by[layers[i]]; return `layer ${layers[i]}: ${r.refusals}/${NT} · Chinese ${fmt(r.cjk_ratio*100,0)}%\n${(r.generations[0]||'').slice(0,90)}…`;}, click:i=>{ clearInterval(scanTimer); scanRevealed=i; $('#scanSlider').value=i; draw(); }});
       if(scanRevealed<0){ $('#narrScan').innerHTML=`<b>Baseline</b>: nothing removed, <b>${n_base}/${NT}</b> refusals. Click <b>Next layer</b> to test layer ${layers[0]}.`; $('#genTitle').textContent=`baseline answers — ${n_base}/${NT} refusals`; $('#scanLbl').textContent='baseline';
         $('#gens').innerHTML=prompts.map((p,i)=>`<div class="prompt"><span class="i">${String(i+1).padStart(2,'0')}</span>${esc(p)}</div><div class="pair">${answerBox('untouched', baseline[i])}<div class="ans small" style="display:grid;place-items:center">pick a layer</div></div>`).join(''); return; }
       const l=layers[scanRevealed], r=by[l], best=Math.min(...layers.slice(0,scanRevealed+1).map(x=>by[x].refusals)); $('#scanLbl').textContent=l;
-      $('#narrScan').innerHTML=`<b>Layer ${l}</b>: <b>${r.refusals}/${NT}</b> refusals left (baseline ${n_base}). ${r.cjk_ratio>0.2?'<b>Warning:</b> answers are largely Chinese. ':''}${r.refusals===best?'Best so far. ':''}${l===chosen?'<b>This is the applied layer.</b> ':''}Open the answers: on topic and coherent?`;
+      $('#narrScan').innerHTML=`<b>Layer ${l}</b>: <b>${r.refusals}/${NT}</b> refusals left (baseline ${n_base}). ${r.cjk_ratio>0.2?'<b>Warning:</b> answers are largely Chinese. ':''}${r.refusals===best?'Best so far. ':''}${chosenL.includes(l)?(several?`<b>One of the applied layers (${layerNums(chosenL)}).</b> `:'<b>This is the applied layer.</b> '):''}Open the answers: on topic and coherent?`;
       $('#genTitle').textContent=`answers with layer ${l} removed — ${r.refusals}/${NT} refusals`;
       $('#gens').innerHTML=pairs(prompts, baseline, r.generations, 'untouched', `layer ${l} removed`);
     };
@@ -314,18 +334,35 @@ const RENDER = {
   },
   choose(el, es, R, st){
     const SC=R?.scan; const rec = es.recommended ?? R?.meta?.recommended; const layer = es.layer ?? R?.choice?.layer;
-    if(st==='waiting'){ el.innerHTML=`<div class="narr">The run is <b>paused</b>. Recommended by the rule: <b>layer ${rec}</b>. Read the answers in the scan above, then continue.</div><div class="row"><label>layer <input type="number" id="chooseLayer" value="${rec}" min="0" max="${(R?.model?.n_layers||40)-1}" style="width:80px"></label><button class="btn primary" id="continueBtn">▶ Continue with this layer</button></div>`;
-      $('#continueBtn').onclick=async()=>{ try{ await api('/pipeline/start', {engine:'abliterate', stage:'continue', run_id:S.runId, layer:+$('#chooseLayer').value, no_ollama:!$('#optOllama').checked, skip_verify:!$('#optVerify').checked, device_map:$('#optDevice').value}); S.evNext=0; toast('continuing'); }catch(e){ toast(e.message, true); } }; return; }
+    // the rule may recommend a combination (run.json recommended_layers); "recommended" alone is one layer (older runs)
+    const recL = es.recommended_layers || R?.meta?.recommended_layers || (rec!=null ? [rec] : []), NT = SC?.prompts.length ?? 16;
+    if(st==='waiting'){ const top=(R?.model?.n_layers||40)-1;
+      el.innerHTML=`<div class="narr">The run is <b>paused</b>. Recommended by the rule: <b>${recL.length>1?'layers '+layerNums(recL)+'</b>, together: fewer refusals than the best single layer':'layer '+rec+'</b>'}. Read the answers in the scan above, then continue.</div><div class="row"><label>layer <input type="number" id="chooseLayer" value="${recL.length>1?recL[0]:rec}" min="0" max="${top}" style="width:80px"></label><label class="small" title="more layers whose directions are removed together with this one (the subspace they span), e.g. 15, 19 or 15-17">combine with <input type="text" id="chooseMore" value="${recL.length>1?recL.slice(1).join(', '):''}" placeholder="e.g. 15, 19" style="width:110px"></label><button class="btn primary" id="continueBtn">▶ Continue with this layer</button></div>
+        <div class="small">Several layers: their directions are removed together. Every extra direction also moves harmless answers a little; the validation's KL on harmless prompts shows how much.</div>${combosHtml(SC?.combos, NT, recL, {use:true, open:true})}`;
+      const label=()=>{ $('#continueBtn').textContent = $('#chooseMore').value.trim() ? '▶ Continue with these layers' : '▶ Continue with this layer'; };
+      $('#chooseMore').oninput=label; label();
+      el.querySelectorAll('[data-use]').forEach(b=>b.onclick=()=>{ const l=b.dataset.use.split(',').map(Number); $('#chooseLayer').value=l[0]; $('#chooseMore').value=l.slice(1).join(', '); label(); });
+      $('#continueBtn').onclick=async()=>{
+        const body={engine:'abliterate', stage:'continue', run_id:S.runId, layer:+$('#chooseLayer').value, no_ollama:!$('#optOllama').checked, skip_verify:!$('#optVerify').checked, device_map:$('#optDevice').value};
+        if($('#chooseMore').value.trim()){            // several layers: sent as layers (this one first); one layer goes as before
+          const more=parseLayers($('#chooseMore').value), all=more && [body.layer, ...more.filter(x=>x!==body.layer)];
+          if(!more || all.some(x=>x>top)) return toast(`combine with: layer numbers from 0 to ${top}, e.g. 15, 19 or 15-17`, true);
+          delete body.layer; if(all.length>1) body.layers=all; else body.layer=all[0];
+        }
+        try{ await api('/pipeline/start', body); S.evNext=0; toast('continuing'); }catch(e){ toast(e.message, true); } }; return; }
     if(layer==null){ el.innerHTML = st==='running'?'<div class="narr">choosing…</div>':''; return; }
+    const chosenL = es.layers?.length ? es.layers : (R?.choice?.layers?.length ? R.choice.layers : [layer]);
     const sorted = SC ? [...SC.layers].sort((a,b)=>a.layer-b.layer) : [];
-    el.innerHTML=`<div class="narr">Chosen: <b>layer ${layer}</b>${es.by?` (${es.by==='user'?'picked by you':'by the rule'})`:''}${rec!=null&&rec!==layer?`; the rule would have picked ${rec}`:''}.</div>` + (sorted.length?`<details><summary>All scanned layers</summary><table><tr><th>layer</th><th class="num">refusals</th><th class="num">Chinese</th><th>first answer</th></tr>${sorted.map(s=>`<tr class="${s.layer===layer?'chosen':''}"><td class="mono">${s.layer}</td><td class="num">${s.refusals}/${SC.prompts.length}</td><td class="num">${fmt(s.cjk_ratio*100,0)}%</td><td class="small">${esc((s.generations[0]||'').slice(0,100))}…</td></tr>`).join('')}</table></details>`:'');
+    el.innerHTML=`<div class="narr">Chosen: <b>${layerText({layers:chosenL})}</b>${es.by?` (${es.by==='user'?'picked by you':'by the rule'})`:''}${recL.length&&!sameLayers(recL, chosenL)?`; the rule would have picked ${recL.length>1?'layers '+layerNums(recL):rec}`:''}.</div>` + (sorted.length?`<details><summary>All scanned layers</summary><table><tr><th>layer</th><th class="num">refusals</th><th class="num">Chinese</th><th>first answer</th></tr>${sorted.map(s=>`<tr class="${chosenL.includes(s.layer)?'chosen':''}"><td class="mono">${s.layer}</td><td class="num">${s.refusals}/${SC.prompts.length}</td><td class="num">${fmt(s.cjk_ratio*100,0)}%</td><td class="small">${esc((s.generations[0]||'').slice(0,100))}…</td></tr>`).join('')}</table></details>`:'') + combosHtml(SC?.combos, NT, chosenL);
   },
   apply(el, es, R, st){
     if(st==='running'&&es.progress){ const p=es.progress; el.innerHTML=`<div class="narr">Editing shard ${p.shard}/${p.shards} (${p.seconds}s per shard)</div><div class="progress"><i style="width:${100*p.shard/p.shards}%"></i></div>`; return; }
     const a = es.n_changed!=null ? es : (R?.apply?.stats || null); const o=R?.apply?.orthogonality;
     if(!a && !o){ el.innerHTML = st==='running'?'<div class="narr">starting the edit…</div>':''; return; }
     const ex=v=>v==null?'–':Number(v).toExponential(1);
-    el.innerHTML=`<div class="formula">W′ = W − r rᵀ W</div><div class="stats">${[[a?.n_changed??R?.apply?.changed_tensors??'–','tensors changed'],[a?.kinds?`${a.kinds.embed||0} / ${a.kinds.attn_out||0} / ${a.kinds.mlp_out||0}`:'–','embed / attn out / mlp out'],[ex(a?.max_rw ?? Math.max(o?.embed_tokens||0,o?.o_proj||0,o?.down_proj||0)),'max |r·W′| after'],[a?.fp8??0,'FP8 tensors requantized'],[a?.folded??0,'post-norm folds'],[a?.seconds!=null?a.seconds+' s':'–','time']].map(([v,l])=>`<div class="stat"><div class="v" style="font-size:18px">${v}</div><div class="l">${l}</div></div>`).join('')}</div>`;
+    // several layers: Q is the orthonormal basis of their directions (k of them; apply.json "directions")
+    const k=a?.directions||1, layersL=es.layers?.length ? es.layers : (R?.apply?.stats?.layers || []);
+    el.innerHTML=`<div class="formula">${k>1?'W′ = W − Q (Qᵀ W)':'W′ = W − r rᵀ W'}</div>${k>1?`<div class="narr small">${layerText({layers:layersL})}: their ${k} directions, orthonormalized (QR), are removed together.</div>`:''}<div class="stats">${[[a?.n_changed??R?.apply?.changed_tensors??'–','tensors changed'],[a?.kinds?`${a.kinds.embed||0} / ${a.kinds.attn_out||0} / ${a.kinds.mlp_out||0}`:'–','embed / attn out / mlp out'],[ex(a?.max_rw ?? Math.max(o?.embed_tokens||0,o?.o_proj||0,o?.down_proj||0)),k>1?'max |Qᵀ·W′| after':'max |r·W′| after'],[a?.fp8??0,'FP8 tensors requantized'],[a?.folded??0,'post-norm folds'],[a?.seconds!=null?a.seconds+' s':'–','time']].map(([v,l])=>`<div class="stat"><div class="v" style="font-size:18px">${v}</div><div class="l">${l}</div></div>`).join('')}</div>`;
   },
   verify(el, es, R, st){
     const after = es.after || R?.apply?.after; const SC=R?.scan; if(!after){ el.innerHTML=st==='running'?'<div class="narr">reloading the edited model…</div>':''; return; }
@@ -354,7 +391,8 @@ function renderRecorded(){ const o=S.run?.ollama; $('#chatRecordedBody').innerHT
 $('#runBtn').onclick=async()=>{
   if(!S.model) return toast('pick a model first', true);
   const body={engine:'abliterate', stage:'all', model:S.model.repo, pause_at_choice:$('#optPause').checked, no_ollama:!$('#optOllama').checked, skip_verify:!$('#optVerify').checked, device_map:$('#optDevice').value,
-    n_train:+$('#optTrain').value, n_test:+$('#optTest').value, layer_range:$('#optRange').value, max_new_tokens:+$('#optTokens').value, batch:+$('#optBatch').value, gen_batch:+$('#optGenBatch').value, trust_remote_code:$('#optRemote').checked};
+    n_train:+$('#optTrain').value, n_test:+$('#optTest').value, layer_range:$('#optRange').value, max_new_tokens:+$('#optTokens').value, batch:+$('#optBatch').value, gen_batch:+$('#optGenBatch').value, trust_remote_code:$('#optRemote').checked,
+    combine:Math.max(0, Math.round(+$('#optCombine').value||0))};
   try{ await api('/pipeline/start', body); S.ES={}; S.events=[]; S.evNext=0; S.logNext=0; $('#console').innerHTML=''; S.runId=null; S.run=null; renderHero(); renderGuide(); updateHeader(); toast('run started'); }catch(e){ toast(e.message, true); }
 };
 $('#stopBtn').onclick=$('#pipeStop').onclick=async()=>{ await api('/pipeline/stop', {}); toast('stopped'); };
@@ -497,16 +535,18 @@ async function serveLoad(){
   let s; try{ s=await api('/serving'); }catch(e){ $('#serveNow').innerHTML=`<div class="small vuln">${esc(e.message)}</div>`; return; }
   const d=s.deployment||{}, cur=s.current;
   const state = d.error ? `unknown (${esc(d.error)})` : `${d.ready||0} of ${d.replicas||0} running`;
-  $('#serveNow').innerHTML = `<div class="row"><b>Now serving</b>${cur ? `<span class="mono">${esc(cur.run_id)}</span><span class="small">${esc(cur.model||'')} · layer ${cur.layer??'–'} · ${esc(cur.action)} ${esc(cur.at)}</span>` : '<span class="small">nothing promoted yet</span>'}</div>`
+  $('#serveNow').innerHTML = `<div class="row"><b>Now serving</b>${cur ? `<span class="mono">${esc(cur.run_id)}</span><span class="small">${esc(cur.model||'')} · ${esc(layerText(cur)||'layer –')} · ${esc(cur.action)} ${esc(cur.at)}</span>` : '<span class="small">nothing promoted yet</span>'}</div>`
     + `<div class="small">engine <span class="mono">${esc(s.mode)}</span>${s.served_name?` · served as <span class="mono">${esc(s.served_name)}</span>`:''} · glm-serve ${state}</div>`
     + (s.busy?`<div class="small">${esc(s.busy)} …</div>`:'') + (s.error?`<div class="small vuln">${esc(s.error)}</div>`:'');
   $('#serveRollback').disabled = !!s.busy || (s.history||[]).length < 2;
   $('#serveInfo').textContent = s.mode==='vllm' ? 'vLLM: Promote points glm-serve at the run and restarts it if it is running' : 'Ollama: Promote publishes the run’s GGUF under the served name';
   const rows=s.candidates||[];
-  $('#serveRuns').innerHTML = rows.length ? `<table><tr><th>run</th><th>model</th><th class="num">layer</th><th>validation</th><th></th></tr>${rows.map(r=>`<tr><td class="mono">${esc(r.run_id)}</td><td>${esc(r.model||'')}</td><td class="num">${r.layer??'–'}</td><td>${esc(r.verdict||'not validated')}</td><td>${cur&&cur.run_id===r.run_id?'<span class="small">serving</span>':`<button class="btn sm" data-promote="${esc(r.run_id)}" ${r.promotable&&!s.busy?'':'disabled'} title="${esc(r.why||'')}">Promote</button>`}</td></tr>`).join('')}</table>` : '<div class="empty">No run has an edited model yet: run Abliterate first.</div>';
+  // the layer column: "15+17+19" for a run that removed the directions of several layers (the header says "layers" then)
+  const layerCell = x => { const l=layersOf(x); return l.length ? esc(layerNums(l)) : '–'; }, layerHead = xs => xs.some(x=>layersOf(x).length>1) ? 'layers' : 'layer';
+  $('#serveRuns').innerHTML = rows.length ? `<table><tr><th>run</th><th>model</th><th class="num">${layerHead(rows)}</th><th>validation</th><th></th></tr>${rows.map(r=>`<tr><td class="mono">${esc(r.run_id)}</td><td>${esc(r.model||'')}</td><td class="num">${layerCell(r)}</td><td>${esc(r.verdict||'not validated')}</td><td>${cur&&cur.run_id===r.run_id?'<span class="small">serving</span>':`<button class="btn sm" data-promote="${esc(r.run_id)}" ${r.promotable&&!s.busy?'':'disabled'} title="${esc(r.why||'')}">Promote</button>`}</td></tr>`).join('')}</table>` : '<div class="empty">No run has an edited model yet: run Abliterate first.</div>';
   $('#serveRuns').querySelectorAll('[data-promote]').forEach(b=>b.onclick=async()=>{ const id=b.dataset.promote; if(!confirm(`Promote run ${id}? The copilot uses it from the next request.`)) return; try{ await api('/serving/promote', {run_id:id}); toast(`run ${id} promoted`); }catch(e){ toast(e.message,true); } serveLoad(); });
   const h=s.history||[];
-  $('#serveHist').innerHTML = h.length ? `<table><tr><th>when</th><th>action</th><th>run</th><th>model</th><th class="num">layer</th></tr>${h.map(e=>`<tr><td class="small">${esc(e.at)}</td><td>${esc(e.action)}</td><td class="mono">${esc(e.run_id)}</td><td>${esc(e.model||'')}</td><td class="num">${e.layer??'–'}</td></tr>`).join('')}</table>` : '<div class="empty">No promotions yet.</div>';
+  $('#serveHist').innerHTML = h.length ? `<table><tr><th>when</th><th>action</th><th>run</th><th>model</th><th class="num">${layerHead(h)}</th></tr>${h.map(e=>`<tr><td class="small">${esc(e.at)}</td><td>${esc(e.action)}</td><td class="mono">${esc(e.run_id)}</td><td>${esc(e.model||'')}</td><td class="num">${layerCell(e)}</td></tr>`).join('')}</table>` : '<div class="empty">No promotions yet.</div>';
 }
 
 // ------------------------------------------------------------------ the kill switch for glm-serve (Kubernetes only)
@@ -582,13 +622,13 @@ async function cpModelsLoad(fresh){
   try{ CP.serving=await api('/serving'); }catch(e){ CP.serving=null; }
   const sv=CP.serving, cur = sv && sv.current;
   $('#cpOpInfo').innerHTML = (m.operator.error ? `<span class="vuln">${esc(m.operator.error)}</span> · ` : '')
-    + (cur ? `glm-serve serves run <span class="mono">${esc(cur.run_id)}</span>${cur.layer!=null?' (layer '+esc(cur.layer)+')':''}` : 'no run promoted yet')
+    + (cur ? `glm-serve serves run <span class="mono">${esc(cur.run_id)}</span>${cur.layer!=null?' ('+esc(layerText(cur))+')':''}` : 'no run promoted yet')
     + ` · <a href="#" id="cpToServing">history and Rollback in Serving</a>`;
   // loading a run = Promote (the same audited path as the Serving panel): vLLM restarts on that run's model,
   // Ollama publishes its GGUF under the served name; the next copilot request uses it
   const cands=(sv && sv.candidates)||[];
   $('#cpLoadRun').innerHTML = cands.length ? cands.map(r=>{ const now=cur&&cur.run_id===r.run_id;
-      return `<option value="${escA(r.run_id)}"${now?' selected':''}${r.promotable||now?'':' disabled'}>${esc(r.run_id)} · ${esc(r.model||'')}${r.layer!=null?' · layer '+esc(r.layer):''} · ${esc(r.verdict||'not validated')}${now?' (serving now)':(r.promotable?'':' · '+esc(r.why||'not loadable'))}</option>`; }).join('')
+      return `<option value="${escA(r.run_id)}"${now?' selected':''}${r.promotable||now?'':' disabled'}>${esc(r.run_id)} · ${esc(r.model||'')}${r.layer!=null?' · '+esc(layerText(r)):''} · ${esc(r.verdict||'not validated')}${now?' (serving now)':(r.promotable?'':' · '+esc(r.why||'not loadable'))}</option>`; }).join('')
     : `<option value="">${sv ? 'no run has an edited model yet: run the pipeline first' : 'loading runs needs the Kubernetes deployment'}</option>`;
   $('#cpLoad').disabled = !cands.some(r=>r.promotable) || !!(sv && sv.busy);
   $('#cpLoadInfo').innerHTML = sv && sv.busy ? `<span class="badge warn">${esc(sv.busy)}</span> glm-serve is switching…` : (sv && sv.error ? `<span class="vuln">${esc(sv.error)}</span>` : '');

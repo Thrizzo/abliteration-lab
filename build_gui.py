@@ -27,7 +27,9 @@ def main():
     with open(out, "w", encoding="utf-8") as f:
         f.write(tpl.replace("/*__DATA__*/", blob))
     n = len(data["scan"]["prompts"])
-    print(f"built {out} ({os.path.getsize(out) / 1e6:.2f} MB), layer {data['choice']['layer']}, "
+    several = data["choice"].get("layers") or []
+    chosen = f"layers {'+'.join(str(x) for x in sorted(several))}" if len(several) > 1 else f"layer {data['choice']['layer']}"
+    print(f"built {out} ({os.path.getsize(out) / 1e6:.2f} MB), {chosen}, "
           f"baseline {data['scan']['n_base']}/{n} -> after edit {data['apply']['n_after']}/{n}")
 
 

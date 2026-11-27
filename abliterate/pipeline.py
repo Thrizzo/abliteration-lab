@@ -1,10 +1,13 @@
 r"""The pipeline: download -> inspect -> load -> measure -> scan -> choose -> apply -> verify -> validate -> gguf -> ollama.
 Writes the same artifacts as the notebook run (layer_analysis.json, baseline.json, scan_results.json, generations.json,
-validation.json, means.pt, refusal_dirs.pt) plus run.json and events.jsonl (one JSON event per line, for the app).
+validation.json, means.pt, refusal_dirs.pt) plus run.json and events.jsonl (one JSON event per line, for the app), and
+scan.json with --combine (the best layers tested together).
 
     python -m abliterate --model THUDM/glm-edge-4b-chat
     python -m abliterate --model THUDM/glm-edge-4b-chat --pause-at-choice          # stops after the scan
     python -m abliterate --run-dir runs/abliterate_<ts> --stage continue --layer 17   # resumes with that layer
+    python -m abliterate --run-dir runs/abliterate_<ts> --stage continue --layers 15,17,19   # removes all three directions
+    python -m abliterate --model THUDM/glm-edge-4b-chat --combine 3                # also tests the best 2 and 3 layers together
     python -m abliterate --model zai-org/GLM-5.2 --device-map auto --skip-verify --no-ollama
     python -m abliterate --model THUDM/glm-edge-1.5b-chat --device-map cpu          # no GPU: everything on the CPU, slower
 """
@@ -13,6 +16,7 @@ import gc
 import glob
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -20,6 +24,8 @@ from datetime import datetime
 
 from . import arch as A
 from . import data as D
+
+CJK_MAX = 0.2               # the CJK rule: answers with a larger share of Chinese characters count as damaged
 
 
 class Run:
@@ -57,6 +63,36 @@ class Run:
 
 def slug_of(repo):
     return repo.rstrip("/").split("/")[-1].lower()
+
+
+class UsageError(Exception):
+    """A choice that does not fit the run (a layer the model does not have): reported without a traceback."""
+
+
+def parse_layers(text):
+    """--layers: "15,17,19", ranges such as "15-19", or both ("12,15-17") -> the layers in the order given, each once."""
+    out = []
+    for part in str(text).replace(" ", "").split(","):
+        m = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
+        if not m:
+            raise argparse.ArgumentTypeError(f"not a list of layers: {text!r} (e.g. 15,17,19 or 15-19)")
+        lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+        if hi < lo or hi - lo > 4096:
+            raise argparse.ArgumentTypeError(f"not a range of layers: {part!r} (e.g. 15-19)")
+        out += [layer for layer in range(lo, hi + 1) if layer not in out]
+    return out
+
+
+def check_layers(layers, n_layers):
+    """Every chosen layer needs a direction: 0 <= layer < n_layers."""
+    bad = [layer for layer in layers if not 0 <= layer < n_layers]
+    if bad:
+        raise UsageError(f"layer {', '.join(map(str, bad))} does not exist: this model has layers 0 to {n_layers - 1}")
+
+
+def layers_label(layers):
+    """'layer 17', or 'layers 15+17+19' when the directions of several layers are removed together."""
+    return f"layer {layers[0]}" if len(layers) == 1 else "layers " + "+".join(str(layer) for layer in sorted(layers))
 
 
 # ----------------------------------------------------------------------------- steps
@@ -160,33 +196,96 @@ def step_scan(run, hm, args, prompts, dirs, la):
         run.event("scan", "layer", layer=l, refusals=nref, cjk_ratio=round(cjk, 3), seconds=round(time.time() - t, 1), generations=gens)
     scan.sort(key=lambda x: (x["refusals"], x["cjk_ratio"], x["layer"]))
     run.save("scan_results.json", scan)
-    run.event("scan", "done", top=[(s["layer"], s["refusals"]) for s in scan[:5]])
-    return scan, baseline, n_base
+    combos = scan_combos(run, hm, args, harmful_test, dirs, scan) if getattr(args, "combine", 0) >= 2 else None
+    run.event("scan", "done", top=[(s["layer"], s["refusals"]) for s in scan[:5]],
+              **({"combos": [(c["layers"], c["refusals"]) for c in combos]} if combos else {}))
+    return scan, baseline, n_base, combos
+
+
+def scan_combos(run, hm, args, prompts, dirs, scan):
+    """--combine K: after the single-layer scan, the best 2, 3, ..., K layers (combo_layers) get one more generation
+    pass each, with the subspace their directions span removed (HookedModel.ablated with a [k, d] matrix). The results
+    go to scan.json under "combos"; choose_layers decides whether one of them beats the best single layer."""
+    sets = combo_layers(scan, args.combine)
+    run.log(f"scan: testing the best layers together: {', '.join(layers_label(c) for c in sets) or 'nothing to combine'}")
+    combos = []
+    for layers in sets:
+        t = time.time()
+        gens = hm.generate(prompts, args.max_new_tokens, args.gen_batch, direction=dirs[layers])
+        nref = D.count_refusals(gens)
+        cjk = sum(D.cjk_ratio(g) for g in gens) / len(gens)
+        combos.append({"layers": layers, "refusals": nref, "cjk": round(cjk, 3), "generations": gens})
+        run.log(f"scan: {layers_label(layers)} | {nref}/{len(prompts)} refusals | cjk {cjk:.2f} | {time.time() - t:4.1f}s | {gens[0][:70]!r}")
+        run.event("scan", "combo", layers=layers, refusals=nref, cjk=round(cjk, 3), seconds=round(time.time() - t, 1), generations=gens)
+    best = next(s for s in scan if s["layer"] == choose_layer(scan))
+    run.save("scan.json", {"combine": args.combine, "best_single": {k: best[k] for k in ("layer", "refusals", "cjk_ratio")},
+                           "combos": combos, "recommended": choose_layers(scan, combos)})
+    return combos
+
+
+def rank_layers(scan):
+    """Single-layer scan results, best first, as the rule ranks them: the layers that pass the CJK rule first, then
+    fewest refusals, then the lower share of Chinese characters, then the earlier layer. The first is choose_layer's."""
+    return sorted(scan, key=lambda s: (s["cjk_ratio"] > CJK_MAX, s["refusals"], s["cjk_ratio"], s["layer"]))
+
+
+def combo_layers(scan, k_max):
+    """The layer sets --combine K tests: the best 2, 3, ..., K layers of the ranking (fewer when fewer were scanned),
+    each in the ranking's order, best layer first."""
+    ranked = [s["layer"] for s in rank_layers(scan)]
+    return [ranked[:k] for k in range(2, min(k_max, len(ranked)) + 1)]
 
 
 def choose_layer(scan):
-    ok = [s for s in scan if s["cjk_ratio"] <= 0.2] or scan
+    ok = [s for s in scan if s["cjk_ratio"] <= CJK_MAX] or scan
     return min(ok, key=lambda s: (s["refusals"], s["cjk_ratio"], s["layer"]))["layer"]
 
 
-def step_apply(run, args, model_dir, out_dir, dirs, layer, info):
+def choose_layers(scan, combos=None):
+    """The rule's recommendation as a list of layers: the best single layer (choose_layer), or a combination from the
+    --combine pass if it leaves strictly fewer refusals than that layer and passes the CJK rule. Among several such
+    combinations: fewest refusals, then the lower share of Chinese characters, then fewer layers."""
+    best = next(s for s in scan if s["layer"] == choose_layer(scan))
+    better = [c for c in combos or [] if c["refusals"] < best["refusals"] and c["cjk"] <= CJK_MAX]
+    if not better:
+        return [best["layer"]]
+    return list(min(better, key=lambda c: (c["refusals"], c["cjk"], len(c["layers"])))["layers"])
+
+
+def scan_refusals(layers, scan, combos=None):
+    """What the scan counted for this choice: the single layer's refusals, or the tested combination's of the same layers."""
+    if len(layers) == 1:
+        return next((s["refusals"] for s in scan or [] if s["layer"] == layers[0]), None)
+    return next((c["refusals"] for c in combos or [] if sorted(c["layers"]) == sorted(layers)), None)
+
+
+def step_apply(run, args, model_dir, out_dir, dirs, layers, info):
+    """The weight edit with one layer's direction, or with the subspace the directions of several layers span: the
+    editor turns the unit directions into an orthonormal basis Q (edit.basis). refusal_direction.pt in the edited
+    model's folder keeps the directions (one [d], several [k, d]) and Q next to them."""
     import torch
     from .edit import Editor
-    direction = dirs[layer].clone()
-    run.event("apply", "start", layer=layer, out_dir=out_dir, post_norm=info["post_norm"], moe=info["moe"])
+    direction = dirs[layers[0]].clone() if len(layers) == 1 else dirs[layers].clone()
+    run.event("apply", "start", layer=layers[0], layers=layers, out_dir=out_dir, post_norm=info["post_norm"], moe=info["moe"])
     if os.path.isdir(out_dir):
         shutil.rmtree(out_dir)
     ed = Editor(model_dir, out_dir, direction, post_norm=info["post_norm"], log=run.log,
-                progress=lambda i, n, dt: run.event("apply", "progress", shard=i, shards=n, seconds=round(dt, 1)))
+                progress=lambda i, n, dt: run.event("apply", "progress", shard=i, shards=n, seconds=round(dt, 1)),
+                names=[f"layer {layer}" for layer in layers])
+    dropped = [layer for i, layer in enumerate(layers) if i not in ed.kept]
+    if len(layers) > 1:
+        run.log(f"apply: {layers_label(layers)}: the subspace of {ed.Q.shape[1]} orthonormal directions (QR of the unit directions)")
     stats = ed.run()
-    torch.save({"layer": layer, "direction": direction}, os.path.join(out_dir, "refusal_direction.pt"))
-    run.save("apply.json", {"layer": layer, **{k: v for k, v in stats.items() if k != "changed"}, "changed_preview": stats["changed"][:20]})
-    run.update_meta(layer=layer, out_dir=out_dir)
-    run.event("apply", "done", layer=layer, n_changed=stats["n_changed"], kinds=stats["kinds"], max_rw=stats["max_rw"], fp8=stats["fp8"], folded=stats["folded"], seconds=stats["seconds"])
+    torch.save({"layer": layers[0], "layers": layers, "direction": direction, "basis": ed.Q}, os.path.join(out_dir, "refusal_direction.pt"))
+    run.save("apply.json", {"layer": layers[0], "layers": layers, **({"dropped": dropped} if dropped else {}),
+                            **{k: v for k, v in stats.items() if k != "changed"}, "changed_preview": stats["changed"][:20]})
+    run.update_meta(layer=layers[0], layers=layers, out_dir=out_dir)
+    run.event("apply", "done", layer=layers[0], layers=layers, directions=stats["directions"], n_changed=stats["n_changed"], kinds=stats["kinds"],
+              max_rw=stats["max_rw"], fp8=stats["fp8"], folded=stats["folded"], seconds=stats["seconds"], **({"dropped": dropped} if dropped else {}))
     return direction
 
 
-def step_verify_and_validate(run, args, model_dir, out_dir, direction, layer, prompts, baseline, scan, info):
+def step_verify_and_validate(run, args, model_dir, out_dir, direction, layers, prompts, baseline, scan, info, combos=None):
     """Reloads base and edited model from disk (one at a time), behaviour + weight checks."""
     import torch
     from .hooks import HookedModel, load_model, resolve_device
@@ -204,16 +303,17 @@ def step_verify_and_validate(run, args, model_dir, out_dir, direction, layer, pr
                         "logits": hm.next_token_logits(harmless_test)}
         del hm, m; gc.collect(); torch.cuda.empty_cache()
     n_after = D.count_refusals(results["abl"]["harmful"])
-    run.save("generations.json", {"prompts": harmful_test, "baseline": baseline, "layer": layer, "after_orthogonalization": results["abl"]["harmful"]})
-    chosen = next((s["refusals"] for s in scan if s["layer"] == layer), None)
-    run.log(f"verify: after the edit {n_after}/{len(harmful_test)} refusals (scan for layer {layer}: {chosen})")
+    run.save("generations.json", {"prompts": harmful_test, "baseline": baseline, "layer": layers[0], "layers": layers,
+                                  "after_orthogonalization": results["abl"]["harmful"]})
+    chosen = scan_refusals(layers, scan, combos)
+    run.log(f"verify: after the edit {n_after}/{len(harmful_test)} refusals (scan for {layers_label(layers)}: {chosen})")
     run.event("verify", "done", n_after=n_after, scan_refusals=chosen, after=results["abl"]["harmful"])
     checks, kl = behaviour_checks(results["base"], results["abl"], len(harmful_test), info["post_norm"])
     run.event("validate", "progress", stage="comparing weights")
-    cmp = compare_weights(model_dir, out_dir, direction, run.log, post_norm=info["post_norm"])
+    cmp = compare_weights(model_dir, out_dir, direction, run.log, post_norm=info["post_norm"])      # several layers: their subspace
     checks += weight_checks(cmp, expected_targets(model_dir), info["post_norm"])
     verdict = "FAIL" if any(c[2] == "FAIL" for c in checks) else ("WARN" if any(c[2] == "WARN" for c in checks) else "PASS")
-    report = {"verdict": verdict, "layer": layer, "checks": [dict(zip(("check", "result", "status", "why"), c)) for c in checks],
+    report = {"verdict": verdict, "layer": layers[0], "layers": layers, "checks": [dict(zip(("check", "result", "status", "why"), c)) for c in checks],
               "examples": [{"prompt": p, "base": b, "abliterated": a} for p, b, a in zip(harmful_test, results["base"]["harmful"], results["abl"]["harmful"])]}
     run.save("validation.json", report)
     run.save("validation_details.json", {"eval_harmless": harmless_test, "base_harmless": results["base"]["harmless"], "abl_harmless": results["abl"]["harmless"],
@@ -277,7 +377,12 @@ def main(argv=None):
     ap.add_argument("--run-dir", help="existing run folder to resume (stage continue/apply/validate/deploy)")
     ap.add_argument("--stage", default="all", choices=["all", "download", "measure", "scan", "continue", "apply", "validate", "deploy"])
     ap.add_argument("--layer", type=int, help="layer whose direction to apply (default: scan rule)")
-    ap.add_argument("--pause-at-choice", action="store_true", help="stop after the scan and wait for --stage continue --layer N")
+    ap.add_argument("--layers", type=parse_layers, help="instead of --layer: several layers whose directions are removed together "
+                                                         "(the subspace they span), e.g. 15,17,19 or 15-19")
+    ap.add_argument("--combine", type=int, default=0, metavar="K", help="after the scan, also test the best 2..K layers together "
+                                                                         "(one generation pass each, into scan.json; default 0: off)")
+    ap.add_argument("--pause-at-choice", action="store_true", help="stop after the scan and wait for --stage continue --layer N "
+                                                                    "(or --layers A,B,...)")
     ap.add_argument("--n-train", type=int, default=256); ap.add_argument("--n-test", type=int, default=16)
     ap.add_argument("--batch", type=int, default=16); ap.add_argument("--gen-batch", type=int, default=4)
     ap.add_argument("--max-new-tokens", type=int, default=64); ap.add_argument("--layer-range", default="0.2-0.8")
@@ -289,6 +394,11 @@ def main(argv=None):
     ap.add_argument("--out-dir", help="where the edited model goes (default: out/<slug>-abliterated; a resumed run keeps its own). "
                                         "The Kubernetes console passes <run>/model, so every run keeps its own copy for Promote / Rollback")
     args = ap.parse_args(argv)
+    if args.layer is not None and args.layers:
+        ap.error("--layer and --layers: give one of them")
+    if args.combine < 0:
+        ap.error("--combine takes 0 (off) or the number of best layers to test together")
+    picked = args.layers or ([args.layer] if args.layer is not None else None)          # the user's choice, if any
     project = os.path.abspath(args.project)
     os.chdir(project)
 
@@ -313,6 +423,8 @@ def main(argv=None):
     try:
         model_dir = step_download(run, model_repo, os.path.join(project, "models"), args.hf_token)
         info = step_inspect(run, model_dir)
+        if picked and info.get("n_layers"):
+            check_layers(picked, info["n_layers"])          # now, not after hours of measuring and scanning
         out_dir = os.path.abspath(args.out_dir) if args.out_dir else (run.meta.get("out_dir") or os.path.join(project, "out", f"{slug}-abliterated"))
         run.update_meta(model_dir=model_dir, out_dir=out_dir)
         data_dir = os.path.join(project, "data")
@@ -324,7 +436,7 @@ def main(argv=None):
         run.event("data", "done", n_train=len(prompts[0]), n_test=len(prompts[1]))
 
         import torch
-        dirs = la = scan = baseline = None
+        dirs = la = scan = baseline = combos = None
         if args.stage in ("all", "measure", "scan"):
             from .hooks import HookedModel, load_model, resolve_device
             device_map, dtype = resolve_device(args.device_map, args.dtype, run.log)      # e.g. cuda -> cpu and auto -> float32 without a GPU
@@ -336,39 +448,51 @@ def main(argv=None):
             dirs, la = step_measure(run, hm, args, prompts)
             if args.stage == "measure":
                 run.update_meta(status="done"); return
-            scan, baseline, n_base = step_scan(run, hm, args, prompts, dirs, la)
+            scan, baseline, n_base, combos = step_scan(run, hm, args, prompts, dirs, la)
             del hm, m; gc.collect(); torch.cuda.empty_cache()
             if args.stage == "scan" or args.pause_at_choice:
-                run.update_meta(status="awaiting_choice", recommended=choose_layer(scan))
-                run.event("choose", "waiting", recommended=choose_layer(scan))
-                run.log(f"paused after the scan - recommended layer {choose_layer(scan)}; resume with --run-dir {run.run_dir} --stage continue --layer N")
+                # "recommended" stays one layer for older readers (the first of a combination); recommended_layers is all of it
+                rec = choose_layers(scan, combos)
+                run.update_meta(status="awaiting_choice", recommended=rec[0], recommended_layers=rec)
+                run.event("choose", "waiting", recommended=rec[0], recommended_layers=rec)
+                run.log(f"paused after the scan - recommended {layers_label(rec)}; resume with --run-dir {run.run_dir} --stage continue "
+                        f"--layer N (or --layers A,B,...)")
                 return
         else:
             dirs = torch.load(os.path.join(run.run_dir, "refusal_dirs.pt"))
             la, scan = run.load("layer_analysis.json"), run.load("scan_results.json")
+            combos = (run.load("scan.json") or {}).get("combos")
             baseline = (run.load("baseline.json") or {}).get("baseline")
 
         if args.stage in ("all", "continue", "apply"):
-            layer = args.layer if args.layer is not None else choose_layer(scan)
-            run.event("choose", "done", layer=layer, recommended=choose_layer(scan), by="user" if args.layer is not None else "rule")
-            direction = step_apply(run, args, model_dir, out_dir, dirs, layer, info)
+            rec = choose_layers(scan, combos)
+            layers = picked or rec
+            check_layers(layers, dirs.shape[0])
+            run.event("choose", "done", layer=layers[0], layers=layers, recommended=rec[0], recommended_layers=rec, by="user" if picked else "rule")
+            direction = step_apply(run, args, model_dir, out_dir, dirs, layers, info)
             if args.stage == "apply":
                 run.update_meta(status="done"); return
         else:
-            layer = args.layer if args.layer is not None else run.meta.get("layer")
-            direction = torch.load(os.path.join(out_dir, "refusal_direction.pt"))["direction"]
+            saved = torch.load(os.path.join(out_dir, "refusal_direction.pt"))          # one direction [d], or several [k, d]
+            direction = saved["direction"]
+            layers = picked or saved.get("layers") or [saved.get("layer", run.meta.get("layer"))]
 
         if args.stage in ("all", "continue", "validate") and not args.skip_verify:
-            step_verify_and_validate(run, args, model_dir, out_dir, direction, layer, prompts, baseline, scan, info)
+            step_verify_and_validate(run, args, model_dir, out_dir, direction, layers, prompts, baseline, scan, info, combos)
             if args.stage == "validate":
                 run.update_meta(status="done"); return
         if not args.no_ollama and args.stage in ("all", "continue", "deploy"):
             step_deploy(run, args, project, model_dir, out_dir, slug, prompts)
         run.update_meta(status="done")
-        run.event("done", "done", layer=layer, out_dir=out_dir)
+        run.event("done", "done", layer=layers[0], layers=layers, out_dir=out_dir)
         run.log("done")
     except SystemExit:
         raise
+    except UsageError as e:
+        run.log(f"ERROR {e}")
+        run.update_meta(status="error", error=str(e))
+        run.event("error", "error", message=str(e))
+        raise SystemExit(2)
     except KeyboardInterrupt:
         run.update_meta(status="stopped"); run.event("error", "stopped"); raise
     except Exception as e:

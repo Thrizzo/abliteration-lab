@@ -408,6 +408,8 @@ class Start(BaseModel):
     model: str | None = None
     run_id: str | None = None
     layer: int | None = None
+    layers: list[int] | None = None     # instead of layer: several layers whose directions are removed together (--layers)
+    combine: int = 0                    # the scan also tests the best 2..combine layers together (--combine; 0: off)
     pause_at_choice: bool = False
     no_ollama: bool = False
     skip_verify: bool = False
@@ -429,7 +431,18 @@ def pipeline_start(s: Start):
     for name, val in (("layer_range", s.layer_range), ("quantize", s.quantize), ("dtype", s.dtype), ("device_map", s.device_map), ("model", s.model or "")):
         if not re.fullmatch(r"[\w.\-/:]*", val):
             raise HTTPException(400, f"bad {name}")
+    if s.layers is not None:
+        if s.layer is not None:
+            raise HTTPException(400, "give layer or layers, not both")
+        if not s.layers or len(s.layers) > 64 or any(not 0 <= x < 10000 for x in s.layers):
+            raise HTTPException(400, "bad layers: one to 64 layer numbers (the pipeline checks them against the model)")
+    if not 0 <= s.combine <= 16:
+        raise HTTPException(400, "bad combine: 0 (off) to 16 layers")
     if s.engine == "notebook":
+        if (s.layers and len(s.layers) > 1) or s.combine:
+            raise HTTPException(400, "the notebook engine applies one layer; several layers need engine=abliterate")
+        if s.layers:
+            s.layer = s.layers[0]
         if os.name != "nt" or os.environ.get("ABL_NOTEBOOK_ENGINE") == "0":
             raise HTTPException(400, "the notebook engine (run_pipeline.py / TransformerLens) is Windows-only; use engine=abliterate")
         if s.stage not in NOTEBOOK_STAGES:
@@ -455,6 +468,10 @@ def pipeline_start(s: Start):
         cmd += ["--run-dir", run_dir]
     if s.layer is not None:
         cmd += ["--layer", str(s.layer)]
+    if s.layers:
+        cmd += ["--layers", ",".join(str(x) for x in s.layers)]
+    if s.combine:
+        cmd += ["--combine", str(s.combine)]
     for flag, on in (("--pause-at-choice", s.pause_at_choice), ("--no-ollama", s.no_ollama), ("--skip-verify", s.skip_verify), ("--trust-remote-code", s.trust_remote_code)):
         if on:
             cmd.append(flag)

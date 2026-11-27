@@ -170,6 +170,8 @@ class JobPipeline:
         return self.thread is not None and self.thread.is_alive()
 
     def start(self, cmd, engine, stage, run_dir=None, env_extra=None):
+        """cmd: the pipeline's command line as the console built it (with --layer or --layers, --combine), unchanged as
+        the Job's container command; a new run gets its folders appended."""
         if self.running():
             raise self.http_error(409, f"'{self.stage}' is still running")
         if engine != "abliterate":
@@ -492,8 +494,9 @@ class Serving:
                 ok, why = bool(gguf and os.path.isfile(gguf)), "run the deploy stage first: it builds the GGUF Ollama serves"
             else:
                 ok, why = True, ""
+            # layers: all layers whose directions the edit removed (runs before several directions have "layer" only)
             out.append({"run_id": d.replace("abliterate_", ""), "model": meta.get("model_repo"), "layer": meta.get("layer"),
-                        "status": meta.get("status"), "verdict": val, "path": out_dir, "gguf": gguf, "model_dir": meta.get("model_dir"),
+                        "layers": meta.get("layers"), "status": meta.get("status"), "verdict": val, "path": out_dir, "gguf": gguf, "model_dir": meta.get("model_dir"),
                         "promotable": ok, "why": "" if ok else why})
         return out
 
@@ -521,6 +524,8 @@ class Serving:
                 raise self.http_error(409, c["why"])
             entry = {"run_id": run_id, "path": c["path"], "model": c["model"], "layer": c["layer"], "action": action,
                      "at": datetime.now().isoformat(timespec="seconds"), "by": by}
+            if c.get("layers"):
+                entry["layers"] = c["layers"]
             self.error = None
             if self.mode == "vllm":
                 cm = self.sv.get("configmap", "glm-serve")

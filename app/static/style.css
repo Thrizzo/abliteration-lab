@@ -365,4 +365,7 @@ textarea.mono,input.mono{font-family:var(--mono);font-size:12.5px}
 /* the serving and SBOM tables scroll inside their card too, so their panel does not; a long reason or error URL wraps in
    the audit log's result column instead of widening the table */
 #serveRuns,#serveHist,#auditList,#ctlResult,#sbomModules,#sbomPackages,#sbomExtra{overflow-x:auto}
+/* the scan's combinations of layers scroll inside their step too; the earlier runs' list ("layers 15+17+19") fits its card */
+.combos{overflow-x:auto}
+#runSel{max-width:100%}
 #auditList td:nth-child(3){overflow-wrap:anywhere;min-width:12em}

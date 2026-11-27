@@ -260,6 +260,10 @@ const tip = $('#tip');
 function showTip(e, html){ tip.innerHTML = html; tip.style.display='block'; tip.style.left = (e.clientX+14)+'px'; tip.style.top = (e.clientY+14)+'px'; }
 function hideTip(){ tip.style.display='none'; }
 const fmt = (x, d=1) => (x==null||isNaN(x)) ? '–' : Number(x).toFixed(d);
+// the applied layers: one, or several whose directions were removed together (runs from before that have "layer" only)
+const CHOSEN = (D.choice.layers && D.choice.layers.length) ? D.choice.layers : [D.choice.layer];
+const CHOSEN_NUMS = [...CHOSEN].sort((a,b)=>a-b).join('+'), SEVERAL = CHOSEN.length > 1;
+const CHOSEN_TXT = SEVERAL ? `layers ${CHOSEN_NUMS}` : `layer ${D.choice.layer}`;
 
 // ---------------------------------------------------------------- navigation
 const STEPS = ['Overview','1 · Measure','2 · Stability','3 · Scan','4 · Choose','5 · Apply','6 · Validate','7 · Live A/B'];
@@ -290,7 +294,7 @@ $('#list-s').innerHTML = D.prompts.harmless_train_examples.slice(0,8).map(p=>`<d
 $('#markers').innerHTML = MARKERS.map(m=>`<code>${esc(m)}</code> `).join('');
 $('#facts').innerHTML = [[D.model.name,'model'],[NL,'layers'],[D.model.d_model,'residual dimensions'],[D.config.n_inst_train+' + '+D.config.n_inst_train,'harmful + harmless prompts measured'],[D.config.n_inst_test,'held-out test prompts'],[D.config.dtype||'bfloat16','precision']]
   .map(([v,l])=>`<div class="stat"><div class="v">${esc(v)}</div><div class="l">${l}</div></div>`).join('');
-$('#foot').textContent = `Run folder: ${D.run_dir} · chosen layer ${D.choice.layer} · generated ${D.generated}`;
+$('#foot').textContent = `Run folder: ${D.run_dir} · chosen ${CHOSEN_TXT} · generated ${D.generated}`;
 
 // ---------------------------------------------------------------- chart helper
 function barChart(el, values, opts){
@@ -351,7 +355,7 @@ drawSep();
   s+=`<text class="tick" x="${(pl+W)/2}" y="${H-3}" text-anchor="middle" style="fill:var(--ink2)">layer</text></svg>`;
   $('#chartSim').innerHTML = s;
   $('#chartSim').querySelectorAll('rect[data-r]').forEach(r=>{ r.addEventListener('mousemove', e=>showTip(e, `layer ${r.dataset.r} vs layer ${r.dataset.c}\nsimilarity ${fmt(S[+r.dataset.r][+r.dataset.c],2)}`)); r.addEventListener('mouseleave', hideTip); });
-  $('#narrSim').innerHTML = `Strongest separation in <b>layer ${M.peak}</b>. Layers <b>${st[0]}–${st[st.length-1]}</b> (outlined) have a similarity above 0.8 with it: one stable direction over ${st.length} layers. The chosen layer ${D.choice.layer} ${st.includes(D.choice.layer)?'lies inside this block.':'lies outside this block.'}`;
+  $('#narrSim').innerHTML = `Strongest separation in <b>layer ${M.peak}</b>. Layers <b>${st[0]}–${st[st.length-1]}</b> (outlined) have a similarity above 0.8 with it: one stable direction over ${st.length} layers. ${SEVERAL ? `The chosen layers ${CHOSEN_NUMS} ${CHOSEN.every(l=>st.includes(l))?'lie inside this block.':'do not all lie inside this block.'}` : `The chosen layer ${D.choice.layer} ${st.includes(D.choice.layer)?'lies inside this block.':'lies outside this block.'}`}`;
   const nx = M.cos_next.slice(0,-1);
   barChart($('#chartNext'), nx, {max:1.05, height:230, ticks:2, fmtY:v=>fmt(v,1), aria:'Similarity between neighbouring layers', xlab:i=>i,
     xlabel:'layer L (compared with L+1)', ylabel:'cosine similarity', cls:i=>(i<lo||i>hi?'out':''), tip:i=>`layer ${i} vs ${i+1}: ${fmt(nx[i],3)}`});
@@ -367,7 +371,7 @@ function drawScan(){
   const vals = layers.map((l,i)=> i<=revealed ? byLayer[l].refusals : null);
   $('#layerStrip').innerHTML = Array.from({length:NL},(_,l)=>{ const i=layers.indexOf(l); return `<div class="${i>=0&&i<=revealed?'on':''} ${i===revealed?'now':''}" title="layer ${l}">${l}</div>`; }).join('');
   barChart($('#chartScan'), vals, {max: NT+1, ticks: Math.min(NT,8), height:250, aria:'Refusals per scanned layer', xlab:i=>layers[i],
-    cls:(i)=> (layers[i]===D.choice.layer?'chosen':(byLayer[layers[i]].cjk_ratio>0.2?'cjk':'')) + (i===revealed?' sel':''),
+    cls:(i)=> (CHOSEN.includes(layers[i])?'chosen':(byLayer[layers[i]].cjk_ratio>0.2?'cjk':'')) + (i===revealed?' sel':''),
     hline: SC.n_base, hlineLabel:`baseline ${SC.n_base}/${NT}`, xlabel:'layer the direction was taken from', ylabel:`refusals (of ${NT})`,
     tip:i=>{const r=byLayer[layers[i]]; return `direction from layer ${layers[i]}\n${r.refusals}/${NT} refusals · Chinese share ${fmt(r.cjk_ratio*100,0)}%\nfirst answer: ${(r.generations[0]||'').slice(0,90)}…`;},
     click:i=>{ clearInterval(scanTimer); revealed=i; slider.value=i; drawScan(); }});
@@ -377,7 +381,7 @@ function drawScan(){
     return; }
   const l = layers[revealed], r = byLayer[l], best = Math.min(...layers.slice(0,revealed+1).map(x=>byLayer[x].refusals));
   $('#scanLayerLabel').textContent = l;
-  $('#narrScan').innerHTML = `<b>Layer ${l}</b>: removing this layer's direction from every layer leaves <b>${r.refusals}/${NT}</b> refusals (baseline ${SC.n_base}). ${r.cjk_ratio>0.2?'<b>Warning:</b> answers are largely Chinese, a sign of damage. ':''}${r.refusals===best?'Best so far. ':''}${l===D.choice.layer?'<b>This is the layer that was chosen.</b> ':''}Read the answers below: do they stay on topic and coherent?`;
+  $('#narrScan').innerHTML = `<b>Layer ${l}</b>: removing this layer's direction from every layer leaves <b>${r.refusals}/${NT}</b> refusals (baseline ${SC.n_base}). ${r.cjk_ratio>0.2?'<b>Warning:</b> answers are largely Chinese, a sign of damage. ':''}${r.refusals===best?'Best so far. ':''}${CHOSEN.includes(l)?(SEVERAL?`<b>One of the chosen layers (${CHOSEN_NUMS}).</b> `:'<b>This is the layer that was chosen.</b> '):''}Read the answers below: do they stay on topic and coherent?`;
   $('#genTitle').textContent = `Answers with the direction from layer ${l} removed — ${r.refusals}/${NT} refusals`;
   $('#gens').innerHTML = SC.prompts.map((p,i)=>`<div class="prompt"><span class="i">${i+1}</span>${esc(p)}</div><div class="pair">${answerBox('original model (baseline)', SC.baseline[i])}${answerBox(`direction from layer ${l} removed`, r.generations[i])}</div>`).join('');
 }
@@ -389,12 +393,14 @@ drawScan();
 
 // ---------------------------------------------------------------- 4 choose
 (function(){
-  const c = D.choice, r = byLayer[c.layer];
-  $('#choiceStats').innerHTML = [[c.layer,'chosen layer'],[`${r?r.refusals:'?'}/${NT}`,'refusals in the scan'],[`${SC.n_base}/${NT}`,'baseline refusals'],[r?fmt(r.cjk_ratio*100,0)+'%':'?','Chinese characters']]
+  // several layers: the scan's numbers are those of the same combination tested with --combine, if it was
+  const c = D.choice, combo = (SC.combos||[]).find(x=>[...x.layers].sort((a,b)=>a-b).join('+')===CHOSEN_NUMS);
+  const r = SEVERAL ? (combo && {refusals: combo.refusals, cjk_ratio: combo.cjk}) : byLayer[c.layer];
+  $('#choiceStats').innerHTML = [[SEVERAL?CHOSEN_NUMS:c.layer, SEVERAL?'chosen layers':'chosen layer'],[`${r?r.refusals:'?'}/${NT}`,'refusals in the scan'],[`${SC.n_base}/${NT}`,'baseline refusals'],[r?fmt(r.cjk_ratio*100,0)+'%':'?','Chinese characters']]
     .map(([v,l])=>`<div class="stat"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
   const sorted = [...SC.layers].sort((a,b)=>a.layer-b.layer);
   $('#tableScan').innerHTML = '<tr><th>layer</th><th class="num">refusals</th><th class="num">Chinese</th><th class="num">raw length</th><th>first answer</th><th></th></tr>' +
-    sorted.map(s=>`<tr class="${s.layer===c.layer?'chosen':''}"><td>${s.layer}</td><td class="num">${s.refusals}/${NT}</td><td class="num">${fmt(s.cjk_ratio*100,0)}%</td><td class="num">${fmt(s.norm,2)}</td><td class="small">${esc((s.generations[0]||'').slice(0,110))}…</td><td>${s.layer===c.layer?'<span class="badge pass">chosen</span>':''}${s.cjk_ratio>0.2?' <span class="badge cjk">Chinese</span>':''}</td></tr>`).join('');
+    sorted.map(s=>`<tr class="${CHOSEN.includes(s.layer)?'chosen':''}"><td>${s.layer}</td><td class="num">${s.refusals}/${NT}</td><td class="num">${fmt(s.cjk_ratio*100,0)}%</td><td class="num">${fmt(s.norm,2)}</td><td class="small">${esc((s.generations[0]||'').slice(0,110))}…</td><td>${CHOSEN.includes(s.layer)?'<span class="badge pass">chosen</span>':''}${s.cjk_ratio>0.2?' <span class="badge cjk">Chinese</span>':''}</td></tr>`).join('');
 })();
 
 // ---------------------------------------------------------------- 5 apply

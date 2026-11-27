@@ -325,6 +325,17 @@ class TestJobs(Base):
         self.assertNotIn("lab-egress-model", j["metadata"]["labels"])
         self.assertNotIn("--out-dir", j["spec"]["template"]["spec"]["containers"][0]["command"])   # resumed run: from run.json
 
+    def test_the_layer_choice_reaches_the_job_unchanged(self):
+        # several layers (--layers) and the scan's combinations (--combine) are the pipeline's own arguments: the Job runs them
+        for stage, args in (("continue", ["--stage", "continue", "--run-dir", "runs/abliterate_1_1", "--layers", "15,17,19"]),
+                            ("scan", ["--stage", "scan", "--model", "m", "--combine", "3"])):
+            with self.subTest(stage=stage):
+                self.api.requests.clear()
+                self.pl.start(PY + args, "abliterate", stage, "runs/abliterate_1_1" if stage == "continue" else None)
+                wait_done(self.pl)
+                cmd = self.posted_job()["spec"]["template"]["spec"]["containers"][0]["command"]
+                self.assertEqual(cmd[:len(PY) + len(args)], PY + args)
+
     def test_log_lines_events_and_exit_code(self):
         ev = json.dumps({"t": 1, "step": "scan", "status": "progress", "layer": 3})
         self.api.pod_plan["*"] = {"phases": ["Running"], "exit": 0, "logs": [[
@@ -438,13 +449,15 @@ class TestJobs(Base):
 
 
 class TestServing(Base):
-    def make_run(self, rid, with_model=True, gguf=False, layer=7):
+    def make_run(self, rid, with_model=True, gguf=False, layer=7, layers=None):
         d = os.path.join(self.project, "runs", f"abliterate_{rid}")
         out = os.path.join(d, "model")
         os.makedirs(out)
         if with_model:
             open(os.path.join(out, "config.json"), "w").write("{}")
         meta = {"model_repo": "zai-org/GLM-5.3", "status": "done", "layer": layer, "out_dir": out, "model_dir": "/workspace/models/glm-5.3"}
+        if layers:
+            meta["layers"] = layers
         if gguf:
             g = os.path.join(self.project, "gguf", f"glm-5.3-abl-abliterate_{rid}-q8_0.gguf")
             os.makedirs(os.path.dirname(g), exist_ok=True)
@@ -475,6 +488,20 @@ class TestServing(Base):
         patches = [r["body"]["data"]["MODEL_PATH"] for r in self.api.requests if r["method"] == "PATCH"]
         self.assertEqual(patches, [a, b, a])
         self.assertEqual([h["run_id"] for h in st["history"]], ["20261101_000000", "20261102_000000", "20261101_000000"])
+
+    def test_runs_with_several_layers(self):
+        self.make_run("20261101_000000")                                      # from before several layers: "layer" only
+        self.make_run("20261102_000000", layer=15, layers=[15, 17, 19])
+        sv = k8sjobs.Serving(self.project, self.settings, self.k8s, http_error=HTTPError)
+        c = {x["run_id"]: x for x in sv.candidates()}
+        self.assertEqual((c["20261102_000000"]["layer"], c["20261102_000000"]["layers"]), (15, [15, 17, 19]))
+        self.assertEqual((c["20261101_000000"]["layer"], c["20261101_000000"]["layers"]), (7, None))
+        st = sv.promote("20261102_000000")
+        self.assertEqual((st["current"]["layer"], st["current"]["layers"]), (15, [15, 17, 19]))
+        st = sv.promote("20261101_000000")
+        self.assertEqual(st["current"]["layer"], 7)
+        self.assertNotIn("layers", st["current"])                            # the history entry as before
+        self.assertEqual([h.get("layers") for h in sv.history()], [[15, 17, 19], None])
 
     def test_errors(self):
         sv = k8sjobs.Serving(self.project, self.settings, self.k8s, http_error=HTTPError)

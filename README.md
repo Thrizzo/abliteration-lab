@@ -38,6 +38,17 @@ in GLM-5.2) that every layer reads and adds to. Abliteration works on that strea
    next-token distribution on harmless prompts barely moved (KL below 0.5 passes, above 2 fails), only the intended tensors
    differ, and the direction is gone from the saved weights (max |r·W′| below 0.05, typically 1e-3).
 
+**Several directions.** Sometimes one layer's direction leaves a few refusals that another layer's direction catches.
+`--layers 15,17,19` (ranges such as `15-19` work too) removes the directions of all of them at once. They are not parallel,
+so the edit removes the subspace they span: a QR decomposition turns them into an orthonormal basis Q, and every writer
+becomes `W′ = W − Q (Qᵀ W)`. Removing them one after the other would not do it: each step would put back part of the
+directions removed before. `--combine 3` makes the scan also test the best 2 and the best 3 layers together (one more
+generation pass each, saved in `scan.json`); the rule then recommends a combination only if it leaves strictly fewer
+refusals than the best single layer and its answers are not mostly Chinese. In the app: "combine the best … layers" under
+Advanced, and "combine with" next to the layer when the run pauses at the layer choice. The risk: every removed direction
+takes more out of the residual stream, so harmless answers move too. Validate measures that as the KL on harmless
+prompts, and checks max |Qᵀ·W′| instead of max |r·W′|. Take as few layers as needed; one layer is exactly the edit above.
+
 Why it is interesting beyond "uncensoring": it is a clean, reproducible example of mechanistic interpretability. A behaviour
 that looks like it would need fine-tuning turns out to be one vector, measurable in minutes and removable with linear
 algebra, and the same procedure transfers unchanged from a 1.5B dense model to a 744B mixture-of-experts model.
@@ -232,7 +243,8 @@ Ollama must be installed and running (`ollama serve`). The same environment vari
 2. **Abliterate**: press Run. The guide below the button walks through download → architecture → load → measure → scan →
    choose → apply → verify → validate → GGUF → Ollama, each step with *what happens*, *why it matters*, *what to look for*,
    and expandable *under the hood* (math, tensor names) and *for GLM-5.x* notes. Charts and answers appear live. Tick
-   "pause at the layer choice" to pick the layer yourself after the scan.
+   "pause at the layer choice" to pick the layer yourself after the scan, or several layers ("combine with"; see
+   *Several directions* in section 1).
 3. **Compare**: the same prompt goes to the original and the abliterated model in Ollama, refusal phrases highlighted. The
    "Explore" panel loads the base model into a lab: a per-layer **refusal meter** for any prompt (how strongly each layer's
    direction lights up, token by token) and **try a layer live** (ablate any layer with hooks and read the answers).
@@ -245,8 +257,9 @@ edit, add, remove with audit trail and restore),
 **SBOM** (generate and download the CycloneDX file), **log** (process output).
 
 Every run leaves a folder `runs/abliterate_<timestamp>/` with `run.json`, `events.jsonl`, `arch.json`, `layer_analysis.json`,
-`baseline.json`, `scan_results.json`, `apply.json`, `generations.json`, `validation.json`, `ollama_ab.json`, `refusal_dirs.pt`,
-`means.pt`. Models: `models/<slug>/` (base copy with revision and hashes), `out/<slug>-abliterated/`,
+`baseline.json`, `scan_results.json`, `scan.json` (with `--combine`), `apply.json`, `generations.json`, `validation.json`,
+`ollama_ab.json`, `refusal_dirs.pt`, `means.pt`. `run.json` names the applied layer (`layer`) and, since several directions,
+all of them (`layers`); the edited model's folder keeps the directions and their basis in `refusal_direction.pt`. Models: `models/<slug>/` (base copy with revision and hashes), `out/<slug>-abliterated/`,
 `gguf/<slug>-{base,abl}-q8_0.gguf`, Ollama `<slug>-base` / `<slug>-abl`.
 
 ---
@@ -257,13 +270,16 @@ Every run leaves a folder `runs/abliterate_<timestamp>/` with `run.json`, `event
 python -m abliterate --model THUDM/glm-edge-4b-chat                       # everything, ends with both models in Ollama
 python -m abliterate --model THUDM/glm-edge-4b-chat --pause-at-choice     # stop after the scan
 python -m abliterate --run-dir runs/abliterate_<ts> --stage continue --layer 17
+python -m abliterate --run-dir runs/abliterate_<ts> --stage continue --layers 15,17,19   # several directions at once
+python -m abliterate --model THUDM/glm-edge-4b-chat --combine 3           # the scan also tests the best 2 and 3 layers together
 python -m abliterate --model zai-org/GLM-5.2 --device-map auto --skip-verify --no-ollama
 python -m abliterate --model THUDM/glm-edge-1.5b-chat --device-map cpu    # no GPU (also the fallback when none is visible)
 python -m abliterate --help
 ```
 
 Options: `--n-train 256 --n-test 16 --batch 16 --gen-batch 4 --max-new-tokens 64 --layer-range 0.2-0.8
---dtype auto|bfloat16|float32 --device-map cuda|cpu|auto --quantize q8_0|f16|bf16 --trust-remote-code --hf-token`. Stages:
+--dtype auto|bfloat16|float32 --device-map cuda|cpu|auto --quantize q8_0|f16|bf16 --trust-remote-code --hf-token`,
+`--layer N` or `--layers A,B,...`, `--combine K` (default 0: off). Stages:
 `all`, `download`, `measure`, `scan`, `continue`, `apply`, `validate`, `deploy`.
 
 ---

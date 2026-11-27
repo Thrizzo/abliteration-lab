@@ -157,6 +157,98 @@ class TestControlHTTP(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_FASTAPI, "the console's dependencies are not installed here")
+class TestPipelineHTTP(unittest.TestCase):
+    """What the GUI's Run and Continue send reaches the pipeline's command line: several layers (layers -> --layers) and
+    the scan's combinations (combine -> --combine), in the Kubernetes console as the Job's container command, in the
+    local console as the child process's arguments. One layer goes as --layer, as before."""
+
+    RUN = "20261127_101500"
+
+    @classmethod
+    def setUpClass(cls):
+        TestControlHTTP.setUpClass()                                 # the same server module, in Kubernetes mode
+        cls.server, cls.T, cls.k8sjobs = TestControlHTTP.server, TestControlHTTP.T, TestControlHTTP.k8sjobs
+
+    def setUp(self):
+        self.api = self.T.FakeAPI()
+        self.addCleanup(self.api.close)
+        s = self.server
+        keep_server_state(s, self.addCleanup)
+        s.pipeline.k8s = self.k8sjobs.K8s(base=self.api.url, token="t", namespace="lab")
+        self.addCleanup(setattr, s.pipeline, "poll", s.pipeline.poll)
+        s.pipeline.poll = 0.01
+
+    def start(self, body):
+        status, out = call(self.server.app, "POST", "/api/pipeline/start", {}, {"engine": "abliterate", **body})
+        if status == 200:
+            self.T.wait_done(self.server.pipeline)
+        return status, out
+
+    def job_command(self):
+        jobs = [r["body"] for r in self.api.requests if r["method"] == "POST" and r["path"].endswith("/jobs")]
+        return jobs[-1]["spec"]["template"]["spec"]["containers"][0]["command"]
+
+    def test_combine_reaches_the_scan_job(self):
+        status, out = self.start({"stage": "scan", "model": "zai-org/GLM-5.3-Flash", "combine": 3})
+        self.assertEqual(status, 200, out)
+        cmd = self.job_command()
+        self.assertEqual(cmd[cmd.index("--combine") + 1], "3")
+        self.assertNotIn("--layer", cmd)
+        self.assertNotIn("--layers", cmd)
+
+    def test_layers_reach_the_continue_job(self):
+        status, out = self.start({"stage": "continue", "run_id": self.RUN, "layers": [15, 17, 19], "no_ollama": True})
+        self.assertEqual(status, 200, out)
+        cmd = self.job_command()
+        self.assertEqual(cmd[cmd.index("--layers") + 1], "15,17,19")
+        self.assertEqual(cmd[cmd.index("--run-dir") + 1], f"runs/abliterate_{self.RUN}")
+        self.assertNotIn("--layer", cmd)
+        self.assertNotIn("--combine", cmd)
+
+    def test_one_layer_as_before(self):
+        status, out = self.start({"stage": "continue", "run_id": self.RUN, "layer": 17})
+        self.assertEqual(status, 200, out)
+        cmd = self.job_command()
+        self.assertEqual(cmd[cmd.index("--layer") + 1], "17")
+        self.assertNotIn("--layers", cmd)
+        self.assertNotIn("--combine", cmd)
+
+    def test_refusals(self):
+        base = {"stage": "continue", "run_id": self.RUN}
+        for extra in ({"layer": 17, "layers": [15, 17]}, {"layers": []}, {"layers": [15, -1]}, {"layers": list(range(65))},
+                      {"combine": 17}, {"combine": -1}):
+            with self.subTest(extra=extra):
+                status, out = self.start({**base, **extra})
+                self.assertEqual(status, 400, out)
+        self.assertEqual(self.start({**base, "layers": ["a"]})[0], 422)
+        status, out = self.start({"engine": "notebook", "stage": "apply", "run_id": self.RUN, "layers": [15, 17]})
+        self.assertEqual(status, 400)
+        self.assertIn("one layer", out["detail"])
+        self.assertFalse([r for r in self.api.requests if r["method"] == "POST"])      # no Job was created
+
+    def test_the_local_console_passes_the_same_arguments(self):
+        s, seen = self.server, []
+
+        class Recorder:                                              # server.Pipeline's start, without the child process
+            def start(self, cmd, engine, stage, run_dir=None, env_extra=None):
+                seen.append(cmd)
+                return {"running": False}
+
+            def running(self):
+                return False
+        self.addCleanup(setattr, s, "pipeline", s.pipeline)
+        s.pipeline = Recorder()
+        self.assertEqual(self.start({"stage": "all", "model": "THUDM/glm-edge-4b-chat", "combine": 2, "pause_at_choice": True})[0], 200)
+        self.assertEqual(self.start({"stage": "continue", "run_id": self.RUN, "layers": [19, 17]})[0], 200)
+        scan, cont = seen
+        self.assertEqual(scan[1:4], ["-u", "-m", "abliterate"])
+        self.assertEqual(scan[scan.index("--combine") + 1], "2")
+        self.assertIn("--pause-at-choice", scan)
+        self.assertEqual(cont[cont.index("--layers") + 1], "19,17")                # the order given: 19 is the first layer
+        self.assertNotIn("--layer", cont)
+
+
+@unittest.skipUnless(HAVE_FASTAPI, "the console's dependencies are not installed here")
 class TestCopilotHTTP(unittest.TestCase):
     """The feed, the copilot's status and a streamed free prompt through the real app (model: the stand-in)."""
 

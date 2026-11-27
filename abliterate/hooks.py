@@ -10,6 +10,7 @@ import time
 import torch
 
 from .arch import find_layers
+from .edit import basis
 
 
 def _hs_from_args(args, kwargs):
@@ -141,11 +142,20 @@ class HookedModel:
     def ablated(self, direction):
         """Removes `direction` from the residual stream at every layer input and output (and from the
         attention-block output where no post-norm sits in between). Hooks are removed on exit.
+        direction: one unit direction [d] (t <- t - (t . r) r, exactly as for one layer before), or the unit directions of
+        several layers [k, d]: then the subspace they span goes, t <- t - (t Q) Q^T with Q their orthonormal basis
+        (edit.basis, the same one the weight edit uses). Both act on the last dimension.
         With mHC streams ([..., streams, d]) the projection acts on each stream: the streams only mix with each other
         and take in block outputs scaled per stream, so nothing puts the direction back."""
         if direction is None:
             yield
             return
+        if direction.dim() == 2 and direction.shape[0] > 1:
+            direction = basis(direction, self.log)[0]                  # [d, k]
+            remove = lambda t, Q: t - (t @ Q) @ Q.T                     # noqa: E731
+        else:
+            direction = direction.reshape(-1)
+            remove = lambda t, d: t - (t @ d).unsqueeze(-1) * d         # noqa: E731
         cache = {}
 
         def d_for(t):
@@ -155,8 +165,7 @@ class HookedModel:
             return cache[key]
 
         def proj_out(t):
-            d = d_for(t)
-            return t - (t @ d).unsqueeze(-1) * d
+            return remove(t, d_for(t))
 
         def pre(mod, args, kwargs):
             hs, positional = _hs_from_args(args, kwargs)

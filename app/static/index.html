@@ -61,6 +61,7 @@
         <label class="small">prompts per group <input type="number" id="optTrain" value="256" min="16" max="2048" style="width:80px"></label>
         <label class="small">test prompts <input type="number" id="optTest" value="16" min="4" max="64" style="width:70px"></label>
         <label class="small">layer range <input type="text" id="optRange" value="0.2-0.8" style="width:80px"></label>
+        <label class="small" title="After the scan, also test the best 2 … K layers together: their directions removed as one subspace, one more generation pass each. The rule takes a combination only if it leaves fewer refusals than the best single layer. 0 = off.">combine the best <input type="number" id="optCombine" value="0" min="0" max="8" style="width:60px"> layers (0 = off)</label>
         <label class="small">max new tokens <input type="number" id="optTokens" value="64" min="16" max="256" style="width:70px"></label>
         <label class="small">batch <input type="number" id="optBatch" value="16" min="1" max="64" style="width:60px"></label>
         <label class="small">gen batch <input type="number" id="optGenBatch" value="4" min="1" max="32" style="width:60px"></label>
