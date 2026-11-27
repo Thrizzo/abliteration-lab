@@ -876,6 +876,15 @@ class CombinePass(unittest.TestCase):
         self.assertEqual(P.choose_layers(scan, (P.Run.load(self.run_, "scan.json") or {}).get("combos")), [1])
         self.assertIn("scan: removed scan_results.json and scan.json of the earlier scan", read_text(os.path.join(self.run_.run_dir, "run.log")))
 
+    def test_a_layer_range_without_layers_is_refused(self):
+        self.scan(0, {(): 8, (2,): 1})
+        la = {**self.la, "scan_range": [3, 2], "n_layers": 6}            # --layer-range 0.1-0.2 on a small model
+        args = argparse.Namespace(max_new_tokens=4, gen_batch=2, combine=0, layer_range="0.1-0.2")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(P.UsageError) as e:
+            P.step_scan(self.run_, FakeHM(self.dirs, {}), args, self.prompts, self.dirs, la)
+        self.assertIn("--layer-range 0.1-0.2 leaves no layer to scan", str(e.exception))
+        self.assertFalse(os.path.exists(os.path.join(self.run_.run_dir, "scan_results.json")))   # the earlier scan went too
+
     def test_a_scan_that_stops_in_its_combine_pass_leaves_no_earlier_pass(self):
         self.scan(3, {(): 8, (1,): 3, (2,): 1, (3,): 2, (4,): 1, (2, 4): 0, (2, 3, 4): 0})
         self.run_.update_meta(recommended=2, recommended_layers=[2, 4])      # as a paused run records them
@@ -1075,7 +1084,7 @@ class CommandLine(unittest.TestCase):
         self.assertEqual((meta["recommended"], meta["recommended_layers"]), (None, None))
         code, log = self.main("--run-dir", rd, "--stage", "apply")
         self.assertEqual(code, 2)
-        self.assertIn("no scan of its current directions", read_json(os.path.join(rd, "run.json"))["error"])
+        self.assertIn("no scan of its current directions to choose from", read_json(os.path.join(rd, "run.json"))["error"])
         code, log = self.main("--run-dir", rd, "--stage", "apply", "--layers", "2 3")    # a choice needs no scan
         self.assertEqual(code, 0, log)
         choose = [e for e in read_events(rd) if e["step"] == "choose" and e["status"] == "done"][-1]

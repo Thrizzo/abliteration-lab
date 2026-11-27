@@ -225,11 +225,16 @@ function chatNames(){ return S.run?.meta?.ollama || S.run?.ollama?.names || {bas
 function foldEvents(evs){
   const ES={};
   for(const e of evs){
+    // every call of the pipeline starts with the download step (a local copy says so too): an earlier call's error is over
+    if(e.step==='download') delete ES._error;
+    // new directions (measure) end the earlier scan and choice, a new scan the earlier choice: the pipeline removes their
+    // files as well (drop_scan), so the console never offers a recommendation of other directions
+    if(e.status==='start' && (e.step==='measure' || e.step==='scan')){ delete ES.choose; if(e.step==='measure') delete ES.scan; }
     const st = ES[e.step] || (ES[e.step]={status:'pending', first:e.t, layers:[], combos:[], progress:null});
     st.last=e.t;
     // the scan's start names the layers it will test: kept apart from the results its 'layer' events add. A scan again
     // in the same run starts with no results and no combinations: the earlier pass's belong to the earlier scan
-    if(e.status==='start'){ st.status='running'; Object.assign(st, e); if(e.step==='scan'){ st.layers_planned=e.layers; st.layers=[]; st.combos=[]; } }
+    if(e.status==='start'){ Object.assign(st, e); st.status='running'; if(e.step==='scan'){ st.layers_planned=e.layers; st.layers=[]; st.combos=[]; } }
     else if(e.status==='progress'){ st.status='running'; st.progress=e; }
     else if(e.status==='layer'){ st.status='running'; st.layers.push(e); }
     else if(e.status==='combo'){ st.status='running'; st.combos.push(e); }
@@ -243,7 +248,9 @@ function foldEvents(evs){
 }
 function stepState(key){
   const st=S.ES[key]; const R=S.run;
-  if(st && st.status && st.status!=='pending') return st.status;
+  // a pause the run has left (run.json neither awaits the choice nor runs) is not offered as waiting
+  const left = key==='choose' && st?.status==='waiting' && R?.meta?.status && !['awaiting_choice','running'].includes(R.meta.status);
+  if(st && st.status && st.status!=='pending' && !left) return st.status;
   if(R){ if(['download','inspect','load','measure'].includes(key)) return R.measure?'done':'pending';
     if(key==='scan') return R.scan?'done':'pending'; if(key==='choose') return R.choice?.layer!=null?'done':'pending';
     if(key==='apply') return R.apply?'done':'pending'; if(key==='verify') return R.apply?.after?'done':'pending'; if(key==='validate') return R.validation?'done':'pending';

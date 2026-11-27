@@ -6,7 +6,9 @@
   that Ollama has it. The operator picker keeps its plain behaviour;
 - the judge's info line names a missing default judge with its "ollama pull", and only then;
 - the layer field reads "15 17", "15, 17" and "15 - 17" as the CLI's --layers does;
-- a scan again in the same run starts its live view without the earlier pass's combinations.
+- a scan again in the same run starts its live view without the earlier pass's combinations; new directions (measure)
+  end the earlier scan and its pause, so the layer choice never offers a recommendation of other directions, also when
+  run.json says the pause is over; an earlier call's error is over once the next call starts.
 
     python -m unittest discover -s app/tests
 """
@@ -27,10 +29,11 @@ const grab = (start, end) => { const i = src.indexOf(start), j = src.indexOf(end
 const line = (start) => grab(start, '\n');
 const code = [line('const esc = '), line('const escA = '), line('const sameModel = '), grab('const parseLayers = ', 'return out; };'),
   grab('function cpFillSelect(', '\n  return missing;\n}'), grab('function cpJudgeInfo(', "\n    + (ex ? `not usable as judge: ${ex}` : '');\n}"),
-  grab('function foldEvents(evs){', '\n  return ES;\n}')].join('\n');
+  grab('function foldEvents(evs){', '\n  return ES;\n}'), grab('function stepState(key){', "\n  return 'pending';\n}")].join('\n');
 const store = {};
 const cpStore = { get: (k, d) => (k in store ? store[k] : d) };
-const f = new Function('cpStore', code + '; return { cpFillSelect, parseLayers, cpJudgeInfo, foldEvents };')(cpStore);
+const S = { ES: {}, run: null };
+const f = new Function('cpStore', 'S', code + '; return { cpFillSelect, parseLayers, cpJudgeInfo, foldEvents, stepState };')(cpStore, S);
 const fill = (role, list, def, kept) => {
   for (const k of Object.keys(store)) delete store[k];
   if (kept !== undefined) store['model.' + role] = kept;
@@ -60,6 +63,18 @@ const again = f.foldEvents([...first, ev('start', { layers: [1, 2, 3] }), ev('la
 const done = f.foldEvents(first).scan;
 out.fold = { again: { status: again.status, layers: again.layers.length, combos: again.combos.length, planned: again.layers_planned },
              done: { status: done.status, layers: done.layers.length, combos: done.combos.length } };
+// a run paused at the choice, then measured again outside the console (CLI, or the API with run_id)
+const E = (step, status, extra) => ({ t: 1, step, status, ...extra });
+const paused = [E('download', 'done', { cached: true }), E('measure', 'start'), E('measure', 'done'), ...first, E('choose', 'waiting', { recommended: 1, recommended_layers: [1] })];
+const state = (evs, meta, choice) => { S.ES = f.foldEvents(evs); S.run = { meta, choice: choice || { layer: null }, scan: null }; return { choose: f.stepState('choose'), scan: S.ES.scan ? S.ES.scan.status : null, error: !!S.ES._error }; };
+out.pause = {
+  paused: state(paused, { status: 'awaiting_choice' }),
+  remeasured: state([...paused, E('download', 'done', { cached: true }), E('measure', 'start'), E('measure', 'done')], { status: 'done' }),
+  rescanStopped: state([...paused, E('download', 'done', { cached: true }), E('measure', 'start'), E('measure', 'done'), E('scan', 'start', { layers: [1, 2] }), E('error', 'stopped')], { status: 'stopped' }),
+  leftByMeta: state(paused, { status: 'done' }, { layer: 2 }),
+  refusedThenOk: state([...paused, E('download', 'done', { cached: true }), E('error', 'error', { message: 'layer 9 does not exist' }), E('download', 'done', { cached: true }), E('choose', 'done', { layer: 2, layers: [2], by: 'user' })], { status: 'running' }),
+  refused: state([...paused, E('download', 'done', { cached: true }), E('error', 'error', { message: 'layer 9 does not exist' })], { status: 'error' }),
+};
 console.log(JSON.stringify(out));
 """
 
@@ -115,6 +130,15 @@ class ModelPickers(unittest.TestCase):
     def test_a_scan_again_starts_without_the_earlier_combinations(self):
         self.assertEqual(self.got["fold"]["done"], {"status": "done", "layers": 1, "combos": 1})
         self.assertEqual(self.got["fold"]["again"], {"status": "running", "layers": 1, "combos": 0, "planned": [1, 2, 3]})
+
+    def test_new_directions_end_the_pause(self):
+        g = self.got["pause"]
+        self.assertEqual(g["paused"], {"choose": "waiting", "scan": "done", "error": False})
+        self.assertEqual(g["remeasured"], {"choose": "pending", "scan": None, "error": False})        # no Continue with layer 1
+        self.assertEqual(g["rescanStopped"], {"choose": "pending", "scan": "error", "error": True})
+        self.assertEqual(g["leftByMeta"]["choose"], "done")                     # run.json: the pause is over, the edit stands
+        self.assertEqual(g["refusedThenOk"], {"choose": "done", "scan": "done", "error": False})   # the refused call is over
+        self.assertEqual(g["refused"]["error"], True)
 
     def test_the_layer_field_reads_like_the_cli(self):
         self.assertEqual(self.got["layers"], {"15 17": [15, 17], "15, 17": [15, 17], "15 - 17 19": [15, 16, 17, 19], "17,15,17": [17, 15],

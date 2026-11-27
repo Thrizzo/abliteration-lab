@@ -663,8 +663,10 @@ function Invoke-HostPreflight {
         $tags = (Http -Url "$localUrl/api/tags" -NoAuth -MaxSeconds 10).Json
         $missing = @(Get-HostModels | Where-Object { -not (Test-HasModel $tags $_) })
         foreach ($m in $missing) {
-            if ($m -eq $JudgeModel -and $m -ne (Get-CopilotJudge)) { Warn "$m is not on the host's Ollama yet (-EvalJudge skips without it)" }
-            else { Warn "$m is not on the host's Ollama yet (-Check fails without it)" }
+            $means = @()
+            if ($m -eq (Get-CopilotJudge) -or $m -eq 'nomic-embed-text') { $means += '-Check fails without it' }
+            if ($EvalJudge -and $m -eq $JudgeModel) { $means += '-EvalJudge skips without it' }
+            Warn "$m is not on the host's Ollama yet ($($means -join ', '))"
         }
         if (-not $missing.Count) { Ok ('the host''s Ollama has the models this run needs: ' + ((Get-HostModels) -join ', ')) }
     } else {
@@ -987,6 +989,7 @@ function Invoke-HostModels {
         if ($m -eq (Get-CopilotJudge)) { $role = 'the copilot''s judge, COPILOT_JUDGE_MODEL' }
         elseif ($m -ne 'nomic-embed-text') { $role = 'the model -EvalJudge measures' }
         if ($have) { Ok "$m is on the host's Ollama ($role)" }
+        elseif ($role -eq 'the model -EvalJudge measures') { Skip "$m is not on the host's Ollama ($role, which skips without it); on Windows: ollama pull $m" }
         else { Bad "$m is not on the host's Ollama ($role); on Windows: ollama pull $m" }
     }
 }

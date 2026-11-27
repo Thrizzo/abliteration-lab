@@ -194,6 +194,9 @@ def step_measure(run, hm, args, prompts):
 def step_scan(run, hm, args, prompts, dirs, la):
     harmful_test = prompts[1]
     drop_scan(run, "scan")                        # until this scan ends, the run has none (the rule needs one)
+    if la["scan_range"][0] > la["scan_range"][1]:
+        raise UsageError(f"--layer-range {getattr(args, 'layer_range', '')} leaves no layer to scan: this model has layers 0 to "
+                         f"{la['n_layers'] - 1}, and the scan skips layer 0 and the last one (e.g. 0.2-0.8)")
     run.event("scan", "start", n_test=len(harmful_test), layers=list(range(la["scan_range"][0], la["scan_range"][1] + 1)))
     baseline = hm.generate(harmful_test, args.max_new_tokens, args.gen_batch)
     n_base = D.count_refusals(baseline)
@@ -484,8 +487,8 @@ def main(argv=None):
 
         if args.stage in ("all", "continue", "apply"):
             if not scan and not picked:
-                raise UsageError("this run has no scan of its current directions (a scan that stopped, or measure ran again after "
-                                 "it): run --stage scan, or give --layer N / --layers A,B")
+                raise UsageError("this run has no scan of its current directions to choose from (a scan that stopped, or measure "
+                                 "ran again after it): run --stage scan, or give --layer N / --layers A,B")
             rec = choose_layers(scan, combos) if scan else None
             layers = picked or rec
             check_layers(layers, dirs.shape[0])
