@@ -41,14 +41,34 @@ console.log(JSON.stringify(out));"""
             self.assertEqual(got, neutral(v["in"]), v["in"])
 
 
+# Past 4000 characters: a long head (scope statement, scope lists) leaves room for the tail the gate enforces
+STATEMENT = ("Only the web tier at 10.10.11.0/28: the shop, its API and the admin portal. " * 60)[:3990]
+LONG_SCOPE = {"name": "long scope", "version": 2, "scope_statement": STATEMENT, "scope_in": ["10.10.11.0/28"], "prohibited": ["hydra"],
+              "protected_data": ["customers.csv", "/backup/"], "roe": "Stop on PII."}
+LONG_LISTS = {"name": "lists", "scope_statement": "s" * 300, "scope_in": [f"web{i:02d}.payments.backend.tier.acme-internal.lab" for i in range(64)],
+              "scope_out": [f"10.10.{i}.0/24" for i in range(64)], "prohibited": ["hydra"], "protected_data": ["customers.csv"], "roe": "No DoS."}
+LONG_RULES = {"name": "rules", "scope_statement": "Only the lab.", "prohibited": ["hydra"], "protected_data": ["customers.csv"],
+              "roe": "Do not copy personal data. " * 330}
+NO_TAIL = {"name": "no tail", "scope_statement": "S" * 4000, "scope_in": ["10.10.11.0/28"]}
+NO_HEAD = {"prohibited": ["hydra"], "protected_data": ["customers.csv"], "roe": "r" * 5000}
+# a tail of more than 2000 characters leaves the head 1999: a head of 1999 reads as before, one of 2000 is cut
+AT_ROOM = {"name": "b", "scope_statement": "x" * 1968, "roe": "r" * 3000}
+PAST_ROOM = {"name": "b", "scope_statement": "x" * 1969, "roe": "r" * 3000}
 ENGAGEMENTS = [None, {}, {"name": "ACME internal", "version": 4, "scope_statement": "Only the web tier.", "scope_in": ["10.10.11.0/28", "box.htb"],
                           "scope_out": ["10.10.11.1"], "window_start": "2026-11-26T08:00:00+01:00", "window_end": None,
                           "prohibited": ["hydra", "-T5"], "roe": "No DoS.\nStop on PII: report it, do not copy it."},
                {"name": "long", "roe": "r" * 9000}, {"scope_out": [" ", "10.10.11.9 "], "roe": "  "},
                {"name": "data", "protected_data": ["customers.csv", "\\Users\\jdoe\\Documents", "HR$", "Gehälter.xlsx"], "prohibited": ["hydra"],
                 "roe": "Stop on PII."},
-               {"protected_data": ["x" * 40 + str(i) for i in range(70)], "roe": "r"}]
+               {"protected_data": ["x" * 40 + str(i) for i in range(70)], "roe": "r"},
+               LONG_SCOPE, LONG_LISTS, LONG_RULES, NO_TAIL, NO_HEAD, AT_ROOM, PAST_ROOM]
 PROTECTED = "PROTECTED DATA (do not read, download or copy): "
+
+
+def old_cut(*lines):
+    """The whole text cut at 4000 characters, as before head and tail were told apart."""
+    text = "\n".join(lines)
+    return text if len(text) <= 4000 else text[:4000] + " ..."
 
 
 class OperatorPrompt(unittest.TestCase):
@@ -103,6 +123,29 @@ console.log(JSON.stringify(new Function('$input','$json','$','$env', code)({{}},
         self.assertEqual(len(capped) - len(PROTECTED), 1004)
         for empty in ([], [" ", ""], None, "customers.csv"):
             self.assertEqual(engagement_text({"protected_data": empty, "roe": "r"}), "RULES: r", empty)
+
+    def test_a_long_head_leaves_room_for_the_enforced_lines(self):
+        # a scope statement as long as the console allows: it is cut (the start kept), the three lines after it stay whole
+        t = engagement_text(LONG_SCOPE)
+        head, _, tail = t.partition("\nPROHIBITED: ")
+        self.assertEqual(tail, "hydra\n" + PROTECTED + "customers.csv, /backup/\nRULES: Stop on PII.")
+        self.assertTrue(head.startswith("ENGAGEMENT: long scope (version 2)\nSCOPE STATEMENT: " + STATEMENT[:3800]), head[:80])
+        self.assertTrue(head.endswith(" ...\nIN SCOPE: 10.10.11.0/28"), head[-80:])
+        self.assertEqual(len(t), 4000)
+        # long scope lists: the scope statement keeps 200 characters, then the head loses its end, the tail stays whole
+        t = engagement_text(LONG_LISTS)
+        self.assertIn("\nSCOPE STATEMENT: " + "s" * 200 + " ...\nIN SCOPE: web00.payments.backend.tier.acme-internal.lab, ", t)
+        self.assertTrue(t.endswith(" ...\nPROHIBITED: hydra\n" + PROTECTED + "customers.csv\nRULES: No DoS."), t[-120:])
+        self.assertEqual(len(t), 4000)
+        # what still reads as before: a long rules text after a short head, a head that fits its room, one part alone
+        self.assertEqual(engagement_text(LONG_RULES), old_cut("ENGAGEMENT: rules", "SCOPE STATEMENT: Only the lab.", "PROHIBITED: hydra",
+                                                              PROTECTED + "customers.csv", "RULES: " + LONG_RULES["roe"].strip()))
+        self.assertTrue(engagement_text(LONG_RULES).endswith(" ..."))
+        self.assertEqual(engagement_text(AT_ROOM), old_cut("ENGAGEMENT: b", "SCOPE STATEMENT: " + "x" * 1968, "RULES: " + "r" * 3000))
+        self.assertEqual(engagement_text(NO_TAIL), old_cut("ENGAGEMENT: no tail", "SCOPE STATEMENT: " + "S" * 4000, "IN SCOPE: 10.10.11.0/28"))
+        self.assertEqual(engagement_text(NO_HEAD), old_cut("PROHIBITED: hydra", PROTECTED + "customers.csv", "RULES: " + "r" * 5000))
+        # one character past its room: the scope statement makes room, and the tail keeps 2000 characters
+        self.assertEqual(engagement_text(PAST_ROOM), "ENGAGEMENT: b\nSCOPE STATEMENT: " + "x" * 1964 + " ...\nRULES: " + "r" * 1993 + " ...")
 
     def test_user_message_shape(self):
         self.assertEqual(operator_user("T", "10.0.0.1"), "TASK: T\nTARGET (authorized, in scope): 10.0.0.1")

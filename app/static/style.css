@@ -11,6 +11,9 @@
   --mono:"JetBrains Mono","Cascadia Code",Consolas,ui-monospace,monospace;
   --sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
   --r:14px;
+  /* where the header ends (its height, until the page scrolls it away), kept current by app.js: panels, the log drawer
+     and the run box start below it */
+  --head-h:58px;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--page);color:var(--ink);font:14px/1.55 var(--sans)}
@@ -157,7 +160,8 @@ svg{display:block;max-width:100%}
 .gtext p b{color:var(--ink)}
 .glive{margin:10px 0}
 .gstep details{margin:6px 0 0}.gstep details p{margin:6px 0 0;max-width:100ch;line-height:1.6}
-.gstep code{font-size:12px}
+/* code without spaces (the from_pretrained(...) call under Load the model) breaks instead of widening the step on a phone */
+.gstep code{font-size:12px;overflow-wrap:anywhere}
 .kv .mono{word-break:break-all}
 
 /* ---------------- wizard layout (Model -> Abliterate -> Compare) */
@@ -190,15 +194,19 @@ body.wiz{display:block;overflow:auto}
 .mcard .fam{font-size:12px;color:var(--accent);margin:2px 0 6px}
 .mcard .meta{font-size:11.5px;color:var(--muted);line-height:1.5}
 .mcard .tags{margin-top:8px;display:flex;gap:4px;flex-wrap:wrap}
-.runbox{position:sticky;top:64px;z-index:4}
-.drawer{position:fixed;right:0;top:58px;bottom:0;width:min(560px,90vw);background:var(--surface);border-left:1px solid var(--border);padding:14px 16px;transform:translateX(100%);transition:.25s;z-index:6;overflow:auto;box-shadow:-20px 0 40px rgba(0,0,0,.4)}
+.runbox{position:sticky;top:calc(var(--head-h) + 6px);z-index:4}
+/* only the slide-in is animated: the drawer's top follows the header while the page scrolls */
+.drawer{position:fixed;right:0;top:var(--head-h);bottom:0;width:min(560px,90vw);background:var(--surface);border-left:1px solid var(--border);padding:14px 16px;transform:translateX(100%);transition:transform .25s;z-index:6;overflow:auto;box-shadow:-20px 0 40px rgba(0,0,0,.4)}
 .drawer.open{transform:none}
 .drawer .console{height:50vh}
 .explore summary{cursor:pointer;font-size:14px}
 
 /* ---------------- panels (datasets, SBOM) */
-.panel{position:fixed;inset:58px 0 0 0;background:var(--page);z-index:7;overflow:auto;padding:22px 28px 60px;display:none}
+.panel{position:fixed;inset:var(--head-h) 0 0 0;background:var(--page);z-index:7;overflow:auto;padding:22px 28px 60px;display:none}
 .panel.open{display:block}
+/* scrolling past the end of a panel or the log drawer does not scroll the page behind it, which after about a screen
+   would take the header and its buttons away */
+.panel,.drawer{overscroll-behavior:contain}
 .panel .inner{max-width:1180px;margin:0 auto}
 .panel h2{margin:0;font-size:20px}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0}
@@ -331,3 +339,7 @@ textarea.mono,input.mono{font-family:var(--mono);font-size:12.5px}
 /* phone width: the header's step pills and the Earlier versions table made the page scroll sideways at 390 px */
 @media (max-width:480px){ .wizhead{padding:10px 16px} }
 #engVersionList{overflow-x:auto}
+/* the serving and SBOM tables scroll inside their card too, so their panel does not; a long reason or error URL wraps in
+   the audit log's result column instead of widening the table */
+#serveRuns,#serveHist,#auditList,#ctlResult,#sbomModules,#sbomPackages,#sbomExtra{overflow-x:auto}
+#auditList td:nth-child(3){overflow-wrap:anywhere;min-width:12em}

@@ -118,7 +118,24 @@ _SENTENCE = re.compile(r"(?<=[.;!?])\s+|\n+")                    # not at ":": "
 _NEGATED = re.compile(r"\b(not|never|no|don't|avoid|exclude[ds]?|excluding|forbidden|prohibited|off-limits|out of scope)\b", re.I)
 _IP_IN_TEXT = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?(?![\w.])")
 _TLDS = r"(?:lab|local|htb|thm|corp|internal|lan|intra|com|net|org|io|de)"
-_HOST_IN_TEXT = re.compile(rf"\b(?:[a-z0-9-]+\.)+{_TLDS}\b", re.I)
+_HOST_IN_TEXT = re.compile(rf"\b(?:[a-z0-9-]+\.)+{_TLDS}\b", re.I)   # the reference; _hosts_in_text finds the same
+_NAME_IN_TEXT = re.compile(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*", re.I)    # a whole dotted name: nothing after it to backtrack
+_TLD_AT = re.compile(rf"{_TLDS}\b", re.I)
+
+
+def _hosts_in_text(text):
+    """The matches of _HOST_IN_TEXT in text, in order, in linear time. The regex itself backtracks: from every start in a
+    long dotted run ("a.a.a.a...") it takes all labels, then gives them back one by one looking for the TLD, about a second
+    on 8000 characters. A match can only lie in a whole dotted name, starts where the name starts, and ends at the last
+    label of that name that begins with a TLD followed by a word boundary; a later start in the same name finds no other
+    end, so one check per label gives the same result."""
+    for m in _NAME_IN_TEXT.finditer(text):
+        dots = [m.start() + i for i, ch in enumerate(m.group(0)) if ch == "."]
+        for d in reversed(dots):
+            t = _TLD_AT.match(text, d + 1)
+            if t:
+                yield text[m.start():t.end()]
+                break
 
 
 def rule_hints(fields):
@@ -136,9 +153,9 @@ def rule_hints(fields):
         for sentence in _SENTENCE.split(str(fields.get(key) or "")):
             if not _NEGATED.search(sentence):
                 continue
-            for m in list(_IP_IN_TEXT.finditer(sentence)) + list(_HOST_IN_TEXT.finditer(sentence)):
+            for found in [m.group(0) for m in _IP_IN_TEXT.finditer(sentence)] + list(_hosts_in_text(sentence)):
                 try:
-                    entry = scope_entry(m.group(0))
+                    entry = scope_entry(found)
                 except ValueError:
                     continue
                 if entry[1] in seen or any(within(entry, [x]) for x in excluded):
@@ -204,10 +221,19 @@ def _scope_host(name, scope):
     return within(("ip", ip), scope)
 
 
-def protected_entry(value, hosts=()):
+def _is_address(name):
+    try:
+        ipaddress.IPv4Address(name)
+    except ValueError:
+        return False
+    return True
+
+
+def protected_entry(value, hosts=(), ceiling_known=True):
     """One protected_data entry as it is stored (trimmed, inner whitespace as one space), or ValueError("protected_data:
     ..."), with a message that names the form that works. hosts: the scope (scope_in and the ceiling), as scope_entry()
-    pairs or text."""
+    pairs or text. ceiling_known: False when the console does not know LAB_ALLOWLIST; any host name or address may be in
+    it then, so the entry may name none."""
     p = re.sub(r"\s+", " ", str(value or "")).strip()
     q = p[:40]
 
@@ -252,6 +278,18 @@ def protected_entry(value, hosts=()):
     scope = _scope_pairs(hosts)
     if any(_scope_host(n, scope) for n in names):
         raise bad(" contains a host in scope, which the gate never reads as data: put it in Out of scope")
+    # the gate blanks every in-scope host, LAB_ALLOWLIST's included, before it reads a command: an entry that names one
+    # never matches. Without the ceiling the console cannot tell which hosts those are.
+    if not ceiling_known:
+        for n in names:
+            if _HOST_NAME.fullmatch(n):
+                what, word = "a host name", "host"
+            elif _is_address(n):
+                what, word = "an address", "address"
+            else:
+                continue
+            raise bad(f" contains {what} ({n}): the console does not know LAB_ALLOWLIST, so it cannot tell whether the gate "
+                      f"reads it as a host; write the path without the {word}")
     if any(set(n) <= {".", "*"} and "." in n for n in names):
         raise bad(" has a . or .. folder: name the folder itself")
     if any(set(n) - {"*"} and sum(unicodedata.category(c)[0] in "LN" for c in n) < 2 for n in names):
@@ -270,14 +308,14 @@ def protected_entry(value, hosts=()):
     return p
 
 
-def protected_list(value, errors, hosts=()):
+def protected_list(value, errors, hosts=(), ceiling_known=True):
     """validate()'s protected_data: a JSON list, or text with one entry per line or comma-separated. Every refused entry
     goes to errors; duplicates (the same key) are dropped, the first spelling kept."""
     scope = _scope_pairs(hosts)
     out, keys = [], set()
     for raw in _lines(value):
         try:
-            p = protected_entry(raw, scope)
+            p = protected_entry(raw, scope, ceiling_known)
         except ValueError as e:
             errors.append(str(e))
             continue
@@ -349,7 +387,7 @@ def _names_within(c, d):
     return bool(a) and any(all(x == y or x + "$" == y for x, y in zip(a, b[i:i + len(a)])) for i in range(len(b) - len(a) + 1))
 
 
-def _candidates(sentence, scope, scoped=False):
+def _candidates(sentence, scope, scoped=False, ceiling_known=True):
     """The names a sentence gives that the console would accept, as (name, verbatim): verbatim for a UNC path or a
     quoted name, a share or folder spelled as it is. One mention matched twice gives one name: a name inside another's
     match (the file name of a URL or a path), or "the HR share" whose names another candidate spells (HR$). Two mentions
@@ -365,7 +403,7 @@ def _candidates(sentence, scope, scoped=False):
     valid = []
     for c, span, described, verbatim in found:
         try:
-            valid.append((protected_entry(c, scope), span, described, verbatim))    # hosts are rule_hints' business
+            valid.append((protected_entry(c, scope, ceiling_known), span, described, verbatim))    # hosts are rule_hints' business
         except ValueError:
             continue
 
@@ -481,11 +519,12 @@ def _covers(entry, r):
                              for j in range(k)) for i in range(len(comps) - k + 1))
 
 
-def data_hints(fields, hosts=()):
+def data_hints(fields, hosts=(), ceiling_known=True):
     """[{kind, entry, sentence}]: suggest (the rules protect a name Protected data does not list), broad (a common or
     very short name, from the rules or saved), descriptive (a saved entry that reads like a description), unnamed (the
     rules protect personal data but name nothing, while the list is empty), move (a Prohibited entry that looks like
-    data). Deterministic, from fixed patterns; never stored, never applied."""
+    data). Deterministic, from fixed patterns; never stored, never applied. hosts and ceiling_known as in
+    protected_entry(): a suggestion or a move is always an entry the console saves."""
     scope = _scope_pairs(hosts)
     listed = _lines(fields.get("protected_data"))
     cover = [_compiled(e) for e in listed]
@@ -496,7 +535,8 @@ def data_hints(fields, hosts=()):
                     and (_DATA_WORD.search(sentence) or _CATEGORY.search(sentence) or _CONCRETE.search(sentence)
                          or any(rx.search(sentence) for rx, _ in _KEYWORDS))):
                 continue
-            found = _candidates(sentence, scope, scoped=key == "scope_statement" or bool(_STATES_SCOPE.search(sentence)))
+            found = _candidates(sentence, scope, scoped=key == "scope_statement" or bool(_STATES_SCOPE.search(sentence)),
+                                ceiling_known=ceiling_known)
             verbatim += [c for c, spelled in found if spelled]
             cands = [c for c, _ in found]
             for cand in cands:
@@ -529,7 +569,7 @@ def data_hints(fields, hosts=()):
         # strictly: a tool or wordlist path (/usr/bin/hydra, /usr/share/wordlists/rockyou.txt) is a local position there,
         # which waits for a human, while Prohibited blocks it
         try:
-            protected_entry(p, scope)
+            protected_entry(p, scope, ceiling_known)
         except ValueError:
             continue
         names = _names(p)
@@ -589,7 +629,7 @@ class Engagements:
         if len(prohibited) > MAX_ENTRIES:
             errors.append(f"prohibited: at most {MAX_ENTRIES} entries")
         out["prohibited"] = prohibited[:MAX_ENTRIES]
-        out["protected_data"] = protected_list(fields.get("protected_data"), errors, self.scope(out))
+        out["protected_data"] = protected_list(fields.get("protected_data"), errors, self.scope(out), self.ceiling is not None)
         out["window_start"] = _when(fields.get("window_start"), "window_start", errors)
         out["window_end"] = _when(fields.get("window_end"), "window_end", errors)
         if out["window_start"] and out["window_end"] and \
@@ -652,7 +692,7 @@ class Engagements:
     def save(self, fields, who=None, note=""):
         """A new version from the GUI's fields (validated); saving the same fields again changes nothing."""
         clean = self.validate(fields)
-        hints = {"hints": rule_hints(clean), "data_hints": data_hints(clean, self.scope(clean))}   # not stored: worked out each time
+        hints = {"hints": rule_hints(clean), "data_hints": data_hints(clean, self.scope(clean), self.ceiling is not None)}   # not stored
         note = str(note or "").strip()[:LIMITS["note"]]
         with self.lock:
             cur = self.current()
@@ -691,6 +731,6 @@ class Engagements:
     def status(self):
         cur = self.current()
         return {"current": cur, "hints": rule_hints(cur) if cur else [], "versions": self.versions(20),
-                "data_hints": data_hints(cur, self.scope(cur)) if cur else [],
+                "data_hints": data_hints(cur, self.scope(cur), self.ceiling is not None) if cur else [],
                 "ceiling": {"known": self.ceiling is not None, "allowlist": self.ceiling_text,
                             "autorun_passive": self.autorun.get("passive"), "autorun_active": self.autorun.get("active")}}

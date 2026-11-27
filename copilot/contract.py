@@ -23,6 +23,8 @@ JUDGE_SYSTEM = CONTRACT["judge_system"]
 REFERENCE_HEADER = CONTRACT["reference_header"]
 ENGAGEMENT_HEADER = CONTRACT["engagement_header"]
 ENGAGEMENT_MAX = 4000          # characters of engagement text in a prompt (the operator may have an 8k context)
+ENGAGEMENT_TAIL = 2000         # of those, kept for prohibited tools, protected data and rules when a long head is cut
+STATEMENT_MIN = 200            # characters a long scope statement keeps when the head is cut
 PROTECTED_MAX = 1000           # characters of the protected-data list in a prompt (the policy gate enforces all of it)
 OUTPUT_KEYS = ("command", "target", "rationale")
 
@@ -40,9 +42,14 @@ def neutral(text):
 
 
 def engagement_text(e):
-    """The engagement as both prompts show it (mirrors engagementText in deploy/n8n/build_workflow.js). The rules come
-    last: past ENGAGEMENT_MAX characters it is their end that is cut. The protected data is cut at PROTECTED_MAX
-    characters, which leaves room for the rules."""
+    """The engagement as both prompts show it (mirrors engagementText in deploy/n8n/build_workflow.js). Two parts share
+    ENGAGEMENT_MAX characters (a cut ends in " ..."): the head (name, scope statement, scope, exclusions, window), then
+    the tail (prohibited tools, the first PROTECTED_MAX characters of the protected data, rules), which holds what the
+    policy gate enforces. When both do not fit, the tail keeps at least min(its length, ENGAGEMENT_TAIL) characters, so
+    a long scope statement or long scope lists cannot push it out of both prompts: the head makes room, its scope
+    statement cut first (to no less than STATEMENT_MIN characters), then its end. The tail gets what is left and loses
+    its end, as the whole text did before. Text that fits, a long rules text after a short head and a text with only
+    one part read exactly as before."""
     if not isinstance(e, dict):
         return ""
 
@@ -51,23 +58,33 @@ def engagement_text(e):
 
     def joined(v):
         return ", ".join(s(x) for x in (v if isinstance(v, list) else []) if s(x))
-    lines = []
-    if s(e.get("name")):
-        lines.append(f"ENGAGEMENT: {s(e.get('name'))}" + (f" (version {s(e.get('version'))})" if s(e.get("version")) else ""))
-    for label, value in (("SCOPE STATEMENT", s(e.get("scope_statement"))), ("IN SCOPE", joined(e.get("scope_in"))),
-                         ("OUT OF SCOPE", joined(e.get("scope_out")))):
-        if value:
-            lines.append(f"{label}: {value}")
-    if s(e.get("window_start")) or s(e.get("window_end")):
-        lines.append(f"WINDOW: {s(e.get('window_start')) or 'open'} to {s(e.get('window_end')) or 'open'}")
-    protected = joined(e.get("protected_data"))
-    protected = protected if len(protected) <= PROTECTED_MAX else protected[:PROTECTED_MAX] + " ..."
-    for label, value in (("PROHIBITED", joined(e.get("prohibited"))), ("PROTECTED DATA (do not read, download or copy)", protected),
-                         ("RULES", s(e.get("roe")))):
-        if value:
-            lines.append(f"{label}: {value}")
-    text = "\n".join(lines)
-    return text if len(text) <= ENGAGEMENT_MAX else text[:ENGAGEMENT_MAX] + " ..."
+
+    def cap(v, n):
+        return v if len(v) <= n else v[:n] + " ..."
+
+    def lines(pairs):
+        return "\n".join(f"{label}: {value}" for label, value in pairs if value)
+    name, version, start, end = s(e.get("name")), s(e.get("version")), s(e.get("window_start")), s(e.get("window_end"))
+    when = f"{start or 'open'} to {end or 'open'}" if start or end else ""
+
+    def head(statement):
+        return lines((("ENGAGEMENT", name and name + (f" (version {version})" if version else "")), ("SCOPE STATEMENT", statement),
+                      ("IN SCOPE", joined(e.get("scope_in"))), ("OUT OF SCOPE", joined(e.get("scope_out"))), ("WINDOW", when)))
+    tail = lines((("PROHIBITED", joined(e.get("prohibited"))),
+                  ("PROTECTED DATA (do not read, download or copy)", cap(joined(e.get("protected_data")), PROTECTED_MAX)),
+                  ("RULES", s(e.get("roe")))))
+    statement = s(e.get("scope_statement"))
+    h = head(statement)
+    if not h or not tail or len(h) + 1 + len(tail) <= ENGAGEMENT_MAX:
+        return cap("\n".join(x for x in (h, tail) if x), ENGAGEMENT_MAX)
+    room = ENGAGEMENT_MAX - 1 - min(len(tail), ENGAGEMENT_TAIL)          # the most the head may take
+    if len(h) > room:
+        keep = max(STATEMENT_MIN, len(statement) - (len(h) - room) - 4)
+        if keep + 4 < len(statement):
+            h = head(statement[:keep] + " ...")
+        if len(h) > room:
+            h = h[:room - 4] + " ..."
+    return h + "\n" + cap(tail, ENGAGEMENT_MAX - 1 - len(h))
 
 
 def operator_user(task, target, references="", engagement=None):

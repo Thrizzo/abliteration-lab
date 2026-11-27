@@ -25,21 +25,34 @@ const C = JSON.parse(fs.readFileSync(path.join(HERE, '..', '..', 'copilot', 'ope
 
 // The console's engagement (scope statement, rules, scope, exclusions, window, prohibited tools, protected data) as the
 // operator and the judge read it. Mirrored in copilot/contract.py (engagement_text); copilot/tests/test_contract.py renders
-// both. The rules come last: past 4000 characters it is their end that is cut. The models see the first 1000 characters
-// of the protected data, which leaves room for the rules; the policy gate enforces the whole list.
+// both. Two parts share 4000 characters (a cut ends in ' ...'): the head (name, scope statement, scope, exclusions,
+// window), then the tail (prohibited tools, the first 1000 characters of the protected data, rules), which holds what the
+// policy gate enforces. When both do not fit, the tail keeps at least min(its length, 2000) characters, so a long scope
+// statement or long scope lists cannot push it out of both prompts: the head makes room, its scope statement cut first
+// (to no less than 200 characters), then its end. The tail gets what is left and loses its end, as the whole text did
+// before. Text that fits, a long rules text after a short head and a text with only one part read exactly as before.
 const ENGAGEMENT_TEXT = `const ENGAGEMENT_HEADER = ${JSON.stringify(C.engagement_header)};
 function engagementText(e) {
   if (!e || typeof e !== 'object' || Array.isArray(e)) return '';
   const s = (v) => (v === undefined || v === null ? '' : String(v).trim());
   const joined = (v) => (Array.isArray(v) ? v : []).map(s).filter(Boolean).join(', ');
   const cap = (v, n) => (v.length <= n ? v : v.slice(0, n) + ' ...');
-  const lines = [];
-  if (s(e.name)) lines.push('ENGAGEMENT: ' + s(e.name) + (s(e.version) ? ' (version ' + s(e.version) + ')' : ''));
-  for (const [label, value] of [['SCOPE STATEMENT', s(e.scope_statement)], ['IN SCOPE', joined(e.scope_in)], ['OUT OF SCOPE', joined(e.scope_out)]]) if (value) lines.push(label + ': ' + value);
-  if (s(e.window_start) || s(e.window_end)) lines.push('WINDOW: ' + (s(e.window_start) || 'open') + ' to ' + (s(e.window_end) || 'open'));
-  for (const [label, value] of [['PROHIBITED', joined(e.prohibited)], ['PROTECTED DATA (do not read, download or copy)', cap(joined(e.protected_data), 1000)], ['RULES', s(e.roe)]]) if (value) lines.push(label + ': ' + value);
-  const text = lines.join('\\n');
-  return text.length <= 4000 ? text : text.slice(0, 4000) + ' ...';
+  const lines = (pairs) => pairs.filter((p) => p[1]).map((p) => p[0] + ': ' + p[1]).join('\\n');
+  const when = s(e.window_start) || s(e.window_end) ? (s(e.window_start) || 'open') + ' to ' + (s(e.window_end) || 'open') : '';
+  const head = (statement) => lines([['ENGAGEMENT', s(e.name) && s(e.name) + (s(e.version) ? ' (version ' + s(e.version) + ')' : '')],
+    ['SCOPE STATEMENT', statement], ['IN SCOPE', joined(e.scope_in)], ['OUT OF SCOPE', joined(e.scope_out)], ['WINDOW', when]]);
+  const tail = lines([['PROHIBITED', joined(e.prohibited)], ['PROTECTED DATA (do not read, download or copy)', cap(joined(e.protected_data), 1000)],
+    ['RULES', s(e.roe)]]);
+  const statement = s(e.scope_statement);
+  let h = head(statement);
+  if (!h || !tail || h.length + 1 + tail.length <= 4000) return cap([h, tail].filter(Boolean).join('\\n'), 4000);
+  const room = 4000 - 1 - Math.min(tail.length, 2000);           // the most the head may take
+  if (h.length > room) {
+    const keep = Math.max(200, statement.length - (h.length - room) - 4);
+    if (keep + 4 < statement.length) h = head(statement.slice(0, keep) + ' ...');
+    if (h.length > room) h = h.slice(0, room - 4) + ' ...';
+  }
+  return h + '\\n' + cap(tail, 4000 - 1 - h.length);
 }`;
 // A model name that marks an abliterated model ("glm-abl", "<slug>-abl" from the pipeline, "...-abliterated",
 // "uncensored"): never the judge. Mirrored in app/copilot_runs.py (ABLITERATED).
@@ -119,8 +132,12 @@ const engagement = e ? { name: str(e.name, 120), version: Number.isInteger(e.ver
   window_start: str(e.window_start, 40) || null, window_end: str(e.window_end, 40) || null,
   autorun_passive: e.autorun_passive === true, autorun_active: e.autorun_active === true } : null;
 const task = str(src.task, 2000) || (mode === 'manual' ? 'Run the command the operator typed.' : '');
+// a typed command over the gate's 2000-character limit goes on cut, with ' ...' after the cut: the gate still sees more than
+// 2000 characters and blocks it. A plain cut would stage a prefix the operator never typed (the gate trims what the cut
+// leaves, so 'nmap ... <spaces>; id' would arrive as 'nmap ...').
+const typed = (v) => { const c = String(v ?? '').trim(); return c.length > 2000 ? c.slice(0, 2000) + ' ...' : c; };
 return [{ json: { task, target: str(src.target, 253), source: fromConsole ? 'console' : 'form', requestedBy: fromConsole ? str(src.requested_by, 120) : '',
-  mode, manualCommand: mode === 'manual' ? str(src.command, 2000) : '', operatorModel: fromConsole ? model(src.operator_model) : '',
+  mode, manualCommand: mode === 'manual' ? typed(src.command) : '', operatorModel: fromConsole ? model(src.operator_model) : '',
   judgeModel: fromConsole ? model(src.judge_model) : '', engagement } }];`);
 conn('Copilot form', 'Define task + target');
 conn('Respond: execution id', 'Define task + target');

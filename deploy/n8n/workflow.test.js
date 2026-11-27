@@ -138,6 +138,21 @@ for (const n of wf.nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   const m = def(hook({ target: '10.10.11.42', mode: 'manual', command: ' nmap -sV 10.10.11.42 ', operator_model: 'glm-abl', judge_model: 'qwen3:8b' }), ['Console webhook']);
   ok('manual mode: the command, a default task, the models', m.mode === 'manual' && m.manualCommand === 'nmap -sV 10.10.11.42' && m.task === 'Run the command the operator typed.'
     && m.operatorModel === 'glm-abl' && m.judgeModel === 'qwen3:8b', m);
+  // a typed command over 2000 characters must reach the gate as too long, never as the prefix a plain cut leaves
+  const longCmd = 'nmap -sV 10.10.11.42' + ' '.repeat(1985) + '; id';
+  const lm = def(hook({ target: '10.10.11.42', mode: 'manual', command: longCmd }), ['Console webhook']);
+  ok('manual mode: a command over 2000 characters goes on cut, marked, still over 2000', lm.manualCommand.length === 2004
+    && lm.manualCommand.endsWith(' ...') && lm.manualCommand.startsWith('nmap -sV 10.10.11.42'), lm.manualCommand.length);
+  const exact = 'curl -s http://10.10.11.42/?q=' + 'A'.repeat(1970);
+  ok('manual mode: a command of exactly 2000 characters is passed whole', def(hook({ target: '10.10.11.42', mode: 'manual', command: exact }), ['Console webhook']).manualCommand === exact);
+  {
+    const env = { LAB_ALLOWLIST: '10.10.11.0/24', LAB_AUTORUN_READONLY: 'true' };
+    const sg = run('Scope gate', { json: lm, env })[0].json;
+    const lp = run('Manual proposal', { json: sg })[0].json;
+    const lpol = run('Policy gate', { json: lp, env })[0].json.policy;
+    ok('manual mode: the over-long command is blocked by the gate, not staged as its first 2000 characters', lpol.allowed === false && lpol.autoRun === false
+      && lpol.reasons.join() === 'command longer than 2000 characters (the limit for manual commands too)', lpol.reasons);
+  }
   ok('a model name that is not a plain name is dropped', def(hook({ task: 't', target: 'x', operator_model: 'glm abl; rm', judge_model: '../x' }), ['Console webhook']).operatorModel === ''
     && def(hook({ task: 't', target: 'x', judge_model: '../x' }), ['Console webhook']).judgeModel === '');
   const e = def(hook({ task: 't', target: '10.10.11.42', engagement: { name: 'n'.repeat(300), version: 3, scope_in: Array.from({ length: 80 }, (_, i) => `10.10.11.${i}`),
@@ -360,6 +375,12 @@ for (const n of wf.nodes.filter((n) => n.type === 'n8n-nodes-base.code')) {
   const capped = prompts({ ...E, protected_data: Array.from({ length: 70 }, (_, i) => 'x'.repeat(38) + String(i).padStart(3, '0')) });
   ok('prompts: 70 entries of 41 characters -> a value of 1004 characters ending in " ...", the rules still follow',
     capped.every((p) => value(p).length === 1004 && value(p).endsWith(' ...') && p.includes(' ...\nRULES: Stop on PII.')), capped.map((p) => value(p).length));
+  // a scope statement as long as the console allows is cut to make room: the lines the gate enforces stay whole
+  const statement = 'Only the web tier at 10.10.11.0/28, no production data. '.repeat(80).slice(0, 3990);
+  const longScope = prompts(define({ ...E, scope_statement: statement, protected_data: ['customers.csv', '/backup/'] }).engagement);
+  ok('prompts: a scope statement of 3990 characters is cut, PROHIBITED, PROTECTED DATA and RULES stay whole in both prompts',
+    longScope.every((p) => p.includes('\nSCOPE STATEMENT: ' + statement.slice(0, 3700)) && p.includes(' ...\nIN SCOPE: 10.10.11.0/28\nPROHIBITED: hydra\n'
+      + label + 'customers.csv, /backup/\nRULES: Stop on PII.\n>>>')), longScope.map((p) => p.slice(-200)));
 }
 
 // ---- manual mode: the operator's command takes the same policy gate and judge, no model, no retrieval ----

@@ -294,7 +294,13 @@ flowchart LR
   - while reviewing that fix: its checks read the raw text, so quoting (`nc '-e'`, `"--script=vuln"`), attached values
     (`nc -e/bin/sh`) and abbreviations (`ncat --exe`, `smbmap --upl`) still auto-ran, and the active tier took any
     program with a safe `--script` or an enumeration flag (`python3 x.py --dbs # sqlmap`). The checks now read the words
-    bash hands each program, and the active tier's shapes need nmap, rustscan or sqlmap themselves.
+    bash hands each program, and the active tier's shapes need nmap, rustscan or sqlmap themselves;
+  - while verifying those fixes: the read-only checks still missed awk pipes to a variable (`print | cat`), sed's `e`
+    with another delimiter or after a `!` address (`s,x,id,e`, `1!e id`), program files (`awk -f`, `@include`,
+    `sed -f`), smbclient commands from stdin (`< cmds.txt`, a pipe), write requests in quoted, clustered or long
+    spellings (`curl -X 'DELETE'`, `-sXPUT`, `--request=PATCH`, `wget --method=DELETE`) and settings files (`curl -K`,
+    `wget -e`), and a long command took seconds to check (10 s for 16,000 characters). They now wait for a human, and
+    a command longer than 2000 characters is blocked.
 - **The judge reads the scope too** (`SCOPE (LAB_ALLOWLIST): ...`, in every run), still never the operator's free text:
   that text is the likeliest carrier of an injection aimed at the judge.
 - **Measured, not assumed:** `copilot/eval_judge.py` runs labelled commands that pass every gate through a real judge

@@ -92,6 +92,9 @@ instead of guessing a scope.
    compare the two character by character.
 5. **Parse.** The model output is data. The JSON object is extracted, with a fenced block as fallback.
 6. **Policy gate (`policy.js`): the boundary.**
+   - A command longer than 2000 characters is blocked before any check reads it: some checks take seconds on longer
+     text. "Define task + target" passes a longer typed command on cut and marked (`...` after 2000 characters), so the
+     gate blocks it too: a plain cut would stage a prefix the operator never typed.
    - Every host the command names must be in scope. Hosts are read from URLs, `//unc` paths, `user@host`, bare names
      (not file names like `common.txt`) and `localhost`. A file name whose extension the gate does not know as a file
      (`vault.kdbx`, `ntds.dit`, `lsass.dmp`, `web.config`, `mail.pst`) counts as a host name, so such a command is
@@ -111,22 +114,45 @@ instead of guessing a scope.
        as `grep`), or the names of a path entry apart in one command (`//fs01/HR$ -D Payroll` for `HR$/Payroll`).
      - **Waits for a human while the list has entries:** bulk retrieval, which fetches names the command does not spell
        (`wget -r`, smbclient `mget`, curl `[1-9]` globs, NSE scripts beyond default, version and banner, sqlmap dumps),
-       and names read at run time (`-i` lists, config files, pipes, `<` files). The rules cover every program that can
-       auto-run; a test fails when a read-only tool has not been reviewed for them.
+       names read at run time (`-i` lists, config files, pipes, `<` files), and a download the server names (curl `-J`
+       with `-O`, wget `--content-disposition` or `--trust-server-names` without `-O`): no URL shows that name, and it
+       can be a dotfile. The rules cover every program that can auto-run; a test fails when a read-only tool has not
+       been reviewed for them.
      - An empty list changes nothing. The result adds `protectedData` (the entries hit, as written), `dataReview` (why
        a human must look, at most 6 lines) and `protectedEntries` (how many entries the gate checked). The console stops
        a run that reports another count than it sent: that is an older workflow, which drops the list.
      - Both models read the list too, on a `PROTECTED DATA (do not read, download or copy)` line before the rules, cut
-       at 1000 characters. The gate enforces all of it.
-   - A read-only tool that runs a program, listens or changes a share never auto-runs: netcat `-e`, `-c` and `-l`, awk
-     `system()`, sed's `e`, `xargs`, smbclient `!` and its write commands, smbmap `-x`, `--upload` and `--delete`,
-     `ffuf -input-cmd`, nmap `--datadir` and `--resume`, rustscan `--config-path` and custom `--scripts`. nmap reads
-     `-script` like `--script`, and so does the gate. sqlmap options that dump, search or
-     read files leave the active tier, also in the spellings sqlmap accepts for them (`--sea`, `-dump`, Unicode dashes).
+       at 1000 characters. The gate enforces all of it. Of the 4000 characters of engagement text in each prompt, at
+       least 2000 (all of them, when shorter) go to prohibited tools, protected data and rules: a long scope statement
+       or long scope lists are cut first.
+   - These forms of a read-only tool never auto-run, with or without protected data, because they run a program, listen,
+     change a share, send data to the target or take commands or settings the gate cannot see:
+     - netcat `-e`, `-c` and `-l`, `xargs`, `ffuf -input-cmd`, `sort --compress-program`;
+     - awk `system()`, `getline` and pipes (`print | cmd`, `|&`), program files and libraries (`-f`, `-E`, `-i`, `-l`,
+       `@include`, `@load`), and an option the gate does not know. The word `system` in a regex or a string
+       (`/system/`, `$1=="system"`) is no call: gawk and mawk run it only as `system(`;
+     - sed's `e`, as a command or an `s` flag, in any spelling (`s,x,id,e`, `1!e id`), `sed -f`, and an option or a
+       script the gate cannot read (it reads scripts the way GNU sed compiles them);
+     - smbclient `!` and its write commands, and smbclient or rpcclient reading their commands from a file or a pipe
+       (`< cmds.txt`, `cat cmds.txt |`, an rpcclient here-string); rpcclient commands that create, delete, set, add or
+       change, also given as `--command=`;
+     - smbmap `-x`, `--upload` and `--delete`;
+     - a curl or wget request with a body or a method other than GET, HEAD, OPTIONS, TRACE or PROPFIND (curl `-d`,
+       `-F`, `-T`, `--json`, `-X DELETE`; wget `--post-data`, `--body-file`, `--method`);
+     - options that load settings or scripts from a file: curl `-K`, wget `-e` (other than `robots=off`) and
+       `--config`, ffuf, httpx and nikto `-config` (also `--config`), wfuzz `--recipe`, nmap `--datadir` and
+       `--resume`, rustscan `--config-path` and custom `--scripts`, less and more `-k` and `--lesskey-src` (a lesskey
+       file can set `LESSOPEN`, a program less runs on what it shows, also into a pipe);
+     - a variable set for the program (`CURL_HOME=/tmp curl`, `WGETRC=`, `HOME=`, `NMAPDIR=`, `LD_PRELOAD=`, `PATH=`,
+       `LESSOPEN=`): it can load a config, scripts, a library or another binary. Only the locale and the time zone
+       with a plain value (`LC_ALL=C sort`, `TZ=UTC`) still auto-run.
+
      These checks read the words bash hands the program, so quoting hides nothing (`nc '-e'`, `"--script=vuln"`, awk
-     `'sys''tem('`), and an option counts in the spellings the tool accepts: attached values (`nc -e/bin/sh`,
-     `ncat -lp4444`), long-option prefixes (`ncat --exe`, `smbmap --upl`) and smbclient's command prefixes (`ren`).
-     Every `--script` counts, not only the first.
+     `'sys''tem('`, `curl -X 'DELETE'`), and an option counts in the spellings the tool accepts: attached values
+     (`nc -e/bin/sh`, `ncat -lp4444`, `curl -XDELETE`), clusters (`curl -sXPUT`, `curl -sd`), long-option prefixes
+     (`ncat --exe`, `smbmap --upl`) and smbclient's command prefixes (`ren`). nmap reads `-script` like `--script`, and
+     so does the gate; every `--script` counts, not only the first. sqlmap options that dump, search or read files leave
+     the active tier, also in the spellings sqlmap accepts for them (`--sea`, `-dump`, Unicode dashes).
    - It decides the auto-run tier: a tier auto-runs only if its `LAB_AUTORUN_*` variable and the engagement both allow
      it.
 7. **Judge (regular model).** It sees the vetted command, the scope (`LAB_ALLOWLIST`, in every run) and the rules of
@@ -158,10 +184,11 @@ There is no runner yet. The policy gate reads a command the way bash does, so th
 - leave `WGETRC` and `CURL_HOME` unset.
 
 Otherwise comments, quoting, `;` and line breaks can mean something else to the runner than to the gate, and a file one
-command wrote can change what the next one fetches. The gate judges each command on its own. While protected data is
-listed, it sends a command that writes a dotfile (`wget -qO ~/.wgetrc`, `curl -so .curlrc`, or a wget or `curl -O`
-download named after a URL that ends in one) or sets one of those variables to a human, but it cannot see what such a
-file does to a later command.
+command wrote can change what the next one fetches. The gate judges each command on its own. A command that sets one
+of those variables (or any other but the locale and the time zone) for a program waits for a human. While protected
+data is listed, so does a command that writes a dotfile (`wget -qO ~/.wgetrc`, `curl -so .curlrc`, a wget or `curl -O`
+download named after a URL that ends in one, or a download the server names), but the gate cannot see what such a file
+does to a later command.
 
 ## Files
 
@@ -170,7 +197,7 @@ file does to a later command.
 | `workflows/pentest-copilot.json` | The importable workflow (44 nodes). **Generated**, do not hand-edit. |
 | `connect_console.py` | One-shot setup: credentials, the workflow (published), and, for the Kubernetes console, an n8n API key limited to reading and stopping executions plus the console's Secret. Safe to re-run. It first waits (`--wait`, 300 s) until `/healthz/readiness` answers 200: while n8n migrates its database, every request gets 200 "n8n is starting up", and its routes appear only after that, so it can run right after a deploy. `python -m unittest discover -s deploy/n8n` tests the wait against a fake n8n that starts like the real one. |
 | `build_workflow.js` | Generator: embeds `policy.js` into the Code nodes and reads the prompts from `copilot/operator_contract.json`. Every Code node is parsed at build time; `--check` fails if the JSON is stale. |
-| `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 184 tests. |
+| `policy.js` | The deterministic boundary. `node deploy/n8n/policy.test.js`: 197 tests. |
 | `protected_corpus.json` | 107 commands with protected data listed, each with the outcome it must get (37 blocked, 38 for a human, 32 pass) and its reason. `policy.test.js` runs them through `decide()`, along with the 59 entry vectors the console shares (`copilot/tests/fixtures/protected_vectors.json`). |
 | `workflow.test.js` | Runs each Code node's actual code with mocked n8n globals (neutralizer, `$env` fail-closed, parse, veto-only judge, store-down detection, result-page escaping, the protected-data bounds and prompt line). Also checks the graph: blocked runs never reach approval or execution, console runs never reach a form page, and the operator calls chat completions (not the Responses API). |
 | `test_ci_node_tests.py` | Checks that CI's n8n step runs every console test that needs node (`app/tests`, `skipUnless(NODE)`): the console image has no node, so there they pass by skipping. |
@@ -233,19 +260,30 @@ file does to a later command.
 
 ## Verified here, and how
 
-- **Unit tests:** `policy.test.js` (184), `workflow.test.js` (127), `python -m unittest discover -s copilot/tests -t .`
-  (54, including checks that the JS and Python neutralizers and prompt renderings are identical).
+- **Unit tests:** `policy.test.js` (197), `workflow.test.js` (131), `python -m unittest discover -s copilot/tests -t .`
+  (55, including checks that the JS and Python neutralizers and prompt renderings are identical),
+  `python -m unittest discover -s deploy/n8n` (6, including `test_ci_node_tests.py`: CI's n8n step runs the 5 console
+  tests that need node).
 - **Protected data:**
   - every command in `protected_corpus.json` gets its outcome and reason, and every entry the console accepts among
     the 59 shared vectors compiles in the gate to the same key;
+  - no key, an empty list and blank entries decide identically, every field included: 771 decisions over the corpus
+    commands and the 49 judge-eval cases, with their engagement and without one;
   - with an empty list, `decide()` returns what the gate returned before the field existed, apart from the three new
-    fields: compared for every corpus command and for all 49 judge-eval cases;
+    fields, for every corpus command and all 49 judge-eval cases, except where later fixes change it on purpose. Two
+    corpus commands that auto-ran (`wget -e recursive=on`, `curl -K fetch.cfg`) now wait for a human, because they load
+    settings the gate cannot see. Two corpus commands that already waited (`ncat … -c 'id'`, `smbclient … -c '!id'`)
+    give their escape as the active-tier reason, because the active tier consults the read-only checks too; so do
+    three judge-eval cases (`curl -X DELETE`, `curl -T`, `rpcclient … -c 'setuserinfo2 …'`). One more corpus command
+    that already waited (`F=customers.csv curl …/$F`) now gives the variable set for curl as its read-only and
+    active-tier reason;
   - with realistic lists for the three judge-eval engagements, only the three personal-data cases change, all to a
     block: `recon-pii-csv` (the judge's measured miss), `recon-pii-share` and `recon-pii-mysqldump`;
   - 80 red-team attacks on the design, replayed against this gate while it was built, each give their adjudicated
     outcome;
-  - in real n8n, `deploy/k8s/tests/pipeline-e2e.sh` (section 7b) checks it, including a fullwidth file name that only
-    the task runner's NFKC folds. That runs in CI, not in the sandbox this was built in.
+  - in real n8n, `deploy/k8s/tests/pipeline-e2e.sh` (section 7b) checks it, including a fullwidth file name and one
+    with a zero-width space inside, which only the task runner's NFKC and its removal of format characters catch.
+    That runs in CI, not in the sandbox this was built in.
 - **Live runs in real n8n 2.48.7** (`n8n execute`), with real models through transformers: the abliterated GLM-Edge-1.5B as
   operator, the base GLM-Edge-1.5B standing in for the judge, bge-small for embeddings. Ollama and Qdrant themselves are not
   reachable from the sandbox this was built in, so their HTTP APIs were served by stand-ins written to Ollama's and Qdrant's

@@ -194,6 +194,20 @@ class Store(unittest.TestCase):
         self.assertNotIn("hints", self.e.get(rec["version"]))                                  # worked out, not stored
         self.assertEqual([h["host"] for h in self.e.status()["hints"]], ["backup01.lab", "10.10.10.31"])
 
+    def test_rule_hints_find_what_the_host_regex_finds_in_linear_time(self):
+        # the regex backtracks over every start of a long dotted run: about a second on 8000 characters of rules
+        import random
+        rnd, parts = random.Random(1805), ["a", "l", "-", ".", ".", " ", "_", "\u00e9", "\u017f", "\u212a", "\u0130", "1", "lab", "local",
+                                           "htb", "corp", "de", "LAB", "s", "\n", "/"]
+        for _ in range(20000):
+            text = "".join(rnd.choice(parts) for _ in range(rnd.randint(0, 30)))
+            self.assertEqual(list(EN._hosts_in_text(text)), [m.group(0) for m in EN._HOST_IN_TEXT.finditer(text)], repr(text))
+        for run in ("a.", "1.", "a-a."):
+            text = ("Do not touch " + run * 4000)[:8000]
+            t = time.perf_counter()
+            EN.rule_hints({"roe": text, "scope_statement": text[:4000]})
+            self.assertLess(time.perf_counter() - t, 0.2, run)
+
     def test_validate_protected_data(self):
         v = self.e.validate({**GOOD, "protected_data": "customers.csv\n /backup/ , HR$\n\n  Personnel   Files "})
         self.assertEqual(v["protected_data"], ["customers.csv", "/backup/", "HR$", "Personnel Files"])
@@ -208,13 +222,47 @@ class Store(unittest.TestCase):
         with self.assertRaises(HTTPError) as cm:
             e.validate({"scope_in": "fs01.corp", "protected_data": "fs01.corp/HR$"})
         self.assertIn("contains a host in scope", cm.exception.msg)
-        self.assertEqual(e.validate({"protected_data": "fs01.corp/HR$"})["protected_data"], ["fs01.corp/HR$"])
+        with self.assertRaises(HTTPError) as cm:                                             # LAB_ALLOWLIST may list it
+            e.validate({"protected_data": "fs01.corp/HR$"})
+        self.assertIn("'fs01.corp/HR$' contains a host name (fs01.corp)", cm.exception.msg)
         with self.assertRaises(HTTPError) as cm:                                             # every problem at once
             self.e.validate({**GOOD, "protected_data": "a*\n~/.ssh\ncustomers.csv\n\\\\fs01\\HR$", "window_start": "x"})
         for part in ("protected_data: 'a*' is too broad", "protected_data: '~/.ssh' starts with ~",
                      "protected_data: '\\\\\\\\fs01\\\\HR$' names a host", "window_start"):
             self.assertIn(part, cm.exception.msg)
         self.assertNotIn("customers.csv", cm.exception.msg)
+
+    def test_a_host_in_an_entry_needs_the_ceiling(self):
+        # the gate blanks the hosts LAB_ALLOWLIST lists before it reads a command, so web01.lab/backup protects nothing
+        # there. A console started without LAB_ALLOWLIST (python app/server.py) cannot tell which hosts those are: it refuses
+        # every host name and address in an entry. With the ceiling only in-scope hosts are refused, as before.
+        bare = EN.Engagements(self.dir, http_error=HTTPError)
+        with self.assertRaises(HTTPError) as cm:
+            bare.validate({"protected_data": "web01.lab/backup"})
+        self.assertEqual(cm.exception.msg, "protected_data: 'web01.lab/backup' contains a host name (web01.lab): the console does not "
+                         "know LAB_ALLOWLIST, so it cannot tell whether the gate reads it as a host; write the path without the host")
+        for entry, part in (("/var/www/acme.com/uploads/", "a host name (acme.com)"), ("Backups/WEB01.LAB/*.sql", "a host name (web01.lab)"),
+                            ("ｗｅｂ０１.lab/backup", "a host name (web01.lab)"), ("web01.lab exports", "a host name (web01.lab)"),
+                            ("10.10.10.5/backup", "an address (10.10.10.5): the console does not know LAB_ALLOWLIST")):
+            with self.assertRaises(HTTPError, msg=entry) as cm:
+                bare.validate({"protected_data": [entry, "customers.csv"]})
+            self.assertIn(part, cm.exception.msg, entry)
+            self.assertNotIn("customers.csv", cm.exception.msg, entry)
+        names = ["customers.csv", "/backup/", "HR$", "*.kdbx", "backup.zip", "\\Users\\jdoe\\Documents"]
+        self.assertEqual(bare.validate({"protected_data": names})["protected_data"], names)
+        with self.assertRaises(HTTPError) as cm:                                     # a host the scope lists keeps its reason
+            bare.validate({"scope_in": "web01.lab", "protected_data": "web01.lab/backup"})
+        self.assertIn("contains a host in scope", cm.exception.msg)
+        # with the ceiling (copilot-scope): a host name or address outside the scope is a name, an in-scope one is refused
+        kept = ["/var/www/acme.com/uploads/", "web01.lab/backup", "10.20.0.5/backup"]
+        self.assertEqual(self.e.validate({**GOOD, "protected_data": kept})["protected_data"], kept)
+        self.bad({**GOOD, "protected_data": "box.htb/backup"}, "contains a host in scope")
+        # the hints offer only what the console saves: no suggestion or move with a host while the ceiling is unknown
+        fields = {"name": "x", "roe": "Do not copy anything from /srv/backups/web01.lab/.", "prohibited": ["/srv/web01.lab/exports/"]}
+        self.assertEqual([(h["kind"], h["entry"]) for h in EN.data_hints(fields, self.e.scope(fields))],
+                         [("suggest", "/srv/backups/web01.lab/"), ("move", "/srv/web01.lab/exports/")])
+        self.assertEqual(EN.data_hints(fields, bare.scope(fields), ceiling_known=False), [])
+        self.assertEqual((bare.save(fields)["data_hints"], bare.status()["data_hints"]), ([], []))
 
     def test_payload_carries_protected_data_only_when_set(self):
         self.e.save(GOOD, {"user": "admin"})

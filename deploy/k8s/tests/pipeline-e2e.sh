@@ -17,7 +17,7 @@
 #      n8n key can only read and stop executions; a free prompt streams from glm-serve; feed and audit record it all
 #  7b. copilot v2 through the same n8n: model lists, the engagement's scope, prohibited tools and protected data
 #      enforced by the gates, manual commands, the exact prompts each model got; a protected file name is blocked in
-#      code, in fullwidth letters too, and a recursive wget waits for a human
+#      code, in fullwidth letters and with a zero-width space inside too, and a recursive wget waits for a human
 #   8. knowledge uploads through the login into real Qdrant: markdown and PDF indexed, a scanned PDF refused, the
 #      engagement preview's redactions; a copilot run retrieves them; delete empties store and folder, and the next
 #      run finds nothing; no deletes outside the writeups folder; audited
@@ -290,6 +290,10 @@ check "protected data: the gate reports both entries in force" test "$(ev "$PD" 
 # alone would block it with a reason that names only /backup/
 FW=$(copilot_run_json '{"target":"10.10.10.5","mode":"manual","command":"curl -s http://10.10.10.5/backup/ｃｕｓｔｏｍｅｒｓ.csv"}' done error)
 check "protected data: NFKC works in the real task runner (fullwidth name blocked)" grep -q 'command names protected data: customers.csv' <<<"$(ev "$FW" policy '.data.reasons[0]')"
+# a zero-width space (U+200B) inside the name: only the task runner's removal of format characters (\p{Cf}) turns it
+# into customers.csv. Written as a JSON escape, which stays visible here; the console decodes it, n8n gets the character
+ZW=$(copilot_run_json '{"target":"10.10.10.5","mode":"manual","command":"curl -s http://10.10.10.5/backup/cust\u200bomers.csv"}' done error)
+check "protected data: format characters are removed in the real task runner (zero-width space in the name blocked)" grep -q 'command names protected data: customers.csv' <<<"$(ev "$ZW" policy '.data.reasons[0]')"
 BK=$(copilot_run_json '{"target":"10.10.10.5","mode":"manual","command":"wget -r -np http://10.10.10.5/files/"}' waiting done error)
 stop_if_waiting "$BK"
 check "protected data: a recursive wget waits for a human, with the reason" grep -q 'needs a human: bulk retrieval while data is protected: wget -r/-m/-p (recursion)' <<<"$(ev "$BK" policy .message)"

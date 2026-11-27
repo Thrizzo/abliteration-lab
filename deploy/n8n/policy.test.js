@@ -333,6 +333,9 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     ["smbclient //10.10.10.20/Public -N -c 'ren a.txt b.txt'", /smbclient command/], ["smbclient //10.10.10.20/Public -N <<< 'pu x.exe'", /smbclient command/],
     ['smbmap -H 10.10.10.5 -u a -p b --upl x IT/x', /smbmap that runs a command/], ['smbmap -H 10.10.10.5 -u a -p b --dele IT/x', /smbmap that runs a command/],
     ["nmap -sC '--datadir' /tmp/x 10.10.10.5", /nmap --datadir or --resume/],
+    // the program inside a process substitution, a quoted --script among the words rustscan hands nmap, smbclient --command
+    ['nmap -sV 10.10.10.5 <(python3 x.py)', /not on the read-only tool allowlist/], ['rustscan -a 10.10.10.5 -- "--script=vuln"', /NSE beyond safe/],
+    ["smbclient //10.10.10.20/Public -N --command='ren a.txt b.txt'", /smbclient command/],
   ];
   for (const [c, rx] of SPELLED) {
     const d = gate(c);
@@ -342,10 +345,12 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     "sqlmap -u http://10.10.10.5/?id=1 --dbs '--sea' -T users --batch", "sqlmap -u http://10.10.10.5/?id=1 --dbs '-a' --batch"]
     .every((c) => { const d = gate(c); return d.allowed && !d.autoRun && /sqlmap option that dumps, searches or reads files/.test(d.activeReconReason); }));
   // the active tier's shapes belong to their program: a --script or --dbs word on another program auto-ran in the active
-  // tier, and so did the escapes the passive tier catches (nmap --datadir, rustscan custom scripts)
+  // tier, and so did the escapes the passive tier catches (nmap --datadir, rustscan custom scripts, NMAPDIR or LD_PRELOAD
+  // set for the program)
   const NOT_ACTIVE = ['hydra -l admin -P /usr/share/wordlists/rockyou.txt ssh://10.10.10.5 --script=safe', 'python3 exploit.py 10.10.10.5 --script safe',
     'python3 exploit.py 10.10.10.5 --dbs # sqlmap', 'nmap --datadir /tmp/x --script=safe 10.10.10.5', 'nmap --resume /tmp/x.log --script=safe 10.10.10.5',
-    'rustscan -a 10.10.10.5 --scripts custom -- --script=safe'];
+    'rustscan -a 10.10.10.5 --scripts custom -- --script=safe', 'NMAPDIR=/tmp/x nmap --script=safe 10.10.10.5',
+    'LD_PRELOAD=/tmp/e.so sqlmap -u http://10.10.10.5/?id=1 --dbs --batch'];
   const activeOff = NOT_ACTIVE.filter((c) => { const d = gate(c); return d.autoRun || d.activeRecon; });
   ok(`REGRESSION: the active tier checks the program and its escapes (off: ${activeOff.join(' | ') || 'none'})`, activeOff.length === 0);
   const STILL = [['nmap --script=safe,version 10.10.10.5', 'active_recon'], ['rustscan -a 10.10.10.5 -- --script safe', 'passive'],
@@ -354,6 +359,200 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     ["smbclient //10.10.10.20/Data -N -c 'more notes.txt'", 'passive'], ["smbclient //10.10.10.20/Data -N -c 'reget notes.txt'", 'passive']];
   const stillOff = STILL.filter(([c, tier]) => gate(c).tier !== tier).map(([c]) => c);
   ok(`their compliant forms keep their tier (off: ${stillOff.join(' | ') || 'none'})`, stillOff.length === 0);
+}
+
+// ---- awk and sed scripts read like the programs read them, smbclient and rpcclient commands from stdin, curl and wget
+// requests that send data, settings files, and the length limit. Each escape here waits for a human, with and without
+// protected data; most auto-ran in the passive tier before (found by the verification of the review fixes) ----
+{
+  const { execEscape, shellSegments } = require('./policy');
+  const base = { allowlist: ['10.10.10.0/24'], autoRunReadOnly: true, autoRunActiveRecon: true };
+  const tiers = engagementConfig({ autorun_passive: true, autorun_active: true }, base);
+  const listed = engagementConfig({ autorun_passive: true, autorun_active: true, protected_data: ['customers.csv'] }, base);
+  const gate = (c, cfg = tiers) => decide({ command: c, target: '10.10.10.5' }, cfg);
+  const P = 'curl -s http://10.10.10.5/ | ';
+  const AWK = /awk that runs a program \(system, pipes, getline\)/, AWK_FILE = /awk that runs a program from a file or a library/;
+  const AWK_AT = /awk that loads or calls code the gate cannot see/, AWK_OPT = /awk option the gate cannot read/;
+  const SED = /sed e runs a program/, SED_FILE = /sed that runs a script from a file/, SED_UNREAD = /sed script or option the gate cannot read/;
+  const SMB = (p) => new RegExp(`${p} reads its commands from a file or a pipe \\(commands the gate cannot see\\)`);
+  const CURL = /curl that sends data or a non-read method/, WGET = /wget that sends data or a non-read method/;
+  const SETTINGS = (label) => new RegExp(`^${label.replace(/[/-]/g, '\\$&')} \\(settings the gate cannot see\\)$`);
+  const SORT = /^sort --compress-program runs a program$/;
+  const ENV = (name) => new RegExp(`^environment variable ${name} \\(settings, scripts or programs the gate cannot see\\)$`);
+  const ESCAPES = [
+    // awk: a pipe to anything (a variable named cat or sort too), getline, system(), every -e/--source text, program
+    // files, includes, libraries and the debugger's command file, in quoted and attached spellings; a getline split by a
+    // backslash-newline is read joined (stricter than gawk and mawk, which read two names there)
+    [`${P}awk 'BEGIN{cat="id"}{print | cat }'`, AWK], [`${P}awk 'BEGIN{sort="id"} {print |sort }'`, AWK], [`${P}awk 'NR==1{getline x}'`, AWK],
+    [`${P}awk 'BEGIN{system("id")}'`, AWK], [`${P}awk 'BEGIN{system ("id")}'`, AWK], [`${P}awk $'NR==1{get\\\\\\nline x}'`, AWK],
+    [`${P}awk -e '{print}' -e '@include "/tmp/prog"'`, AWK_AT], [`${P}awk -F: --source '@load "ext"'`, AWK_AT],
+    [`${P}awk -f /tmp/prog`, AWK_FILE], [`${P}awk -f/tmp/prog`, AWK_FILE], [`${P}awk --file=/tmp/prog`, AWK_FILE], [`${P}awk -v x=1 '-f' /tmp/prog`, AWK_FILE],
+    [`${P}awk -E /tmp/prog`, AWK_FILE], [`${P}awk --exec /tmp/prog`, AWK_FILE], [`${P}awk -W exec /tmp/prog`, AWK_FILE], [`${P}awk -We /tmp/prog`, AWK_FILE],
+    [`${P}awk -i lib '{print}'`, AWK_FILE], [`${P}awk --include=lib '{print}'`, AWK_FILE], [`${P}awk -l ext '{print}'`, AWK_FILE],
+    [`${P}awk --load ext '{print}'`, AWK_FILE], [`${P}awk -D 'BEGIN{}'`, AWK_FILE], [`${P}awk --debug 'BEGIN{}'`, AWK_FILE],
+    [`${P}awk '@include "/tmp/prog"'`, AWK_AT], [`${P}awk '@load "ext"'`, AWK_AT], [`${P}awk -v f=system 'BEGIN{@f("id")}'`, AWK_AT],
+    [`${P}awk '{print}' -f /tmp/prog`, AWK_OPT], [`${P}awk -Q '{print}'`, AWK_OPT],
+    // sed: e and the s command's e flag in any delimiter and after any address, every -e/--expression script, the first
+    // operand, script files, option clusters and long-option prefixes; what it cannot read waits too
+    [`${P}sed 's,x,id,e'`, SED], [`${P}sed 's%x%id%e'`, SED], [`${P}sed 's,[,],id,e'`, SED], [`${P}sed '1!e id'`, SED], [`${P}sed '1,3!e id'`, SED],
+    [`${P}sed '0,/re/e id'`, SED], [`${P}sed '1~2e id'`, SED], [`${P}sed '/re/I e id'`, SED], [`${P}sed '\\,re,e id'`, SED], [`${P}sed '/a/,+2e id'`, SED],
+    [`${P}sed '/a/,~4e id'`, SED], [`${P}sed e`, SED], [`${P}sed ':a s,x,id,e'`, SED], [`${P}sed -n -e p -e '1!e id'`, SED],
+    [`${P}sed -e 's/x/y/' -e 's,x,id,e'`, SED],
+    [`${P}sed --expression='s,x,id,e'`, SED], [`${P}sed --expr 's,x,id,e'`, SED], [`${P}sed -ne 's,x,id,ep'`, SED], [`${P}sed -nes,x,id,ep`, SED],
+    [`${P}sed -s -E -l 5 's,x,id,e'`, SED], [`${P}sed -ie 's,x,id,e' notes.txt`, SED], [`${P}sed 's,x,y,' -e 's,x,id,e'`, SED],
+    [`${P}sed 's,x,id,e' -e p`, SED], [`${P}sed -e 's,x,id,e' --sandbox`, SED],
+    // a comment, a w file name or the w flag ends at its line: the e in the next -e chunk runs (GNU sed 4.9 runs both)
+    [`${P}sed -e '#x' -e 's,x,id,e'`, SED], [`${P}sed -e 'w out.txt' -e 's,x,id,e'`, SED], [`${P}sed -e 's/a/b/w out.txt' -e 's,x,id,e'`, SED],
+    [`${P}sed -f /tmp/prog`, SED_FILE], [`${P}sed -f/tmp/prog`, SED_FILE], [`${P}sed --file=/tmp/prog`, SED_FILE], [`${P}sed --fil /tmp/prog`, SED_FILE],
+    [`${P}sed -nf /tmp/prog`, SED_FILE], [`${P}sed 'k'`, SED_UNREAD], [`${P}sed -h p`, SED_UNREAD], [`${P}sed 's/x/y/q'`, SED_UNREAD],
+    // smbclient and rpcclient commands from a < file, a pipe or a process substitution; rpcclient's here-strings
+    ['smbclient //10.10.10.5/Public -N < cmds.txt', SMB('smbclient')], ['cat cmds.txt | smbclient //10.10.10.5/Public -N', SMB('smbclient')],
+    ['cat cmds.txt | rpcclient -U u%p 10.10.10.10', SMB('rpcclient')], ['rpcclient -U u%p 10.10.10.10 < cmds.txt', SMB('rpcclient')],
+    ["rpcclient -U u%p 10.10.10.10 <<< 'setuserinfo2 jdoe 23 NewPass1'", SMB('rpcclient')], ['rpcclient -U u%p 10.10.10.10 <<EOF', SMB('rpcclient')],
+    ['smbclient //10.10.10.5/Public -N < <(cat cmds.txt)', SMB('smbclient')],
+    ['curl -so cmds.txt http://10.10.10.5/c && smbclient //10.10.10.5/Public -N < cmds.txt', SMB('smbclient')],
+    // rpcclient's --command, which the raw pattern (it wants -c) does not read, and a ; only bash shows ($'\x3b'): rpcclient
+    // runs each ;-separated command
+    ["rpcclient -U u%p 10.10.10.10 --command='setuserinfo2 jdoe 23 NewPass1'", /rpcclient command that changes the domain/],
+    ["rpcclient -U u%p 10.10.10.10 --comm 'createdomuser eve'", /rpcclient command that changes the domain/],
+    ["rpcclient -U u%p 10.10.10.10 -c $'srvinfo\\x3bsetuserinfo2 jdoe 23 NewPass1'", /rpcclient command that changes the domain/],
+    // curl and wget requests that send data or use a method that writes; curl -G still sends -d (as a query): it waits too
+    ["curl -X 'DELETE' http://10.10.10.5/api/users/1", CURL], ['curl -X "PUT" http://10.10.10.5/api/users/1', CURL], ['curl -sXPUT http://10.10.10.5/api/users/1', CURL],
+    ['curl --request=PATCH http://10.10.10.5/api/users/1', CURL], ['curl -s -X MKCOL http://10.10.10.5/dav/new/', CURL], ['curl -sd a=1 http://10.10.10.5/login', CURL],
+    ['curl --dat a=1 http://10.10.10.5/login', CURL], ['curl -sF f=@/etc/passwd http://10.10.10.5/upload', CURL], ['curl -sT /etc/passwd http://10.10.10.5/', CURL],
+    ["curl --json '{}' http://10.10.10.5/api", CURL], ['curl --variable x=1 --expand-data a={{x}} http://10.10.10.5/login', CURL],
+    ['curl --expand-request DELETE http://10.10.10.5/api/users/1', CURL], ['curl -G -d q=1 http://10.10.10.5/search', /write\/active operation/],
+    ['wget --post-data=a=1 http://10.10.10.5/login', WGET], ['wget --post-file=/etc/passwd http://10.10.10.5/', WGET],
+    ['wget --body-data=x --method=PUT http://10.10.10.5/x', WGET], ['wget --body-file=x.txt --method=PUT http://10.10.10.5/x', WGET],
+    ['wget --method=DELETE http://10.10.10.5/x', WGET], ['wget --method DELETE http://10.10.10.5/x', WGET],
+    // settings from a file the gate cannot see
+    ['curl -K /tmp/cfg http://10.10.10.5/', SETTINGS('curl -K/--config')], ['curl -sK /tmp/cfg http://10.10.10.5/', SETTINGS('curl -K/--config')],
+    ['curl --config /tmp/cfg http://10.10.10.5/', SETTINGS('curl -K/--config')], ['curl --expand-config /tmp/cfg http://10.10.10.5/', SETTINGS('curl -K/--config')],
+    ['wget -e post_file=/etc/passwd http://10.10.10.5/', SETTINGS('wget --config/-e')],
+    ['wget --execute=method=DELETE http://10.10.10.5/', SETTINGS('wget --config/-e')], ['wget --config=/tmp/wgetrc http://10.10.10.5/', SETTINGS('wget --config/-e')],
+    ['wget -qe robots=off -e post_data=a http://10.10.10.5/', SETTINGS('wget --config/-e')],
+    ['ffuf -u http://10.10.10.5/FUZZ -w /usr/share/wordlists/dirb/common.txt -config /tmp/ffuf.json', SETTINGS('ffuf -config')],
+    ['httpx -u http://10.10.10.5 -config x.yaml', SETTINGS('httpx -config')], ['nikto -h http://10.10.10.5 -config /tmp/nikto.conf', SETTINGS('nikto -config')],
+    ['wfuzz --recipe r.json -w /usr/share/wordlists/dirb/common.txt http://10.10.10.5/FUZZ', SETTINGS('wfuzz --recipe')],
+    // in the other spellings the tools read: Go's flag package (ffuf, httpx) takes --config and =value, nikto's Getopt::Long
+    // --config, wfuzz's getopt --recipe=v and unique prefixes (--rec)
+    ['ffuf -u http://10.10.10.5/FUZZ -w /usr/share/wordlists/dirb/common.txt --config /tmp/ffuf.json', SETTINGS('ffuf -config')],
+    ['httpx -u http://10.10.10.5 --config=x.yaml', SETTINGS('httpx -config')], ['nikto -h http://10.10.10.5 --config /tmp/nikto.conf', SETTINGS('nikto -config')],
+    ['wfuzz --recipe=r.json -w /usr/share/wordlists/dirb/common.txt http://10.10.10.5/FUZZ', SETTINGS('wfuzz --recipe')],
+    ['wfuzz --rec r.json -w /usr/share/wordlists/dirb/common.txt http://10.10.10.5/FUZZ', SETTINGS('wfuzz --recipe')],
+    // less (and more, which can be less) with a lesskey file: its #env section sets LESSOPEN, a program less 590 runs on
+    // each file, and on stdin with |-, while writing to a pipe
+    ['curl -so k http://10.10.10.5/k && curl -so x http://10.10.10.5/ && less --lesskey-src=k x', SETTINGS('less -k/--lesskey-src')],
+    ['curl -so k http://10.10.10.5/k && less -k k x', SETTINGS('less -k/--lesskey-src')], [`${P}less --lesskey-file k`, SETTINGS('less -k/--lesskey-src')],
+    [`${P}less -Rk k`, SETTINGS('less -k/--lesskey-src')], [`${P}less --lesskey-s k`, SETTINGS('less -k/--lesskey-src')],
+    [`${P}less --lesskey-content=x`, SETTINGS('less -k/--lesskey-src')], [`${P}more -k k`, SETTINGS('more -k/--lesskey-src')],
+    // GNU sort runs the program --compress-program names (getopt_long: =v or the next word, unique prefixes, quoted)
+    [`${P}sort -S1 --compress-program=id`, SORT], [`${P}sort --compress-program=/tmp/x -S1`, SORT], [`${P}sort --co /tmp/x -S1`, SORT],
+    [`${P}sort -S1 '--compress-prog' id`, SORT],
+    // a variable set for the program: a .curlrc or .wgetrc the gate cannot see (curl -K and wget --config wait too), NSE
+    // scripts, a library, another binary, a less preprocessor bash decodes from $'...', a locale value with a slash
+    ['CURL_HOME=/tmp curl -s http://10.10.10.5/', ENV('CURL_HOME')], ['WGETRC=/tmp/rc wget http://10.10.10.5/', ENV('WGETRC')],
+    ['XDG_CONFIG_HOME=/tmp curl -s http://10.10.10.5/', ENV('XDG_CONFIG_HOME')], ['HOME=/tmp curl -s http://10.10.10.5/', ENV('HOME')],
+    ['curl -so /tmp/rc http://10.10.10.5/rc && WGETRC=/tmp/rc wget http://10.10.10.5/', ENV('WGETRC')],
+    ['curl -so /tmp/e.so http://10.10.10.5/e.so && LD_PRELOAD=/tmp/e.so curl -s http://10.10.10.5/', ENV('LD_PRELOAD')],
+    ['NMAPDIR=/tmp/x nmap -sC 10.10.10.5', ENV('NMAPDIR')], ['PATH=/tmp/x curl -s http://10.10.10.5/', ENV('PATH')],
+    ['sudo LD_PRELOAD=/tmp/e.so nmap -sV 10.10.10.5', ENV('LD_PRELOAD')], ["curl -so x http://10.10.10.5/ && LESSOPEN=$'\\x7cid\\x20%s' less x", ENV('LESSOPEN')],
+    ['nmap -sV 10.10.10.5 | LC_ALL=/tmp/x sort -u', ENV('LC_ALL')], ['TZ=../../tmp/x nmap -sV 10.10.10.5', ENV('TZ')],
+  ];
+  const escOff = ESCAPES.filter(([c, rx]) => [gate(c), gate(c, listed)].some((d) => !d.allowed || d.autoRun || d.readOnly || !rx.test(d.readOnlyReason)))
+    .map(([c]) => `${c} (${gate(c).readOnlyReason})`);
+  ok(`REGRESSION: ${ESCAPES.length} awk, sed, smbclient, rpcclient, curl, wget, settings, sort and environment escapes wait for a human, with and`
+    + ` without protected data (off: ${escOff.join(' | ') || 'none'})`, escOff.length === 0);
+  // their compliant forms stay passive, with and without protected data: plain filters, local writes (sed w, sed -i, like
+  // curl -o), visible here-strings, read methods, -o values that hold a d; --sandbox before the script makes sed refuse e.
+  // The word system in an awk regex or string is no call (gawk and mawk refuse it without its parenthesis); the locale and
+  // the time zone set for a program change no file it reads; PROPFIND and TRACE only read (RFC 4918, RFC 9110); less
+  // and more without a lesskey file (less runs no + command while it writes to a pipe)
+  const PASSIVE = [`${P}awk -F: '{print $1}'`, `${P}awk '{print $1 > 5}'`, `${P}awk -v x=1 '{print x, $1}'`, `${P}awk -F, -v OFS=, '{print $1,$3}'`,
+    `${P}awk '$2 ~ /open/ {print $1}'`, `${P}awk -- '{print $1}'`, `${P}awk -W interactive '{print}'`,
+    `${P}awk '/system/{print}'`, `${P}awk '$1=="system"{print $2}'`, `${P}awk 'BEGIN{print "=== system report ==="}{print}'`,
+    `${P}awk '{gsub("system","SYS")}1'`, "snmpwalk -v2c -c public 10.10.10.5 | awk '/system/{print}'",
+    'nmap -sV 10.10.10.5 | LC_ALL=C sort -u', 'LANG=C nmap -sV 10.10.10.5', 'TZ=UTC curl -s http://10.10.10.5/', `${P}sort -t: -k2 -S1 | uniq -c`,
+    "curl -s -X PROPFIND -H 'Depth: 1' http://10.10.10.5/webdav/", 'curl -s -X TRACE -i http://10.10.10.5/', 'curl -s --request PROPFIND http://10.10.10.5/dav/',
+    'wget --method=PROPFIND -q -O- http://10.10.10.5/dav/', `${P}less -RK`, `${P}less -S +G`, `${P}more`,
+    `${P}sed -n 's/x/y/p'`, `${P}sed 's/tree/leaf/g'`, `${P}sed '/foo/d'`, `${P}sed -E 's/(a)/\\1/'`, `${P}sed -ne '/x/p'`, `${P}sed 's/x/y/w out.txt'`,
+    `${P}sed -n '1,5p'`, `${P}sed 's/[[:space:]]//g'`, `${P}sed 's:[[:alpha:]]:X:g'`, `${P}sed -e 's/a/b/' -e 's/c/d/'`, `${P}sed -i.bak 's/x/y/' notes.txt`,
+    `${P}sed --sandbox 's,x,id,e'`,
+    'smbclient -L //10.10.10.5 -N', "smbclient //10.10.10.5/Public -N -c 'ls'", 'smbclient -N -L //10.10.10.5 < /dev/null',
+    "smbclient //10.10.10.5/Public -N <<< 'ls'", "rpcclient -U '' -N 10.10.10.10 -c 'enumdomusers'", "rpcclient -U '' -N 10.10.10.10 --command=querydominfo",
+    'curl -I http://10.10.10.5/', 'curl -X GET http://10.10.10.5/', 'curl -X HEAD http://10.10.10.5/', 'curl -X OPTIONS http://10.10.10.5/',
+    'curl -sXGET http://10.10.10.5/', 'curl --request=HEAD http://10.10.10.5/', 'wget -q -O- http://10.10.10.5/', 'wget --method=GET -q -O- http://10.10.10.5/',
+    'curl -sSLo out.html http://10.10.10.5/', 'curl -sSLod.html http://10.10.10.5/', "curl -s -H 'X-Data: 1' http://10.10.10.5/",
+    'wget -e robots=off -q -O- http://10.10.10.5/'];
+  const passiveOff = PASSIVE.filter((c) => [gate(c), gate(c, listed)].some((d) => d.tier !== 'passive')).map((c) => `${c} (${gate(c).readOnlyReason})`);
+  ok(`their compliant forms stay passive, with and without protected data (off: ${passiveOff.join(' | ') || 'none'})`, passiveOff.length === 0);
+  // the classifier itself, on the words of one segment: scripts the raw split already sends to a human (a quoted |) are
+  // read right too, and || is a logical or
+  const seg = (c) => shellSegments(c).find((s) => /^(awk|sed)$/.test(s.words[0].text));
+  const SCRIPTS = [["sed 's|x|id|e'", SED], ["sed 's|a|b|'", null], ["sed -n -e p -e 'y/a/b/;e id'", SED], ["sed -e 's;x;id;e'", SED],
+    ["sed -e '1a\\' -e '1!e id'", null], ["sed '1a foo\ns,x,id,e'", SED], ["sed '1a\\\nfoo\ns,x,id,e'", SED], ["sed '1i\\\ns,x,id,e'", null],
+    ["awk '$1==\"a\" || $2==\"b\"'", null], ["awk 'NR>1 && $2 ~ /open/ {print $1}'", null],
+    ["awk '{\"id\" |& getline x; print x}'", AWK], ["awk -e 'BEGIN{c=\"id\"}{print | c}'", AWK], ["awk -F: -e '{print}' --source='{print | c}'", AWK],
+    ["awk 'BEGIN{f=\"sys\" \"tem\"; @f(\"id\")}'", AWK_AT], ["awk '{print $1 |\"sort\"}'", AWK],
+    ["awk -F'|' '{print $2}'", null], ["awk '{print a ||| b}'", AWK], ["awk 'BEGIN { sys\\\ntem(\"id\") }'", AWK],
+    ["awk '/system/{print}'", null], ["awk 'BEGIN{print \"system\"}'", null], ["awk 'BEGIN{system\\\n (\"id\")}'", AWK]];
+  const scriptOff = SCRIPTS.filter(([c, rx]) => { const r = execEscape(c.split(' ')[0], seg(c)); return rx ? !rx.test(r) : r !== ''; }).map(([c]) => c);
+  ok(`execEscape reads sed and awk scripts from the words (off: ${scriptOff.join(' | ') || 'none'})`, scriptOff.length === 0);
+
+  // a proposal longer than 2000 characters (the manual-command limit) is blocked before any check reads it, with every
+  // field of the result; 2000 characters still auto-run. The smbclient/rpcclient regexes took ~10 s at 16,000.
+  {
+    const fill = (n) => 'curl -s http://10.10.10.5/' + 'a'.repeat(n - 26);
+    const at = gate(fill(2000)), over = gate(fill(2001)), overListed = decide({ command: fill(2001), target: '10.10.10.5' },
+      engagementConfig({ autorun_passive: true, protected_data: ['customers.csv', '%41'] }, base));
+    const why = 'command longer than 2000 characters (the limit for manual commands too)';
+    const want = { allowed: false, readOnly: false, readOnlyReason: why, activeRecon: false, activeReconReason: why, injectionSuspected: false, injectionHits: [],
+      unverifiable: [], namesInScopeHost: false, autoRun: false, tier: null, requiresApproval: false, reasons: [why], prohibited: [], command: fill(2001),
+      target: '10.10.10.5', mentioned: [], protectedData: [], dataReview: [], protectedEntries: 0 };
+    ok('a 2000-character command still auto-runs', fill(2000).length === 2000 && at.allowed && at.tier === 'passive');
+    ok('a 2001-character command is blocked before any check, with every field of the result (protectedEntries counts the list)',
+      JSON.stringify(over) === JSON.stringify(want) && JSON.stringify(Object.keys(over)) === JSON.stringify(Object.keys(at))
+      && JSON.stringify(overListed) === JSON.stringify({ ...want, protectedEntries: 2 }));
+    const slow = 'rpcclient -U u%p 10.10.10.10 -c ' + 'rpcclient -c '.repeat(1230);
+    let best = Infinity;
+    for (let r = 0; r < 3; r++) { const t0 = Date.now(); gate(slow); best = Math.min(best, Date.now() - t0); }
+    ok(`a ${slow.length}-character rpcclient command is blocked in ${best} ms (< 50)`, slow.length > 16000 && !gate(slow).allowed && best < 50);
+  }
+
+  // the raw smbclient and rpcclient checks run in linear time. Their regexes backtracked over every pair of positions:
+  // 2000 characters of program names and -c words took up to 67 ms and put decide() with a list past 100 ms, 6000
+  // characters ~0.7 s. The linear check finds a write exactly when those regexes do (seeded strings that put a program
+  // name, a -c and a command in order, spelled at the edges of what the regexes take, with separators and the same words
+  // as filler).
+  {
+    const OLD = [/\bsmbclient\b[^|;&]*-c\b[^|;&]*\b(put|mkdir|rmdir|del|rename|rm)\b/i,
+      /\brpcclient\b[^|;&]*-c\b[^|;&]*(^|[\s'"])(create|delete|del|set|add|chg)\w*/i];
+    const SMB = ['put', 'Put', 'rm', 'rmx', 'del', 'set'], RPC = ['set', 'SETx', 'chg', 'addx', 'xset', 'put'];
+    const PROG = [['smbclient', SMB], ['SMBclient', SMB], ['xsmbclient', SMB], ['rpcclient', RPC], ['Rpcclient', RPC], ['rpcclient_', RPC]];
+    const DASHC = ['-c', '-c', '-C', '-cx', '-c-', 'x-c'];
+    const FILL = [' ', ' ', ' ', '\t', '\n', "'", '"', ';', '|', '&', 'x', '_', '-', '1', 'c', 'smbclient', 'rpcclient', '-c', 'put', 'set'];
+    let seed = 7, writes = 0;
+    const rnd = (n) => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return (seed >>> 8) % n; };
+    const pick = (a) => a[rnd(a.length)], gap = () => Array.from({ length: rnd(4) }, () => pick(FILL)).join('');
+    const differ = [];
+    for (let i = 0; i < 4000; i++) {
+      const [program, commands] = pick(PROG);
+      const c = gap() + program + gap() + pick(DASHC) + gap() + pick(commands) + gap();
+      const want = OLD.some((rx) => rx.test(c.trim()));
+      if (want) writes++;
+      if (want !== (classifyReadOnly(c).reason === 'command performs a write/active operation')) differ.push(JSON.stringify(c));
+    }
+    ok(`the linear smbclient/rpcclient check agrees with the regexes it replaced (4000 strings, ${writes} writes; differ: ${differ.slice(0, 3).join(' | ') || 'none'})`,
+      differ.length === 0 && writes > 100);
+    const layout = (program, k) => (`${program} `.repeat(66 * k) + '-c '.repeat(444 * k)).padEnd(2000 * k, 'x');
+    const globs = engagementConfig({ autorun_passive: true, autorun_active: true, protected_data: Array.from({ length: 64 }, (_, i) => `*a*b*c*d*e*f*g*${i}x*y*z*`) }, base);
+    const ms = (f) => { let best = Infinity; for (let r = 0; r < 3; r++) { const t0 = Date.now(); f(); best = Math.min(best, Date.now() - t0); } return best; };
+    for (const program of ['smbclient', 'rpcclient']) {
+      const big = ms(() => classifyReadOnly(layout(program, 3))), full = ms(() => gate(layout(program, 1), globs));
+      ok(`${program} names then -c words: classifyReadOnly on 6000 characters takes ${big} ms (< 50), decide() on 2000 with 64 glob entries ${full} ms (< 100)`,
+        layout(program, 3).length === 6000 && big < 50 && full < 100);
+    }
+  }
 }
 
 // ---- protected data (engagement protected_data): a name in a data position blocks; local positions, names apart, bulk
@@ -429,14 +628,27 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     ok(`protected corpus: every "${want}" case gives ${want} with its reason (off: ${off.join(', ') || 'none'})`, off.length === 0);
   }
 
-  // an empty list changes nothing: the same decision as an engagement without the key, apart from the three new fields
-  const strip = ({ protectedData, dataReview, protectedEntries, ...rest }) => JSON.stringify(rest);
-  const emptyOff = corpus.filter((k) => !k.id.startsWith('fix-')).filter((k) => {
-    const target = targetOf(k.command);
-    const a = decide({ command: k.command, target }, pdCfg([])), b = decide({ command: k.command, target }, pdCfg(undefined));
-    return strip(a) !== strip(b) || [a, b].some((d) => d.protectedData.length || d.dataReview.length || d.protectedEntries !== 0);
-  }).map((k) => k.id);
-  ok(`protected data: an empty list decides like no list (corpus commands; off: ${emptyOff.join(', ') || 'none'})`, emptyOff.length === 0);
+  // an empty list changes nothing: no key, [] and blank entries ([' ', '']) decide identically, every field included, with
+  // the three new fields empty; for every corpus command and the 49 judge-eval cases, with their engagement and without one
+  // (no engagement at all, or one that only switches the tiers on)
+  const jcases = require('../../copilot/judge_cases.json');
+  const tiersOn = { autorun_passive: true, autorun_active: true };
+  const variants = (eng) => [eng, { ...eng, protected_data: [] }, { ...eng, protected_data: [' ', ''] }];
+  const emptyRuns = [
+    ...corpus.map((k) => ({ id: `corpus ${k.id}`, proposal: { command: k.command, target: targetOf(k.command) }, engs: [null, ...variants(tiersOn)],
+      base: { allowlist: CORPUS_ALLOW, autoRunReadOnly: true, autoRunActiveRecon: true, now: NOW } })),
+    ...jcases.cases.flatMap((k) => [variants({ ...jcases.engagements[k.engagement], ...tiersOn }), [null, ...variants(tiersOn)]].map((engs, j) => ({
+      id: `judge ${k.id}${j ? ' (no engagement)' : ''}`, proposal: { command: k.command, target: k.target }, engs,
+      base: { allowlist: jcases.allowlist, autoRunReadOnly: true, autoRunActiveRecon: true, now: NOW } }))),
+  ];
+  let emptyCompared = 0;
+  const emptyOff = emptyRuns.filter((x) => {
+    const ds = x.engs.map((e) => decide(x.proposal, engagementConfig(e, x.base))), first = JSON.stringify(ds[0]);
+    emptyCompared += ds.length;
+    return ds.some((d) => JSON.stringify(d) !== first || d.protectedData.length || d.dataReview.length || d.protectedEntries !== 0);
+  }).map((x) => x.id);
+  ok(`protected data: no key, [] and blank entries decide identically (${emptyCompared} decisions: ${corpus.length} corpus commands, ${jcases.cases.length} judge cases with and without their engagement; off: ${emptyOff.join(', ') || 'none'})`,
+    emptyOff.length === 0 && jcases.cases.length === 49 && emptyCompared === corpus.length * 4 + jcases.cases.length * 7);
   ok('protected data: without an engagement nothing is checked', (() => {
     const c = engagementConfig(null, { allowlist: ['10.10.10.0/24'] });
     const d = decide({ command: 'curl -s http://10.10.10.5/backup/customers.csv', target: '10.10.10.5' }, c);
@@ -483,7 +695,8 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
   })());
 
   // cost: linear in the command; 64 adversarial globs on ~3,900 characters (the check alone: extractTargets has its own
-  // cost); past 4000 characters a human, unparsed
+  // cost); past 4000 characters protectedCheck sends a command to a human unparsed, and decide() blocks anything past
+  // 2000 characters before it gets there
   {
     const globs = Array.from({ length: 64 }, (_, i) => `*a*b*c*d*e*f*g*${i}x*y*z*`);
     const INPUTS = {
@@ -497,9 +710,12 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
       for (let r = 0; r < 3; r++) { const t0 = Date.now(); protectedCheck(c, globs, ['10.10.10.5']); best = Math.min(best, Date.now() - t0); }
       ok(`protected data: the check on ${name} (${c.length} characters, 64 glob entries) takes ${best} ms (< 100)`, c.length <= 4000 && best < 100);
     }
-    const long = pd('curl -s http://10.10.10.5/' + 'a'.repeat(5000), ['customers.csv']);
-    ok('protected data: a 5,000-character command waits for a human, unparsed', long.allowed && !long.autoRun
-      && same(long.dataReview, ['cannot check for protected data: command longer than 4000 characters']));
+    const longCmd = 'curl -s http://10.10.10.5/' + 'a'.repeat(5000);
+    const direct = protectedCheck(longCmd, ['customers.csv'], ['10.10.10.5']), long = pd(longCmd, ['customers.csv']);
+    ok('protected data: a 5,000-character command is not parsed: protectedCheck alone sends it to a human, decide() blocks it first',
+      same(direct.review, ['cannot check for protected data: command longer than 4000 characters']) && direct.hits.length === 0 && direct.count === 1
+      && !long.allowed && same(long.reasons, ['command longer than 2000 characters (the limit for manual commands too)']) && same(long.dataReview, [])
+      && long.protectedEntries === 1);
   }
 
   // every READONLY_TOOLS member was reviewed: no bulk form (PD_BULK_NONE), or a row whose risky form a probe shows
@@ -581,9 +797,24 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     ['curl -so .curlrc http://10.10.10.5/x', 'customers.csv', 'names read at run time while data is protected: writes a dotfile that can change later commands (.curlrc)'],
     ['wget -P ~ http://10.10.10.5/.wgetrc', 'customers.csv', 'names read at run time while data is protected: writes a dotfile that can change later commands (.wgetrc)'],
     ['curl -sO http://10.10.10.5/.curlrc', 'customers.csv', 'names read at run time while data is protected: writes a dotfile that can change later commands (.curlrc)'],
+    ['curl -sSLocustomers.csv http://10.10.10.5/export', 'customers.csv', `${LOCAL}customers.csv (output file)`],
+    ['curl --remote-name http://10.10.10.5/.curlrc', 'customers.csv', 'names read at run time while data is protected: writes a dotfile that can change later commands (.curlrc)'],
+    ['wget http://10.10.10.5/%2Ewgetrc', 'customers.csv', 'names read at run time while data is protected: writes a dotfile that can change later commands (.wgetrc)'],
   ];
   const spellOff = SPELLINGS.filter(([c, entry, review]) => { const d = pd(c, [entry]); return !d.allowed || d.autoRun || d.dataReview[0] !== review; }).map(([c]) => c);
   ok(`protected data: output files wait for a human in every spelling, dotfiles too (off: ${spellOff.join(' | ') || 'none'})`, spellOff.length === 0);
+  // a download the server names (curl -J with -O, wget --content-disposition or --trust-server-names) can write a dotfile
+  // no URL shows: a human while data is protected, an auto-run without a list as before; -J without -O writes no file
+  // and -O names the file itself, so those still auto-run with a list
+  const SERVER = 'names read at run time while data is protected: the server names the file it writes (it can be a dotfile)';
+  const SERVER_NAMED = ['curl -sOJ http://10.10.10.5/download', 'curl -s --remote-name --remote-header-name http://10.10.10.5/download',
+    'curl -s --remote-name-all -J http://10.10.10.5/download', 'wget --content-disposition http://10.10.10.5/download', 'wget --trust-server-names http://10.10.10.5/r'];
+  const serverOff = SERVER_NAMED.filter((c) => { const d = pd(c, ['customers.csv']); return !d.allowed || d.autoRun || !same(d.dataReview, [SERVER]) || pd(c, []).tier !== 'passive'; });
+  const NOT_SERVER = ['curl -sJ http://10.10.10.5/download', 'curl -sO http://10.10.10.5/index.html', 'wget --content-disposition -O page.html http://10.10.10.5/download',
+    'wget -q http://10.10.10.5/index.html'];
+  const notServerOff = NOT_SERVER.filter((c) => pd(c, ['customers.csv']).tier !== 'passive');
+  ok(`protected data: downloads the server names wait for a human, the others still auto-run (off: ${serverOff.concat(notServerOff).join(' | ') || 'none'})`,
+    serverOff.length === 0 && notServerOff.length === 0);
   const ACCOUNTS = [["smbmap -H 10.10.10.20 -u jdoe -p 'Passw0rd' -d PAYROLL", 'payroll'], ['wget --http-user=payroll --http-password=Passw0rd http://payroll.lab/', 'payroll'],
     ['nikto -h http://payroll.lab -id payroll:Passw0rd', 'payroll'], ['curl -su payroll:Passw0rd http://payroll.lab/', 'payroll']];
   const accountOff = ACCOUNTS.filter(([c, entry]) => pd(c, [entry]).autoRun !== true).map(([c]) => c);
@@ -592,7 +823,8 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
   // it still counts
   const HOSTS = [['dig -t SRV _ldap._tcp.payroll.lab @10.10.10.10', 'payroll', 'pass'], ['dig TXT _dmarc.payroll.lab @10.10.10.10', 'payroll', 'pass'],
     ['dig TXT selector1._domainkey.payroll.lab @10.10.10.10', 'payroll', 'pass'], ['nslookup -type=SRV _kerberos._tcp.hr.lab 10.10.10.10', 'HR', 'pass'],
-    ['dig TXT customers.csv._tcp.payroll.lab @10.10.10.10', 'customers.csv', 'block']];
+    ['dig TXT customers.csv._tcp.payroll.lab @10.10.10.10', 'customers.csv', 'block'],
+    ['curl -s http://10.10.10.5/\u{20000}\u{20000}.payroll.lab/customers.csv', 'customers.csv', 'block']];   // two UTF-16 units per character
   const hostOff = HOSTS.filter(([c, entry, want]) => outcome(pd(c, [entry])) !== want).map(([c]) => c);
   ok(`protected data: in-scope hosts are blanked wherever they stand dot-aligned (off: ${hostOff.join(' | ') || 'none'})`, hostOff.length === 0);
   // every READONLY_TOOLS member had its output, input and account options reviewed (PD_TOOL_OPTS), and a letter it takes

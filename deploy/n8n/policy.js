@@ -122,30 +122,286 @@ const FILTER_TOOLS = new Set([
 // patterns that make a command mutating/active even if its tool is in READONLY_TOOLS
 const MUTATING_PATTERNS = [
   /\b(curl|wget)\b[^|;&]*(-d\b|--data|-F\b|--form|-T\b|--upload-file|-X\s*(POST|PUT|DELETE|PATCH)|--request\s*(POST|PUT|DELETE|PATCH))/i,
-  /\bsmbclient\b[^|;&]*-c\b[^|;&]*\b(put|mkdir|rmdir|del|rename|rm)\b/i,
-  // rpcclient subcommands that change the domain: setuserinfo2 (a password), createdomuser, deletedomuser, chgpasswd, ...
-  /\brpcclient\b[^|;&]*-c\b[^|;&]*(^|[\s'"])(create|delete|del|set|add|chg)\w*/i,
   /\bnc\b(?![^|;&]*-z)[^|;&]*-[a-z]*l/i, // netcat listener (-l) that isn't a -z port check
 ];
+// smbclient and rpcclient -c commands that write, on the raw text: /\bPROGRAM\b[^|;&]*-c\b[^|;&]*COMMAND/i in linear time.
+// In each stretch without | ; &, take the first program name, the first -c after it, then look for the command anywhere
+// after that: the earliest of each leaves the most room for the next, so this matches exactly when the regex does. The
+// regex itself backtracks over every pair of positions (up to 67 ms on 2000 characters, decide() then passed 100 ms).
+const RAW_SUBCOMMANDS = [
+  ['smbclient', String.raw`\b(put|mkdir|rmdir|del|rename|rm)\b`],
+  // rpcclient subcommands that change the domain: setuserinfo2 (a password), createdomuser, deletedomuser, chgpasswd, ...
+  ['rpcclient', String.raw`(^|[\s'"])(create|delete|del|set|add|chg)\w*`],
+];
+function rawSubcommandWrites(cmd) {
+  const after = (source, s, from) => { const rx = new RegExp(source, 'gi'); rx.lastIndex = from; return rx.test(s) ? rx.lastIndex : -1; };
+  return cmd.split(/[|;&]/).some((part) => RAW_SUBCOMMANDS.some(([program, command]) => {
+    const p = after(String.raw`\b${program}\b`, part, 0), c = p < 0 ? -1 : after(String.raw`-c\b`, part, p);
+    return c >= 0 && after(command, part, c) >= 0;
+  }));
+}
 const PASSIVE_NSE = new Set(['safe', 'default']); // the only NSE categories cheap enough for the passive tier
 
-// A tool on the read-only list, or a local filter, that can still run a program, listen or change a share. Each of these
-// auto-ran in the passive tier before (found by the protected-data red team, checked against this gate). seg is a segment
-// of shellSegments(), whose words are what bash hands the program, so quoting hides nothing (nc '-e', awk 'sys''tem(',
-// sed 's/x/id/'\e, smbclient -c \!id); a raw string is split on whitespace. An option counts in the spellings the tool
-// accepts: netcat's attached values and clusters (-e/bin/sh, -ve/bin/sh, -lp4444) and long-option prefixes (--exe,
-// --lis), smbmap's prefixes (--upl, --dele), smbclient's command prefixes (ren is rename).
+// sed and awk are local filters, but GNU sed runs a program with e (the command, and the s command's flag) and awk with
+// system(), pipes and getline, and both read programs from files. The gate reads their scripts from the words bash hands
+// them, the way the programs read them; whatever it cannot read waits for a human.
+//
+// A sed script read the way GNU sed compiles it (sed/compile.c, alike from 4.2.2 to 4.9): commands split by ; and
+// newlines, then addresses (N, $, /re/I, \cREc, first~step, a,+N, a,~N), an optional !, the command letter and its
+// arguments. In a regex a bracket expression can hold the delimiter (s/[/]/x/); a, i and c take text to the end of the
+// line, r, R, w and W a file name, b, t, T, : and v a label. -> 'e' when it runs a program, '?' when the gate cannot read
+// it, '' otherwise. Compared with GNU sed 4.9 on generated scripts without r and w (sed --sandbox then refuses exactly
+// those with an e): none was read differently.
+function sedScan(s) {
+  const n = s.length;
+  let i = 0, depth = 0;
+  const digits = () => { while (s[i] >= '0' && s[i] <= '9') i++; };
+  const blank = () => { while (s[i] === ' ' || s[i] === '\t') i++; };
+  const toEol = () => { while (i < n && s[i] !== '\n') i++; };
+  const label = () => { blank(); while (i < n && !' \t\n;}#'.includes(s[i])) i++; };
+  const endOfCmd = () => {                                        // ; newline or the end, or } and # left for the next command
+    blank();
+    if (s[i] === '}' || s[i] === '#') return true;
+    if (i >= n || s[i] === ';' || s[i] === '\n') { i++; return true; }
+    return false;
+  };
+  const delim = (d) => d !== undefined && d !== '\n' && d.charCodeAt(0) < 0x80;    // sed refuses a newline; a multibyte one depends on the locale
+  const bracket = () => {                                         // after [: true when its ] closes it (snarf_char_class)
+    if (s[i] === '^') i++;
+    if (s[i] === ']') i++;
+    for (let state = 0, cls = ''; i < n; i++) {
+      const c = s[i];
+      if (c === '\n' || c.charCodeAt(0) >= 0x80) return false;
+      if ((c === '.' || c === ':' || c === '=') && (state === 1 || (state === 2 && c === cls))) { if (state === 1) cls = c; state++; continue; }
+      if (c === '[') { if (state === 0) state = 1; continue; }
+      if (c === ']') { if (state < 2) { i++; return true; } if (state === 3) state = 0; }
+      state &= ~1;
+    }
+    return false;
+  };
+  const part = (d, regex) => {                                    // up to the delimiter d (match_slash): true when found
+    while (i < n && s[i] !== '\n') {
+      const c = s[i++];
+      if (c === d) return true;
+      if (c === '\\') { if (i >= n) return false; i++; } else if (c === '[' && regex && !bracket()) return false;
+    }
+    return false;
+  };
+  const address = () => {                                         // true, false (none here) or 'step' (+N, ~N); null: refused
+    const c = s[i];
+    if (c === '/' || c === '\\') {
+      i++;
+      const d = c === '/' ? c : s[i++];
+      if (!delim(d) || !part(d, true)) return null;
+      for (;;) { blank(); if (s[i] === 'I' || s[i] === 'M') i++; else return true; }
+    }
+    if (c >= '0' && c <= '9') { digits(); blank(); if (s[i] === '~') { i++; blank(); digits(); } return true; }
+    if (c === '+' || c === '~') { i++; blank(); const at = i; digits(); return /[1-9]/.test(s.slice(at, i)) ? 'step' : true; }   // +0 is no step
+    if (c === '$') { i++; return true; }
+    return false;
+  };
+  for (;;) {
+    while (i < n && (s[i] === ';' || ' \t\n\v\f\r'.includes(s[i]))) i++;
+    if (i >= n) return depth ? '?' : '';
+    const a1 = address();
+    if (a1 === null || a1 === 'step') return '?';
+    if (a1) {
+      blank();
+      if (s[i] === ',') { i++; blank(); if (!address()) return '?'; blank(); }
+    }
+    if (s[i] === '!') { i++; blank(); if (s[i] === '!') return '?'; }
+    const c = s[i++];
+    switch (c) {
+      case 'e': return 'e';
+      case '#': if (a1) return '?'; toEol(); continue;
+      case 'v': label(); continue;
+      case '{': depth++; continue;
+      case '}': if (!depth || a1 || !endOfCmd()) return '?'; depth--; continue;
+      case 'a': case 'i': case 'c':                               // a\ and the text on the next line, a\text or a text
+        blank();
+        if (i >= n) return '?';
+        if (s[i] === '\\') i += 2;
+        while (i < n && s[i] !== '\n') i += s[i] === '\\' ? 2 : 1;
+        continue;
+      case ':': { if (a1) return '?'; blank(); const at = i; label(); if (i === at) return '?'; continue; }
+      case 'b': case 't': case 'T': label(); continue;
+      case 'q': case 'Q': case 'l': case 'L': blank(); digits(); if (!endOfCmd()) return '?'; continue;
+      case '=': case 'd': case 'D': case 'F': case 'g': case 'G': case 'h': case 'H': case 'n': case 'N': case 'p': case 'P': case 'z': case 'x':
+        if (!endOfCmd()) return '?';
+        continue;
+      case 'r': case 'R': case 'w': case 'W': blank(); if (i >= n || s[i] === '\n') return '?'; toEol(); continue;
+      case 'y': { const d = s[i++]; if (!delim(d) || !part(d, false) || !part(d, false) || !endOfCmd()) return '?'; continue; }
+      case 's': {
+        const d = s[i++];
+        if (!delim(d) || !part(d, true) || !part(d, false)) return '?';
+        for (;;) {                                                // its flags, blanks between them allowed
+          blank();
+          const f = s[i++];
+          if (f === 'e') return 'e';
+          if (f === 'g' || f === 'p' || f === 'i' || f === 'I' || f === 'm' || f === 'M') continue;
+          if (f >= '0' && f <= '9') { digits(); continue; }
+          if (f === 'w') { blank(); if (i >= n || s[i] === '\n') return '?'; toEol(); break; }
+          if (f === '}' || f === '#') { i--; break; }
+          if (f === undefined || f === ';' || f === '\n') break;
+          if (f === '\r' && s[i] === '\n') { i++; break; }
+          return '?';
+        }
+        continue;
+      }
+      default: return '?';
+    }
+  }
+}
+// a long option as getopt_long reads it: its name in table, or '' when unknown or ambiguous
+const longName = (given, table) => {
+  if (Object.prototype.hasOwnProperty.call(table, given)) return given;
+  const hits = Object.keys(table).filter((o) => o.startsWith(given));
+  return given && hits.length === 1 ? hits[0] : '';
+};
+// GNU sed's long options: 1 takes a value (=v or the next word), 2 only an attached =v, 0 none
+const SED_LONG = { expression: 1, file: 1, 'line-length': 1, 'in-place': 2, binary: 0, 'regexp-extended': 0, debug: 0, 'null-data': 0,
+  'zero-terminated': 0, quiet: 0, posix: 0, silent: 0, sandbox: 0, separate: 0, unbuffered: 0, version: 0, help: 0, 'follow-symlinks': 0 };
+// sed's words -> 'e', 'f' (a script from a file), '?' (an option or a script the gate cannot read) or ''. GNU getopt:
+// -n -E -r -s -u -z -b combine, -i takes only an attached suffix (-ie is -i with suffix e), -e -f -l take the rest of the
+// word or the next word, long options take unique prefixes, options may follow operands. The -e scripts are one script
+// joined by newlines (a\ in one -e continues into the next); without -e or -f the first operand is the script, and an
+// operand before the first -e is read too (with POSIXLY_CORRECT set, sed stops reading options there). --sandbox makes
+// sed refuse e in every script it compiles afterwards, so it counts only before the first script and operand.
+function sedEscape(args) {
+  const scripts = [];
+  let first = null, early = null, file = false, sandbox = false, bad = false, opts = true;
+  for (let k = 0; k < args.length; k++) {
+    const t = args[k];
+    if (!opts || t === '-' || !t.startsWith('-')) { if (first === null) { first = t; if (!scripts.length && !file) early = t; } continue; }
+    if (t === '--') { opts = false; continue; }
+    if (t.startsWith('--')) {
+      const eq = t.indexOf('='), name = longName(eq < 0 ? t.slice(2) : t.slice(2, eq), SED_LONG), kind = name ? SED_LONG[name] : -1;
+      let v = eq < 0 ? null : t.slice(eq + 1);
+      if (kind === 1 && v === null && k + 1 < args.length) v = args[++k];
+      if (kind < 0 || (kind === 1 && v === null) || (kind === 0 && v !== null)) bad = true;
+      else if (name === 'expression') scripts.push(v);
+      else if (name === 'file') file = true;
+      else if (name === 'sandbox' && !scripts.length && !file && first === null) sandbox = true;
+      continue;
+    }
+    for (let p = 1; p < t.length; p++) {
+      const c = t[p];
+      if ('bsnrzuE'.includes(c)) continue;
+      if (c === 'i') break;                                       // the rest of the word is its suffix
+      if ('eflV'.includes(c)) {
+        const v = p + 1 < t.length ? t.slice(p + 1) : k + 1 < args.length ? args[++k] : null;
+        if (v === null || c === 'V') bad = true; else if (c === 'e') scripts.push(v); else if (c === 'f') file = true;
+        break;
+      }
+      bad = true;
+      break;
+    }
+  }
+  if (bad) return '?';
+  if (sandbox) return '';
+  if (file) return 'f';
+  const read = scripts.length ? [scripts.join('\n')].concat(early === null ? [] : [early]) : first === null ? [] : [first];
+  for (const s of read) { const r = sedScan(s); if (r) return r; }
+  return '';
+}
+const SED_WHY = { e: 'sed e runs a program', f: 'sed that runs a script from a file (-f)', '?': 'sed script or option the gate cannot read' };
+
+// gawk's long options and mawk's -W options -> 'value' (=v or the next word), 'program' (program text, likewise), 'run'
+// (a program file, an include, a library, the debugger's command file) or 0 (a flag, or an attached =value)
+const AWK_LONG = { assign: 'value', 'field-separator': 'value', source: 'program', file: 'run', exec: 'run', include: 'run', load: 'run',
+  debug: 'run', 'characters-as-bytes': 0, traditional: 0, copyright: 0, 'dump-variables': 0, 'gen-pot': 0, help: 0, csv: 0, lint: 0,
+  'non-decimal-data': 0, 'use-lc-numeric': 0, optimize: 0, 'no-optimize': 0, 'pretty-print': 0, profile: 0, bignum: 0, posix: 0,
+  're-interval': 0, sandbox: 0, 'lint-old': 0, version: 0, trace: 0, compat: 0, dump: 0, interactive: 0, random: 0, sprintf: 0, usage: 0,
+  posix_space: 0 };
+// one awk program text -> 'run' (a system( call, getline, a lone | or |&: || is a logical or), 'at' (@include, @load, an
+// indirect @name() call) or ''. A backslash-newline continues a line, so the text is read as written and joined. system
+// only runs as a call: gawk 5.2 and mawk 1.3.4 refuse the bare word, and a newline or comment before the (, so the word
+// in a regex or a string (/system/, $1=="system") is a plain filter. Like the raw pattern in execEscape, no word
+// boundary: 1system("id") calls system.
+function awkProgram(text) {
+  for (const t of [text, text.replace(/\\\r?\n/g, '')]) {
+    if (/system\s*\(|getline/.test(t)) return 'run';
+    for (let i = 0; i < t.length; i++) if (t[i] === '|') { if (t[i + 1] !== '|') return 'run'; i++; }
+    if (/@\s*[A-Za-z_]/.test(t)) return 'at';
+  }
+  return '';
+}
+// awk's words -> 'run', 'at', 'file' (-f, -E, -i, -l, -D, mawk -W exec), '?' (an option the gate cannot read) or ''. gawk
+// options: -F -v -e -f -E -i -l -W take the rest of the word or the next word, -d -D -L -o -p only an attached value,
+// -W name is --name; gawk and mawk stop reading options at the first operand, the program text unless -e, --source or -f
+// gave one. A later word that looks like an option waits too, for an awk that reads options there.
+function awkEscape(args) {
+  const programs = [];
+  let k = 0, file = false, bad = false, given = false;
+  const next = () => (k + 1 < args.length ? args[++k] : null);
+  const long = (spec) => {                                        // --name[=v], or the value of -W
+    const eq = spec.indexOf('='), name = longName(eq < 0 ? spec : spec.slice(0, eq), AWK_LONG), kind = name ? AWK_LONG[name] : -1;
+    const v = eq >= 0 ? spec.slice(eq + 1) : kind === 'value' || kind === 'program' ? next() : null;
+    if (kind === -1 || ((kind === 'value' || kind === 'program') && v === null)) bad = true;
+    else if (kind === 'run') file = true;
+    else if (kind === 'program') { programs.push(v); given = true; }
+  };
+  for (; k < args.length; k++) {
+    const t = args[k];
+    if (t === '--') { k++; break; }
+    if (t === '-' || !t.startsWith('-')) break;
+    if (t.startsWith('--')) { long(t.slice(2)); continue; }
+    for (let p = 1; p < t.length; p++) {
+      const c = t[p];
+      if ('bcCghknNOMPrSstVY'.includes(c)) continue;
+      if ('dLop'.includes(c)) break;                              // an optional value, attached
+      if (c === 'D') { file = true; break; }
+      if ('FvefEilW'.includes(c)) {
+        const v = p + 1 < t.length ? t.slice(p + 1) : next();
+        if (v === null) bad = true;
+        else if (c === 'e') { programs.push(v); given = true; } else if (c === 'W') long(v); else if (c !== 'F' && c !== 'v') file = true;
+        break;
+      }
+      bad = true;
+      break;
+    }
+  }
+  const ops = args.slice(k);
+  if (!given && !file) programs.push(...ops.splice(0, 1));
+  if (file) return 'file';
+  if (bad || ops.some((t) => t.length > 1 && t.startsWith('-'))) return '?';
+  for (const p of programs) { const r = awkProgram(p); if (r) return r; }
+  return '';
+}
+const AWK_WHY = { run: 'awk that runs a program (system, pipes, getline)', at: 'awk that loads or calls code the gate cannot see (@include, @load, @name())',
+  file: 'awk that runs a program from a file or a library (-f, -E, -i, -l, -D)', '?': 'awk option the gate cannot read' };
+const READ_METHOD = /^(GET|HEAD|OPTIONS|TRACE|PROPFIND)$/i;       // the request methods that only read (RFC 9110, RFC 4918)
+const curlLong = (args) => args.map((t) => t.replace(/^--expand-/, '--'));   // curl --expand-X is option X with {{variables}} expanded
+
+// A tool on the read-only list, or a local filter, that can still run a program, listen, change a share or send data, or
+// that runs commands or settings the gate cannot see. Each of these auto-ran in the passive tier before (found by the
+// protected-data red team and the verification of the review fixes, checked against this gate). seg is a segment of
+// shellSegments(), whose words are what bash hands the program, so quoting hides nothing (nc '-e', awk 'sys''tem(',
+// sed 's/x/id/'\e, smbclient -c \!id, curl -X 'DELETE'); a raw string is split on whitespace and only the raw patterns
+// read it. An option counts in the spellings the tool accepts: netcat's attached values and clusters (-e/bin/sh,
+// -ve/bin/sh, -lp4444) and long-option prefixes (--exe, --lis), smbmap's prefixes (--upl, --dele), smbclient's command
+// prefixes (ren is rename), curl's clusters (-sd, -sXPUT), sed's and awk's option rules (sedEscape, awkEscape).
 const SMB_WRITES = ['mput', 'put', 'mkdir', 'md', 'rmdir', 'rd', 'del', 'deltree', 'rm', 'rename', 'mv', 'setmode'];
+// A variable set for the program alone points it at settings, scripts, libraries or a binary the gate cannot see
+// (CURL_HOME, WGETRC, XDG_CONFIG_HOME and HOME load a .curlrc or .wgetrc, NMAPDIR scripts, LESSOPEN a preprocessor,
+// LD_PRELOAD a library, PATH another curl). Only the locale and the time zone with a plain value (no slash) auto-run.
+const PLAIN_ENV = /^(LANG|LANGUAGE|LC_[A-Z]+|TZ)=[\w.@:+-]*$/;
 function execEscape(bin, seg) {
   const words = typeof seg === 'string' ? null : seg.words;
   const args = words ? pdProgram(words).args : String(seg).split(/\s+/).slice(1);
   const text = words ? args.join(' ') : String(seg);
+  const env = !words ? null : words.slice(0, pdProgramIndex(words)).find((w) => !w.redir && /^[A-Z_][A-Z0-9_]*=/.test(w.text) && !PLAIN_ENV.test(w.text));
+  if (env) return `environment variable ${env.text.slice(0, env.text.indexOf('=')).slice(0, 40)} (settings, scripts or programs the gate cannot see)`;
+  // GNU sort runs the program --compress-program names on every temporary file it writes (with -S1 from 300 bytes of input)
+  if (bin === 'sort' && pdLong(args, ['compress-program'])) return 'sort --compress-program runs a program';
   if (['nc', 'ncat', 'netcat'].includes(bin) && (args.some((t) => /^-[A-Za-z]*[ecl]/.test(t) || /^--(sh-|lua-)?exec(=|$)|^--listen\b/.test(t))
     || pdLong(args, ['exec', 'sh-exec', 'lua-exec', 'listen'])))
     return 'netcat that runs a program or listens (-e, -c, --exec, --sh-exec, --lua-exec, -l)';
   if (bin === 'ffuf' && /(^|\s)--?input-cmd\b/.test(text)) return 'ffuf -input-cmd runs a program';
-  if (bin === 'awk' && /system\s*\(|\|\s*"|\|&|getline/.test(text)) return 'awk that runs a program (system, pipes, getline)';
-  if (bin === 'sed' && /(^|[;\n{}\s0-9$\/'"])e(\s|;|'|"|$)|\/[gpiImM0-9]*e[gpiImMwW0-9]*(\s|;|}|'|"|$)/.test(text)) return 'sed e runs a program';
+  if (bin === 'awk' && /system\s*\(|\|\s*"|\|&|getline/.test(text)) return AWK_WHY.run;
+  if (bin === 'sed' && /(^|[;\n{}\s0-9$\/'"])e(\s|;|'|"|$)|\/[gpiImM0-9]*e[gpiImMwW0-9]*(\s|;|}|'|"|$)/.test(text)) return SED_WHY.e;
+  if (words && bin === 'awk') { const r = awkEscape(args); if (r) return AWK_WHY[r]; }
+  if (words && bin === 'sed') { const r = sedEscape(args); if (r) return SED_WHY[r]; }
   if (bin === 'smbclient') {
     // the commands it runs: -c in any spelling (-c, -Nc, -c'...', --comm=...), here-strings and heredoc bodies
     const cmds = !words ? [] : pdLetterValues(args, 'c').concat(pdLongValues(args, 'command').filter((v) => v !== null),
@@ -157,8 +413,30 @@ function execEscape(bin, seg) {
     if (writes || /['";]\s*(!|(mput|put|mkdir|md|rmdir|rd|del|deltree|rm|rename|mv|setmode)\b)/i.test(text))
       return 'smbclient command that runs a local shell (!) or changes the share';
   }
+  // rpcclient's commands in every spelling (--command=..., --comm, -c'...'), read like its raw pattern in MUTATING_PATTERNS:
+  // one that creates, deletes, sets, adds or changes (setuserinfo2 sets a password)
+  if (words && bin === 'rpcclient' && pdLetterValues(args, 'c').concat(pdLongValues(args, 'command').filter((v) => v !== null))
+    .some((c) => c.split(/[;\n]/).some((x) => /^(create|delete|del|set|add|chg)/i.test(x.trim()))))
+    return 'rpcclient command that changes the domain (create, delete, set, add, chg)';
+  // both read commands from stdin: a < file, a pipe or a process substitution hands them commands the gate never sees
+  // (smbclient's here-strings and heredocs are read above; rpcclient's are not read at all)
+  if (words && (bin === 'smbclient' || bin === 'rpcclient') && (seg.pipedIn || seg.procSub || words.some((w) => (w.redir === 'in'
+    && pdFold(w.text) !== '/dev/null') || (bin === 'rpcclient' && /^(herestr|heredoc|heredocBody)$/.test(w.redir)))))
+    return `${bin} reads its commands from a file or a pipe (commands the gate cannot see)`;
   if (bin === 'smbmap' && (/(^|\s)-[A-Za-z]*x|(^|\s)--(upload|delete|mkdir)\b/.test(text) || args.some((t) => /^-[A-Za-z]*x/.test(t))
     || pdLong(args, ['upload', 'delete', 'mkdir']))) return 'smbmap that runs a command (-x) or changes the share';
+  // a request that sends data or uses a method that writes, in every spelling (-sd, -sXPUT, -X 'DELETE', --request=PATCH,
+  // --dat, --expand-data): curl's value letters end a cluster (-sSLo file holds no d); -G still sends -d (as a query): it
+  // waits too
+  if (words && bin === 'curl' && (pdCluster(args, 'curl', 'dFT') || pdLong(curlLong(args), ['data', 'data-ascii', 'data-binary', 'data-raw',
+    'data-urlencode', 'form', 'form-string', 'upload-file', 'json'])
+    || pdClusterValues(args, 'curl', 'X').concat(pdLongValues(curlLong(args), 'request')).some((m) => m === null || !READ_METHOD.test(m))))
+    return 'curl that sends data or a non-read method (-d, -F, -T, --json, -X POST)';
+  if (words && (bin === 'wget' || bin === 'wget2') && (pdLong(args, ['post-data', 'post-file', 'body-data', 'body-file'])
+    || pdLongValues(args, 'method').some((m) => m === null || !READ_METHOD.test(m))))
+    return 'wget that sends data or a non-read method (--post-data, --post-file, --body-data, --body-file, --method)';
+  const settings = words ? settingsFile(bin, args) : '';
+  if (settings) return `${settings} (settings the gate cannot see)`;
   // nmap loads NSE scripts from --datadir and reads its whole option list back from a --resume log (getopt_long_only:
   // one dash and unique prefixes count); rustscan's custom scripts and config file run whatever they name
   if (bin === 'nmap' && (pdAbbrev(args, 'datadir', 5) || pdAbbrev(args, 'resume', 3))) return 'nmap --datadir or --resume (scripts or options the gate cannot see)';
@@ -176,7 +454,7 @@ const rawScriptValues = (cmd) => [...cmd.matchAll(/(?:^|\s)--?script[=\s]+("?)([
 function classifyReadOnly(command) {
   const cmd = String(command || '').trim();
   if (!cmd) return { readOnly: false, reason: 'empty command' };
-  if (MUTATING_PATTERNS.some((rx) => rx.test(cmd))) return { readOnly: false, reason: 'command performs a write/active operation' };
+  if (MUTATING_PATTERNS.some((rx) => rx.test(cmd)) || rawSubcommandWrites(cmd)) return { readOnly: false, reason: 'command performs a write/active operation' };
   // the segments as bash reads them, each with its program and the words it gets: quoting hides no option from the checks
   // below ("--script=vuln", nc '-e', awk 'sys''tem('), which also run on the raw text and never relax it
   const segs = shellSegments(cmd).map((seg) => ({ seg, ...pdProgram(seg.words) }));
@@ -816,9 +1094,26 @@ const pdAbbrev = (args, name, min, anyCase) => args.some((t) => {
   const m = /^--?([A-Za-z][\w-]*)/.exec(t);
   return !!m && m[1].length >= min && name.startsWith(anyCase ? m[1].toLowerCase() : m[1]);
 });
+// Options that load settings from a file the gate cannot see (wget -e robots=off is the one setting it reads): no auto-run
+// with or without protected data. -> the option's label, or ''
+function settingsFile(program, args) {
+  if (program === 'curl' && (pdCluster(args, program, 'K') || pdLong(curlLong(args), ['config']))) return 'curl -K/--config';
+  if (program === 'wget' || program === 'wget2') {
+    const exec = pdClusterValues(args, program, 'e').concat(pdLongValues(args, 'execute'));      // -e v, -qe v, --exe=v
+    if (pdLong(args, ['config']) || exec.some((v) => v === null || !/^robots\s*=\s*off$/i.test(v.trim()))) return 'wget --config/-e';
+  }
+  if ((program === 'ffuf' || program === 'httpx') && args.some((t) => /^--?config(=|$)/.test(t))) return `${program} -config`;
+  if (program === 'nikto' && pdAbbrev(args, 'config', 2, true)) return 'nikto -config';
+  if (program === 'wfuzz' && pdLong(args, ['recipe'])) return 'wfuzz --recipe';
+  // a lesskey file's #env section can set LESSOPEN, a program less runs on every file it shows (and on stdin with |-),
+  // also when it writes to a pipe (less 590). -k may close a cluster (-Rk); more can be less
+  if ((program === 'less' || program === 'more') && (args.some((t) => /^-[^-]*k/.test(t)) || pdLong(args, ['lesskey-file', 'lesskey-src', 'lesskey-content'])))
+    return `${program} -k/--lesskey-src`;
+  return '';
+}
 // program, its non-redirect words after the program, the segment's classified words, the in-scope hosts. Options that load
-// settings from a file count as names read at run time: wget --config, curl -K, ffuf, httpx and nikto -config, wfuzz
-// --recipe, nmap --datadir and --resume, rustscan --config-path and custom scripts.
+// settings from a file count as names read at run time: settingsFile(), nmap --datadir and --resume, rustscan
+// --config-path and custom scripts.
 function bulkReasons(program, args, classifiedWords, hosts) {
   const bulk = [], runtime = [];
   const settings = (label) => runtime.push(`${label} (settings the gate cannot see)`);
@@ -826,28 +1121,21 @@ function bulkReasons(program, args, classifiedWords, hosts) {
     if (pdCluster(args, program, 'rmp') || pdLong(args, ['recursive', 'mirror', 'page-requisites'])) bulk.push('wget -r/-m/-p (recursion)');
     if (!args.includes('--no-glob') && args.some((t) => /^ftp:\/\//i.test(t) && /[*?[]/.test(t))) bulk.push('wget FTP wildcard');
     if (pdCluster(args, program, 'i') || pdLong(args, ['input-file'])) runtime.push('wget -i (URLs from a file)');
-    const exec = pdClusterValues(args, program, 'e').concat(pdLongValues(args, 'execute'));      // -e v, -qe v, --exe=v
-    if (pdLong(args, ['config']) || exec.some((v) => v === null || !/^robots\s*=\s*off$/i.test(v.trim()))) settings('wget --config/-e');
   }
   if (program === 'curl') {
     // every URL curl gets, with or without a scheme (an in-scope host names one), or after --url
     const urls = args.filter((t) => pdRemote(t, hosts)).concat(pdLongValues(args, 'url').filter((v) => v !== null));
     if (!args.includes('-g') && !args.includes('--globoff') && urls.some((u) => /[[\]{}]/.test(u))) bulk.push('curl URL glob ([...] or {...})');
-    if (pdCluster(args, program, 'K') || pdLong(args, ['config'])) runtime.push('curl -K/--config');
     if (pdLong(args, ['variable', 'expand-']) || args.some((t) => /^--expand-/i.test(t))) runtime.push('curl --variable/--expand');
     if (pdLongValues(args, 'url').some((v) => v !== null && v.startsWith('@'))) runtime.push('curl --url @file');
   }
   if (program === 'httpx') {
     if (args.some((t) => /^--?(l|list|path|request|rr)(=|$)/.test(t))) runtime.push('httpx -l/-path/-request (names from a file)');
-    if (args.some((t) => /^--?config(=|$)/.test(t))) settings('httpx -config');
   }
   if ((program === 'whatweb' || program === 'wafw00f') && (pdLetter(args, 'i') || pdLong(args, ['input-file', 'input']))) {
     runtime.push(`${program} -i (URLs from a file)`);
   }
-  if (program === 'nikto') {
-    if (pdAbbrev(args, 'save', 2, true)) bulk.push('nikto -Save (keeps responses)');
-    if (pdAbbrev(args, 'config', 2, true)) settings('nikto -config');
-  }
+  if (program === 'nikto' && pdAbbrev(args, 'save', 2, true)) bulk.push('nikto -Save (keeps responses)');
   if (program === 'feroxbuster') {
     // recursion is off only with an exact -n or --no-recursion, or when every depth given is 1
     const depth = args.flatMap((t, i) => ((t === '-d' || t === '--depth') && i + 1 < args.length ? [args[i + 1]] : t.startsWith('--depth=') ? [t.slice(8)] : []));
@@ -860,12 +1148,10 @@ function bulkReasons(program, args, classifiedWords, hosts) {
     if (args.some((t) => /^--?recursion(=|$)/.test(t))) bulk.push('ffuf -recursion');
     if (args.some((t) => /^--?od(=|$)/.test(t))) bulk.push('ffuf -od (keeps responses)');
     if (args.some((t) => /^--?request(=|$)/.test(t))) runtime.push('ffuf -request (request from a file)');
-    if (args.some((t) => /^--?config(=|$)/.test(t))) settings('ffuf -config');
   }
   if (program === 'wfuzz') {
     if (pdLetter(args, 'R')) bulk.push('wfuzz -R (recursion)');
     if (pdLong(args, ['field', 'efield'])) bulk.push('wfuzz --field/--efield (prints responses)');
-    if (pdLong(args, ['recipe'])) settings('wfuzz --recipe');
   }
   if (program === 'smbmap' && pdLetter(args, 'A')) bulk.push('smbmap -A (downloads files matching a pattern)');
   if (program === 'smbclient') {
@@ -889,6 +1175,8 @@ function bulkReasons(program, args, classifiedWords, hosts) {
       settings('rustscan --config-path/--scripts');
     }
   }
+  const cfg = settingsFile(program, args);
+  if (cfg) settings(cfg);
   if (program === 'sqlmap' && sqlmapRisky(args)) bulk.push('sqlmap dump, search or file read');
   return { bulk, runtime };
 }
@@ -959,6 +1247,10 @@ function protectedCheck(command, entries, inScopeHosts) {
           if (/^\.[^./\s]/.test(name)) runtime.push(`writes a dotfile that can change later commands (${name.slice(0, 30)})`);
         }
       }
+      // the server names the file instead (curl -J with -O, wget --content-disposition or --trust-server-names follows the
+      // header or the redirect): no URL shows that name, and it can be a dotfile too
+      if (fromUrl && (s.program === 'curl' ? pdCluster(args, 'curl', 'J') || pdLong(args, ['remote-header-name'])
+        : pdLong(args, ['content-disposition', 'trust-server-names']))) runtime.push('the server names the file it writes (it can be a dotfile)');
       for (const cw of s.words) {
         const written = cw.kind === 'output file' || cw.kind === 'redirection' || (s.program === 'tee' && cw.kind === 'local filter');
         if (written && /(^|\/)\.[^./\s]/.test(cw.w.text)) runtime.push(`writes a dotfile that can change later commands (${cw.w.text.slice(0, 30)})`);
@@ -987,12 +1279,21 @@ const protectedReason = (hits, decoded) => 'command names protected data: '
 // proposal: { command, target, rationale }  (already parsed out of the abliterated model's text, or typed by the operator)
 // config:   { allowlist: string[], deny?: RegExp[], scopeIn?, scopeOut?, prohibited?, protectedData?, window?, now?, autoRun* }
 //           (engagementConfig() builds it from LAB_ALLOWLIST, the LAB_AUTORUN_* variables and the engagement)
+// A proposal longer than the manual-command limit ('Define task + target' in build_workflow.js) is blocked before any
+// check reads it: extractTargets and the raw curl and netcat patterns take quadratic time in its length.
+const CMD_MAX = 2000;
 function decide(proposal, config) {
   const deny = config.deny || DEFAULT_DENY;
   const reasons = [];
   const command = (proposal && proposal.command ? String(proposal.command) : '').trim();
   const declared = proposal && proposal.target ? String(proposal.target).trim() : '';
 
+  if (command.length > CMD_MAX) {
+    const why = `command longer than ${CMD_MAX} characters (the limit for manual commands too)`;
+    return { allowed: false, readOnly: false, readOnlyReason: why, activeRecon: false, activeReconReason: why, injectionSuspected: false,
+      injectionHits: [], unverifiable: [], namesInScopeHost: false, autoRun: false, tier: null, requiresApproval: false, reasons: [why],
+      prohibited: [], command, target: declared, mentioned: [], protectedData: [], dataReview: [], protectedEntries: asList(config.protectedData).length };
+  }
   if (!command) reasons.push('empty command');
 
   // 1. the declared target must be in scope

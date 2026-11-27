@@ -76,6 +76,12 @@ function go(stage){
 document.querySelectorAll('.stages li').forEach(li=>li.onclick=()=>go(li.dataset.stage));
 $('#toAbl').onclick=()=>go('abl'); $('#backModel').onclick=()=>go('model'); $('#toCmp').onclick=()=>go('compare'); $('#backAbl').onclick=()=>go('abl'); $('#toModelAgain').onclick=()=>go('model');
 $('#logToggle').onclick=()=>$('#drawer').classList.toggle('open'); $('#drawerClose').onclick=()=>$('#drawer').classList.remove('open');
+// panels, the log drawer and the run box start where the header ends (--head-h in style.css): the header wraps to two or
+// three rows on narrower screens, and after about a screen of scrolling it leaves with the page (the body is 100% tall)
+const wizhead=$('header.wizhead'); let headH='';
+function syncHeadH(){ const v=Math.max(0, wizhead.getBoundingClientRect().bottom)+'px'; if(v!==headH) document.documentElement.style.setProperty('--head-h', headH=v); }
+syncHeadH(); addEventListener('scroll', syncHeadH, {passive:true}); addEventListener('resize', syncHeadH);
+if(window.ResizeObserver) new ResizeObserver(syncHeadH).observe(wizhead, {box:'border-box'});
 function cmpReady(){ const n=S.run?.meta?.ollama || S.run?.ollama?.names; return !!(n && S.env?.ollama?.models?.some(m=>m.startsWith(n.base))); }
 function updateHeader(){
   $('#stModel').textContent = S.model ? S.model.repo : 'choose a GLM model';
