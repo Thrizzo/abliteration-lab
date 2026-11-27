@@ -1327,6 +1327,7 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
   const TRACE = /^dig \+trace or \+nssearch asks the servers DNS answers name/, BATCH = /^dig -f reads lookups from a file or stdin/;
   const SERVER = (p, what = '') => new RegExp(`^${p} server the scope check cannot read: ${what}`), TARGET = (p, what) => new RegExp(`^${p} target the scope check cannot read: ${what}`);
   const STAGED = (p) => new RegExp(`^${p} loads settings, plugins or targets from HOME or the working directory, and another part of the command writes one`);
+  const STAGED_ANY = /^\S+ loads settings, plugins or targets from HOME or the working directory, and another part of the command writes one/;
   const KRB = (p) => new RegExp(`^${p} with Kerberos \\(-k, --use-kerberos, --use-krb5-ccache\\) asks a KDC`);
   const NAMES = (p) => new RegExp(`^${p} with a host name target and no -r asks 1\\.1\\.1\\.1 and 8\\.8\\.8\\.8`);
   const STD = /^dnsrecon std \(the default\) asks every NS address/, XFR = /^dnsrecon -a, -z or -t axfr or zonewalk/;
@@ -1444,6 +1445,123 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     ...['-x -nH', '-qx -nH', '--force-directories --no-host-directories', '--force-dir --no-host', '-x -n H', '-x -nH --cut-dirs=1 -P .config']
       .map((x) => [`wget -q ${x} http://10.10.10.5/.config/httpx/config.yaml; httpx -duc -u http://10.10.10.5`, STAGED('httpx')]),
     ['wget -q -x -nH http://10.10.10.5/.snmp/snmp.conf; snmpwalk -v2c -c public 10.10.10.5', STAGED('snmpwalk')],
+    // ... and uniq takes a +N too large for a size as a file, so the next word is its OUTPUT (coreutils 9.4, a local run)
+    ['curl -s -o +99999999999999999999 http://10.10.10.5/x; uniq +99999999999999999999 ~/.curlrc; curl -s http://10.10.10.5/', STAGED('curl')],
+    ['curl -s -o +18446744073709551616 http://10.10.10.5/x; uniq +18446744073709551616 ~/.wgetrc; wget -q -O- http://10.10.10.5/', STAGED('wget')],
+    ['curl -s -o +4294967296 http://10.10.10.5/x; uniq +4294967296 ldaprc; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab', STAGED('ldapsearch')],
+    // ... curl -w %output{FILE} writes the write-out (server headers included) to FILE, -w @FILE reads a format the gate does
+    // not see, and wget saves a URL that ends in / under --default-page's name (local runs of curl 8.5.0 and wget 1.21.4)
+    ...["curl -s -o /dev/null -w '%output{.curlrc}%header{x-a}' http://10.10.10.5/", "curl -s -w '%output{>>~/.curlrc}%header{x-a}' http://10.10.10.5/",
+      "curl -sw '%output{.curlrc}%{http_code}' http://10.10.10.5/", "curl -s --write-out='%output{.curlrc}%header{x-a}' http://10.10.10.5/",
+      "curl -s --write-out '%output{.curlrc' http://10.10.10.5/", 'curl -s -w @fmt.txt http://10.10.10.5/', 'curl -s -w @- http://10.10.10.5/ <<< x',
+      'wget -q --default-page=.curlrc http://10.10.10.5/', 'wget -q --default-page .curlrc http://10.10.10.5/', 'wget -q -P ~ --default-page=.curlrc http://10.10.10.5/',
+      'wget -q --default-p=.curlrc http://10.10.10.5/',
+      // gawk's variable dump (input text included), profile and pretty-print files; ike-scan's PSK parameters and packet file
+      "curl -s http://10.10.10.5/x | awk --dump-variables=.curlrc '{proxy=$0}'", "curl -s http://10.10.10.5/x | awk -d/root/.curlrc '{proxy=$0}'",
+      "curl -s http://10.10.10.5/x | awk --dump=.curlrc '{proxy=$0}'", "curl -s http://10.10.10.5/x | awk -W dump-variables=.curlrc '{proxy=$0}'",
+      "curl -s http://10.10.10.5/x | awk --profile=.curlrc '{print}'", "curl -s http://10.10.10.5/x | awk -p/root/.curlrc '{print}'",
+      "curl -s http://10.10.10.5/x | awk --pretty-print=.curlrc '{print}'", "curl -s http://10.10.10.5/x | awk -o/root/.curlrc '{print}'",
+      'ike-scan -A --pskcrack=.curlrc 10.10.10.5', 'ike-scan -A -pskcrack=.curlrc 10.10.10.5', 'ike-scan -A -P/root/.curlrc 10.10.10.5',
+      'ike-scan --writepkttofile=.curlrc 10.10.10.5', 'ike-scan -writepkt=.curlrc 10.10.10.5'].map((x) => [`${x}; curl -s http://10.10.10.5/`, STAGED('curl')]),
+    // the write-model sweep (every option of every tool that writes a file): 34 forms that auto-ran, each a write the rule did
+    // not see (-oA swallowed the next option in curl and wget, abbreviated long options, short clusters, Go's and pflag's
+    // -o=FILE, --hsts, --ssl-sessions, --no-clobber and wget's NAME.1, curl's backslash and trailing-slash names, wget's FTP
+    // ;type=). A tool before another tool now has to use options the gate knows (preloadUnknown), so all of them wait
+    ...["curl -s -oA -o ~/.curlrc http://10.10.10.5/a http://10.10.10.5/b; curl -s http://10.10.10.5/",
+      "wget -q -od -O ~/.curlrc http://10.10.10.5/; curl -s http://10.10.10.5/",
+      "wget -q --output-d ~/.curlrc http://10.10.10.5/; curl -s http://10.10.10.5/",
+      "wget -q --directory-p ~/.nmap http://10.10.10.5/nmap-service-probes; nmap -sV 10.10.10.5",
+      "wget -S --output-f ~/.curlrc http://10.10.10.5/; curl -s http://10.10.10.5/",
+      "curl -s -O 'http://10.10.10.5/x\\.curlrc'; curl -s http://10.10.10.5/",
+      "curl -s -O http://10.10.10.5/ldaprc/; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "wget -q 'ftp://10.10.10.5/ldaprc;type=i'; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "wget -q --save-cook ~/.curlrc http://10.10.10.5/; curl -s http://10.10.10.5/",
+      "wget -q --hsts-file ~/.wgetrc https://web01.lab/; wget -q -O- http://10.10.10.5/",
+      "curl -s --hsts ~/.curlrc http://10.10.10.5/; curl -s http://10.10.10.5/",
+      "curl -s --ssl-sessions ~/.curlrc https://10.10.10.5/; curl -s http://10.10.10.5/",
+      "wget -q -r -l1 --rejected ~/.curlrc http://10.10.10.5/; curl -s http://10.10.10.5/",
+      "wget -q http://10.10.10.5/10.10.10; wget -q http://10.10.10.5/10.10.10; whatweb 10.10.10.1",
+      "curl -s -o 10.10.10 http://10.10.10.5/a; curl -s --no-clobber -o 10.10.10 http://10.10.10.5/b; whatweb 10.10.10.1",
+      "wget -q -O 10.10.10 http://10.10.10.5/a; wget -q --backups=1 http://10.10.10.5/10.10.10; whatweb 10.10.10.1",
+      "wget -q --stats-site=h:.curlrc http://10.10.10.5/; curl -s http://10.10.10.5/",
+      "gobuster dir -u http://10.10.10.5/ -w /usr/share/wordlists/dirb/common.txt -qo .curlrc; curl -s http://10.10.10.5/",
+      "gobuster dir -u http://10.10.10.5/ -w /usr/share/wordlists/dirb/common.txt -o=.curlrc; curl -s http://10.10.10.5/",
+      "gobuster dir -u http://10.10.10.5/ -w /usr/share/wordlists/dirb/common.txt -output .curlrc; curl -s http://10.10.10.5/",
+      "ffuf -u http://10.10.10.5/FUZZ -w /usr/share/wordlists/dirb/common.txt -o=.curlrc; curl -s http://10.10.10.5/",
+      "ffuf -u http://10.10.10.5/FUZZ -w /usr/share/wordlists/dirb/common.txt -debug-log=.curlrc; curl -s http://10.10.10.5/",
+      "httpx -u http://10.10.10.5 -duc -o=.curlrc; curl -s http://10.10.10.5/",
+      "httpx -u http://10.10.10.5 -duc -profile-mem .curlrc; curl -s http://10.10.10.5/",
+      "feroxbuster -u http://10.10.10.5/ -w /usr/share/wordlists/dirb/common.txt -qo .curlrc; curl -s http://10.10.10.5/",
+      "dirb http://10.10.10.5/ /usr/share/wordlists/dirb/common.txt -So .curlrc; curl -s http://10.10.10.5/",
+      "wfuzz -cf .curlrc -z list,a-b http://10.10.10.5/FUZZ; curl -s http://10.10.10.5/",
+      "wfuzz --oF .curlrc -z list,a-b http://10.10.10.5/FUZZ; curl -s http://10.10.10.5/",
+      "wfuzz --dump=.curlrc -z list,a-b http://10.10.10.5/FUZZ; curl -s http://10.10.10.5/",
+      "wfuzz -f ldaprc,json -z list,a-b http://10.10.10.5/FUZZ; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "whatweb --log-b=.curlrc 10.10.10.5; curl -s http://10.10.10.5/",
+      "wafw00f -ao .curlrc http://10.10.10.5/; curl -s http://10.10.10.5/",
+      "sslyze --json .curlrc 10.10.10.5; curl -s http://10.10.10.5/",
+      "testssl -oL=.curlrc 10.10.10.5; curl -s http://10.10.10.5/"].map((x) => [x, STAGED_ANY]),
+    // ... and in the second half of the sweep: ncat and nc -o/-x in clusters and as prefixes, masscan's -oH, -oLx, spellings
+    // and pcap, ss -D, dnsrecon's argparse forms (all of them options of a tool before another tool now)
+    ...["ncat -vo ~/.curlrc 10.10.10.5 80; curl -s http://10.10.10.5/",
+      "ncat --outp ~/.curlrc 10.10.10.5 80; curl -s http://10.10.10.5/",
+      "ncat --out ~/.lesskey 10.10.10.5 80; less -f /dev/null",
+      "ncat -vx ~/.curlrc 10.10.10.5 80; curl -s http://10.10.10.5/",
+      "nc --out=.curlrc 10.10.10.5 80; curl -s http://10.10.10.5/",
+      "nc -vo ~/.curlrc 10.10.10.5 80; curl -s http://10.10.10.5/",
+      "nc -vo ~/.snmp/snmp.conf 10.10.10.5 80; snmpwalk -v2c -c public 10.10.10.5",
+      "masscan -p80 10.10.10.5 -oH ~/.curlrc; curl -s http://10.10.10.5/",
+      "masscan -p80 10.10.10.5 -oLx ~/.wgetrc; wget -q -O- http://10.10.10.5/",
+      "masscan -p80 10.10.10.5 --outputfilename ~/.curlrc; curl -s http://10.10.10.5/",
+      "masscan -p80 10.10.10.5 --pcap:.curlrc; curl -s http://10.10.10.5/",
+      "masscan -p80 10.10.10.5 --pcap:ldaprc; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "masscan -p80 10.10.10.5 --rotate 1 --rotate-dir ~/.nmap -oL x; nmap -sV 10.10.10.5",
+      "ss -D ~/.curlrc; curl -s http://10.10.10.5/",
+      "ss -D ~/.nmap/nmap-service-probes; nmap -sV 10.10.10.5",
+      "dnsrecon -d lab -n 10.10.10.5 -t srv --xm ~/.curlrc; curl -s http://10.10.10.5/"].map((x) => [x, STAGED_ANY]),
+    ...['--input-list doms.txt', '--inp doms.txt', '-iL doms.txt', '-iLdoms.txt'].map((x) => [`curl -so doms.txt http://10.10.10.5/d; dnsrecon ${x} -n 10.10.10.5 -t srv`,
+      /^dnsrecon -iL\/--input-list \(target domains from a file\)$/]),
+    // ... and the SMB, LDAP and SNMP tools and the filters: snmpwalk -Lf, onesixtyone -o in clusters, smbmap -qg and --cs,
+    // gawk's prefixes and clusters, ike-scan --writepkttofile FILE; snmpwalk loads the -m files and -M directories, jq ~/.jq,
+    // enum4linux runs ldapsearch (ldaprc)
+    ...["snmpwalk -Lf=.curlrc -d -v2c -c public 10.10.10.5; curl -s http://10.10.10.5/",
+      "snmpwalk -v2c -c public -Lf=~/.wgetrc 10.10.10.5; wget -q -O- http://10.10.10.5/",
+      "snmpwalk -Lf=ldaprc -v2c -c public 10.10.10.5; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "curl -s http://10.10.10.5/x | awk --dump-variables=./.curlrc '{url=$0}'; curl -s http://10.10.10.5/",
+      "curl -s http://10.10.10.5/ | awk --dump-variables=ldaprc '{x=$0}'; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "onesixtyone -do ldaprc 10.10.10.5 public; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "onesixtyone -qo ./.curlrc 10.10.10.5 public; curl -s http://10.10.10.5/",
+      "onesixtyone -qdo ~/.wgetrc 10.10.10.5 public; wget -q -O- http://10.10.10.5/",
+      "onesixtyone -do .curlrc 10.10.10.5 public; curl -s http://10.10.10.5/",
+      "ike-scan --writepkttofile .curlrc 10.10.10.5; curl -s http://10.10.10.5/",
+      "ike-scan --writepkttofile=ldaprc 10.10.10.5; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "ike-scan -A --pskcrack=.wgetrc 10.10.10.5; wget -q -O- http://10.10.10.5/",
+      "ike-scan -A -P./.curlrc 10.10.10.5; curl -s http://10.10.10.5/",
+      "ike-scan -A -Pldaprc 10.10.10.5; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "smbmap -H 10.10.10.5 --no-write-check -qg ldaprc; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
+      "smbmap -H 10.10.10.5 --no-write-check --cs ~/.wgetrc; wget -q -O- http://10.10.10.5/",
+      "smbclient -N -L //10.10.10.5 -l . ; snmpwalk -M +. -m ALL -v2c -c public 10.10.10.5",
+      "smbclient -N -L //10.10.10.5 -l .nmap; nmap -sV 10.10.10.5",
+      "curl -s -o mibfile http://10.10.10.5/x; snmpwalk -m +./mibfile -v2c -c public 10.10.10.5",
+      "curl -s http://10.10.10.5/x > mibfile; snmpwalk -M +. -m ALL -v2c -c public 10.10.10.5",
+      "smbclient //10.10.10.5/Public -N -c 'get .jq'; curl -s http://10.10.10.5/x | jq .",
+      "curl -s -o ldaprc http://10.10.10.5/x; enum4linux -l 10.10.10.5",
+      "curl -s http://10.10.10.5/x | awk --prof=.curlrc '{print}'; curl -s http://10.10.10.5/",
+      "curl -s http://10.10.10.5/x | awk --pre=.curlrc '{print}'; curl -s http://10.10.10.5/",
+      "curl -s http://10.10.10.5/x | awk -nd./.curlrc '{url=$0}'; curl -s http://10.10.10.5/",
+      "curl -s http://10.10.10.5/x | awk -Wdump-variables=./.curlrc '{url=$0}'; curl -s http://10.10.10.5/"].map((x) => [x, STAGED_ANY]),
+    // tools that load what the list did not name: whatweb's Ruby libraries from the working directory, Python's user site, and
+    // the system files every program reads (the runner contract keeps those unwritable too)
+    ...['curl -so json.rb http://10.10.10.5/x; whatweb http://10.10.10.5', 'curl -s --create-dirs -o net/http.rb http://10.10.10.5/x; whatweb 10.10.10.5',
+      'curl -so zlib.so http://10.10.10.5/x; whatweb 10.10.10.5'].map((x) => [x, STAGED('whatweb')]),
+    ["curl -s -O 'http://10.10.10.5/x%5Cldaprc'; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab", STAGED('ldapsearch')],   // decoded, then cut at \\
+    ['curl -s --create-dirs -o ~/.local/lib/python3.12/site-packages/usercustomize.py http://10.10.10.5/x; wafw00f http://10.10.10.5/', STAGED('wafw00f')],
+    ['curl -s --create-dirs -o ~/.local/lib/python3.12/site-packages/sitecustomize.py http://10.10.10.5/x; sslyze 10.10.10.5', STAGED('sslyze')],
+    ['curl -s -o ~/.jq http://10.10.10.5/x; jq -r .name data.json', STAGED('jq')],
+    ['curl -so /etc/hosts http://10.10.10.5/x; nmap -sV web01.lab', STAGED('nmap')], ['curl -s http://10.10.10.5/x > /etc/resolv.conf; ping -c 1 web01.lab', STAGED('ping')],
+    ['curl -so /tmp/krb5cc_0 http://10.10.10.5/x; smbclient -L 10.10.10.5 -N', STAGED('smbclient')], ['curl -so /etc/wgetrc http://10.10.10.5/x; wget -q -O- http://10.10.10.5/', STAGED('wget')],
+    // Samba writes DIR/log.<program> for -l/--log-basename DIR
+    ['smbclient -L 10.10.10.5 -N -l ~/.nmap; nmap -sV 10.10.10.5', STAGED('nmap')], ['rpcclient -U "" -N 10.10.10.5 -c srvinfo --log-basename=.snmp; snmpwalk -v2c -c public 10.10.10.5', STAGED('snmpwalk')],
     ...["smbclient //10.10.10.5/Public -N -c 'lowercase; get LDAPRC'; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab",
       'wget -q --restrict-file-names=lowercase http://10.10.10.5/LDAPRC; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab',
       "curl -sO 'http://10.10.10.5/l[d-d]aprc'; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab", 'nmap -sV -oN ld%aprc 10.10.10.5; ldapsearch -x -H ldap://10.10.10.5 -b dc=lab']
@@ -1608,6 +1726,16 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
     'nmap -sV 10.10.10.5 | grep open; curl -s http://10.10.10.5/ | tee ~/.curlrc',
     'wget -q -r -np http://10.10.10.5/docs/; curl -s http://10.10.10.5/', 'curl -s http://10.10.10.5/ & wget -q -r -np http://10.10.10.5/files/',
     'wget -q -x http://10.10.10.5/.config/httpx/config.yaml; httpx -duc -u http://10.10.10.5',
+    'uniq +0000000000005 ~/.curlrc; curl -s http://10.10.10.5/',
+    "curl -s -o /dev/null -w '%output{codes.txt}%{http_code}' http://10.10.10.5/; curl -s http://10.10.10.5/",
+    'wget -q --default-page=home.html http://10.10.10.5/; curl -s http://10.10.10.5/',
+    "curl -s http://10.10.10.5/x | awk --dump-variables '{n++}'; curl -s http://10.10.10.5/", 'ike-scan -A -Ppsk.txt 10.10.10.5; curl -s http://10.10.10.5/',
+    'smbclient -L 10.10.10.5 -N -l logs; curl -s http://10.10.10.5/',
+    // tools before another tool with options the gate knows keep their tier
+    "curl -sSL -A 'Mozilla/5.0' -o page.html http://10.10.10.5/; whatweb http://10.10.10.5", 'whatweb http://10.10.10.5/; curl -s http://10.10.10.5/robots.txt',
+    'wget -qO- http://10.10.10.5/; curl -s http://10.10.10.5/a', 'dig @10.10.10.53 web01.lab; curl -s http://10.10.10.5/',
+    'nmap -sV 10.10.10.5 -oN scan.txt; curl -s http://10.10.10.5/', "curl -s -o /dev/null -w '%{http_code}' http://10.10.10.5/; curl -s http://10.10.10.5/a",
+    'curl -s http://10.10.10.5/robots.txt; curl -s http://10.10.10.5/sitemap.xml', 'wget -q -r -np -l 2 http://10.10.10.5/docs/; curl -s http://10.10.10.5/',
     'wget -q -r http://10.10.10.5/; curl -s http://10.10.10.5/', 'wget -q -m -p -nv http://10.10.10.5/; curl -s http://10.10.10.5/',
     'wget -q -r -P out --cut-dirs=1 http://10.10.10.5/a/; curl -s http://10.10.10.5/', 'wget -q -r --host-directories=on http://10.10.10.5/; curl -s http://10.10.10.5/',
     'curl -s http://10.10.10.5/{a,b}.html -o out.html; curl -s http://10.10.10.5/'];

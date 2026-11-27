@@ -327,7 +327,7 @@ flowchart LR
     pipe) auto-ran. The positions are now scope-checked, and the rest waits for a human or is blocked;
   - in the review of that sweep: tracepath's destination and nbtscan's range went unread, dnsrecon ran its standard
     checks with an empty `-t` or `-r`, and a config still reached its loader under a name the gate did not read (a
-    brace expansion, a curl URL glob, nmap's `%` names, rustscan's nmap words, wget `-nH` with `-r` or `-x`, an FTP wildcard): these wait
+    brace expansion, a curl URL glob, nmap's `%` names, rustscan's nmap words, wget `-nH` with `-r` or `-x`, an FTP wildcard; and, in a last review, curl `-w '%output{...}'`, wget `--default-page`, gawk's variable dump, `uniq +N` beyond a size): these wait. A sweep of every tool's writer options then found more than a table could hold (abbreviated long options, clusters, `-o=FILE`, `--hsts`, numbered names, whatweb loading `./json.rb`), so the rule became structural: a tool waits after another tool whose options the gate does not follow, and after a dot path, a system path or an unknown name
     now. The sweep had also made compliant forms wait (httpx `-cdn`, `-bp` and `-strip` read as value flags, a sed
     regex with a `w` in it, whatweb and rustscan words matched by basename, every `wget -r`, smbclient `get`,
     `sort -o`, `uniq`, `less -o`, `sed -i` and `ldapsearch -t`): the gate reads the names these write, and they

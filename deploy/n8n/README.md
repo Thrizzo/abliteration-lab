@@ -315,8 +315,13 @@ instead of guessing a scope.
        and backups (`-i'.*'` backs `curlrc` up as `.curlrc`), nmap's output files with `%` expanded as nmap does
        (`-oN %.curlrc` writes `.curlrc`, `-oA X` writes `X.nmap`, `X.gnmap` and `X.xml`; a name with the date in it
        counts against whatweb and rustscan), rustscan's nmap words after `--`, smbclient `get`'s local name (lowercased
-       after `lowercase`), `sort -o`, `uniq`'s OUTPUT, `less -o` and `-O`, `ldapsearch -t`'s `-T` directory, and wget's
-       names in either case with `--restrict-file-names`. Without `-nH` or `-nd`, wget `-r`, `-m`, `-p` and `-x` save
+       after `lowercase`), `sort -o`, `uniq`'s OUTPUT (also after a `+N` too large for a size, which uniq reads as its
+       INPUT file), `less -o` and `-O`, `ldapsearch -t`'s `-T` directory, wget's names in either case with
+       `--restrict-file-names` and its `--default-page` name for a URL that ends in `/`, curl's `-w '%output{FILE}'`
+       (curl 8.3 writes the rest of the write-out there, the server's `%header{...}` values included; `-w @FILE` reads
+       a format the gate cannot see), gawk's `--dump-variables`, `--profile` and `--pretty-print` files (`-d`, `-p`,
+       `-o`: the variable dump holds the input, and `proxy: "..."` is a line curl reads), ike-scan's `--pskcrack` and
+       `--writepkttofile` files, and `DIR/log.<program>` for Samba's `-l DIR`. Without `-nH` or `-nd`, wget `-r`, `-m`, `-p` and `-x` save
        every file under a directory named after its host, where no loader looks.
        `curl -so ~/.curlrc http://10.10.10.5/rc; curl -s http://10.10.10.5/` waits. A write also counts when it runs at
        the same time as the program: after a lone `&` that ends the program's list
@@ -324,8 +329,20 @@ instead of guessing a scope.
        the ping ends, curl at once), and for nmap and rustscan in a later member of the same pipe (nmap
        opens `nmap-service-probes` when its service scan starts, after the port scan; rustscan starts nmap after its
        own scan): `nmap -sV 10.10.10.5 | curl -so ~/.nmap/nmap-service-probes http://10.10.10.5/x` waits, and so does
-       `nmap -sV 10.10.10.5 | awk '$2 > 0'`, since the gate cannot tell awk's `>` from a write. Without protected
-       data, a dotfile that no such program can load still auto-runs.
+       `nmap -sV 10.10.10.5 | awk '$2 > 0'`, since the gate cannot tell awk's `>` from a write. Since a sweep of every
+       tool's writer options the rule is structural as well. Every tool waits after a part of the command that writes a
+       dotfile or a file in a dot folder (Python tools load `~/.local/lib/python3.X/site-packages/usercustomize.py` and
+       `.pth` files), an absolute system path (`/etc`, `/usr`, `/var`, `/opt`, `/tmp/krb5*`: resolver, Kerberos and
+       system-wide settings that every program reads; the runner contract keeps them unwritable too) or a name the gate
+       cannot tell; whatweb also after a `.rb` or `.so` file, since it puts the working directory first in Ruby's load
+       path (`./json.rb` runs); snmpwalk with `-m` or `-M` after any write (it reads the MIB files and directories they
+       name, `-M +.` the working directory); jq after a write of `~/.jq` (it can redefine jq's builtins). A tool also waits after another tool that writes files through options the gate does not
+       follow. Only the tools without file options of their own (ping, fping, traceroute, tracepath, arp, netstat, host,
+       dig, nslookup, whois, rpcinfo, showmount, nbtscan), those whose writes it reads in full (nmap, rustscan, smbclient,
+       rpcclient, ldapsearch, ike-scan, the local filters) and curl and wget with a fixed set of common options pass:
+       `curl -s http://10.10.10.5/a; curl -s http://10.10.10.5/b` auto-runs, `gobuster dir ... -o out.txt; curl ...`
+       waits. Without protected data, a dotfile that no later program can load (`curl -so .page ...; grep x .page`)
+       still auto-runs.
 
      These checks read the words bash hands the program, so quoting hides nothing (`nc '-e'`, `"--script=vuln"`, awk
      `'sys''tem('`, `curl -X 'DELETE'`), and an option counts in the spellings the tool accepts: attached values

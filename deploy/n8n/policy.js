@@ -452,14 +452,21 @@ function awkProgram(text) {
 // awk's words -> 'run', 'at', 'file' (-f, -E, -i, -l, -D, mawk -W exec), '?' (an option the gate cannot read) or ''. gawk
 // options: -F -v -e -f -E -i -l -W take the rest of the word or the next word, -d -D -L -o -p only an attached value,
 // -W name is --name; gawk and mawk stop reading options at the first operand, the program text unless -e, --source or -f
-// gave one. A later word that looks like an option waits too, for an awk that reads options there.
-function awkEscape(args) {
+// gave one. A later word that looks like an option waits too, for an awk that reads options there. writes, when given,
+// collects the files gawk writes: --dump-variables (-d, default awkvars.out: every global variable with its value, input
+// text included), --profile (-p) and --pretty-print (-o, both default awkprof.out), as =FILE or the attached value (a
+// local run of gawk 5.2)
+// gawk reads --dump as a prefix of --dump-variables (mawk's -W dump prints to stdout): it counts as one
+const AWK_WRITES = { 'dump-variables': 'awkvars.out', dump: 'awkvars.out', profile: 'awkprof.out', 'pretty-print': 'awkprof.out' };
+const AWK_SHORT_WRITES = { d: 'dump-variables', p: 'profile', o: 'pretty-print' };
+function awkEscape(args, writes = null) {
   const programs = [];
   let k = 0, file = false, bad = false, given = false;
   const next = () => (k + 1 < args.length ? args[++k] : null);
   const long = (spec) => {                                        // --name[=v], or the value of -W
     const eq = spec.indexOf('='), name = longName(eq < 0 ? spec : spec.slice(0, eq), AWK_LONG), kind = name ? AWK_LONG[name] : -1;
     const v = eq >= 0 ? spec.slice(eq + 1) : kind === 'value' || kind === 'program' ? next() : null;
+    if (writes && AWK_WRITES[name]) writes.push(eq >= 0 ? v : AWK_WRITES[name]);
     if (kind === -1 || ((kind === 'value' || kind === 'program') && v === null)) bad = true;
     else if (kind === 'run') file = true;
     else if (kind === 'program') { programs.push(v); given = true; }
@@ -472,7 +479,10 @@ function awkEscape(args) {
     for (let p = 1; p < t.length; p++) {
       const c = t[p];
       if ('bcCghknNOMPrSstVY'.includes(c)) continue;
-      if ('dLop'.includes(c)) break;                              // an optional value, attached
+      if ('dLop'.includes(c)) {                                   // an optional value, attached
+        if (writes && AWK_SHORT_WRITES[c]) writes.push(p + 1 < t.length ? t.slice(p + 1) : AWK_WRITES[AWK_SHORT_WRITES[c]]);
+        break;
+      }
       if (c === 'D') { file = true; break; }
       if ('FvefEilW'.includes(c)) {
         const v = p + 1 < t.length ? t.slice(p + 1) : next();
@@ -1673,6 +1683,9 @@ function reconEscape(program, args, seg) {
   // any case, as a comma list, every value of it for the types that wait. argparse keeps the last -t and the last -r, and
   // dnsrecon skips an empty one (cli.py: if type_arg, if arguments.range): with neither it runs std (-t '', -t=, -r '')
   if (tool === 'dnsrecon') {
+    // dnsrecon 1.2 and later enumerate every domain in the -iL/--input-list file (1.6.3 cli.py open(arguments.input_list));
+    // argparse also takes -iLFILE, -iL=FILE and the prefixes --inp... (--i is ambiguous there and waits here too)
+    if (args.some((t) => /^-iL/.test(t) || /^-i(=|$)/.test(t)) || pdLong(args, ['input-list'])) return 'dnsrecon -iL/--input-list (target domains from a file)';
     const w = walkOpts(args, OPT_SPECS.dnsrecon), tv = optValues(w, ['-t', '--type']), rv = optValues(w, ['-r', '--range']);
     const types = tv.flatMap((v) => v.trim().toLowerCase().split(',')), unset = (vals) => !vals.length || vals[vals.length - 1] === '';
     if (optHas(w, ['-b', '-y', '-k', '-w']) || types.some((t) => ['bing', 'yand', 'crt'].includes(t))) {
@@ -1880,15 +1893,26 @@ function rawCommands(cmd) {
 // same pipe (the members start together; nmap opens nmap-service-probes when its service scan starts, after the port
 // scan, and rustscan starts nmap after its own scan)
 const STAGED_LATE = new Set(['nmap', 'rustscan']);
-const STAGED_LOADERS = new Set(['curl', 'wget', 'dig', 'ffuf', 'httpx', 'feroxbuster', 'whatweb', 'wfuzz', 'nmap', 'rustscan', 'snmpwalk', 'ldapsearch', 'less', 'more']);
+const STAGED_LOADERS = new Set(['curl', 'wget', 'dig', 'ffuf', 'httpx', 'feroxbuster', 'whatweb', 'wfuzz', 'nmap', 'rustscan', 'snmpwalk', 'ldapsearch', 'less', 'more',
+  'jq']);                                                         // jq loads ~/.jq, which can redefine its builtins (jq 1.7.1)
 const STAGED_PATH = /(^|\/)\.[^./\s]|(^|\/)(whatweb\.rb|ferox-config\.toml|ldaprc)$/;
-// the file curl -O and wget name after a URL: the last component of its path, as written and percent-decoded
-const urlFileNames = (u) => {
+// the file curl -O and wget name after a URL: the last component of its path, as written and percent-decoded. curl also cuts
+// at the last backslash (tool_operhlp.c get_url_file_name: x\.curlrc is saved as .curlrc, a local run of curl 8.5), and from
+// 8.10 names a path that ends in / after its last directory, or curl_response; wget drops ;type=X from an FTP name (wget
+// 1.21.4: ftp://h/ldaprc;type=i is saved as ldaprc)
+const lastPart = (x) => x.slice(Math.max(x.lastIndexOf('/'), x.lastIndexOf('\\')) + 1);
+const urlFileNames = (u, tool = '') => {
   const rest = String(u).replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, '').replace(/[?#][\s\S]*$/, ''), path = rest.includes('/') ? rest.slice(rest.indexOf('/')) : '';
-  let n = path.slice(path.lastIndexOf('/') + 1);
-  const names = [n];
-  for (let r = 0; r < 3; r++) n = pdPercentRound(n);
-  return names.concat(n);
+  const raw = [path.slice(path.lastIndexOf('/') + 1)];
+  if (tool === 'curl') raw.push(lastPart(path.replace(/[\/\\]+$/, '')) || 'curl_response');
+  if (tool === 'wget' && /^ftps?:/i.test(String(u))) raw.push(raw[0].replace(/;type=[a-z]$/i, ''));
+  const names = [];
+  for (let n of raw) {
+    names.push(n);
+    for (let r = 0; r < 3; r++) n = pdPercentRound(n);
+    names.push(n, ...(tool === 'curl' ? [lastPart(n)] : []));
+  }
+  return [...new Set(names)];
 };
 // whether a file written as p can be the file a program opens as the word w, relative to the working directory: the same
 // path (./ and doubled slashes do not count: whatweb http://10.10.10.5 opens http:/10.10.10.5), or a path that is
@@ -1945,7 +1969,10 @@ const getoptValues = (args, takes, letter) => {
 };
 const LESS_VALUE = 'bDhjkoOpPtTxyz#"';                            // less's options that take a value (opttbl.c)
 // uniq [OPTION]... [INPUT [OUTPUT]] (getopt "-0123456789Dcdf:is:uw:z", in order): f s w, --skip-fields, --skip-chars and
-// --check-chars take a value, +N before -- skips N characters (uniq.c); the operands are what is left
+// --check-chars take a value, +N before -- skips N characters (uniq.c); the operands are what is left. uniq takes +N as a
+// count only when N fits a size (xstrtoumax and SIZE_MAX); a larger N is a file, so the word after it is the OUTPUT
+// (coreutils 9.4: uniq +18446744073709551616 OUT reads that file and writes OUT). The cut is the 32-bit SIZE_MAX, so any
+// N a build could read as a file counts as an operand
 function uniqOperands(args) {
   const ops = [];
   let opts = true;
@@ -1958,7 +1985,10 @@ function uniqOperands(args) {
       continue;
     }
     if (opts && /^-./.test(t)) { for (let p = 1; p < t.length; p++) if ('fsw'.includes(t[p])) { if (p + 1 === t.length) k++; break; } continue; }
-    if (opts && /^\+\d+$/.test(t)) continue;
+    if (opts && /^\+\d+$/.test(t)) {
+      const n = t.slice(1).replace(/^0+(?=\d)/, '');
+      if (n.length < 10 || (n.length === 10 && n <= '4294967295')) continue;
+    }
     ops.push(t);
   }
   return ops;
@@ -1996,7 +2026,7 @@ function segmentWrites(s) {
     const urls = (toolTargets('curl', a) || []).filter(([, kind]) => kind === 'url').map(([u]) => u);
     const remote = pdCluster(a, 'curl', 'O') || pdLong(a, ['remote-name', 'remote-name-all']);
     if (remote) {
-      for (const u of urls) add(u, urlFileNames(u));
+      for (const u of urls) add(u, urlFileNames(u, 'curl'));
       if (pdCluster(a, 'curl', 'J') || pdLong(a, ['remote-header-name'])) unknown = 'curl -J: the server names the file';
     }
     // curl expands {a,b} and [1-9] in a URL unless -g/--globoff: -O names every file after its URL, and #1 in -o stands for
@@ -2005,11 +2035,20 @@ function segmentWrites(s) {
       && (remote || pdClusterValues(a, 'curl', 'o').concat(pdLongValues(curlLong(a), 'output')).some((v) => v !== null && /#\d/.test(v)))) {
       unknown = 'curl -O or -o #N with a URL glob: the glob names the file';
     }
+    // -w/--write-out: %output{FILE} (curl 8.3) sends the rest of the write-out, the server's %header{...} values included,
+    // to FILE (>>FILE appends); -w @FILE and @- read the format from a file or stdin (a local run of curl 8.5.0)
+    for (const v of pdClusterValues(a, 'curl', 'w').concat(pdLongValues(curlLong(a), 'write-out'))) {
+      if (v === null) continue;
+      if (v.startsWith('@')) unknown = 'curl -w @file: a write-out format the gate does not see';
+      for (const m of v.matchAll(/%output\{(?:>>)?([^}]*)\}?/gi)) add(m[1] || '%output');
+    }
   }
   if (tool === 'wget' && !pdLong(a, ['spider']) && !pdClusterValues(a, s.program, 'O').length && !pdLongValues(a, 'output-document').length) {
     // --restrict-file-names=lowercase or uppercase changes the case of every name (LDAPRC is saved as ldaprc)
     const urls = walkOpts(a, OPT_SPECS.wget).operands, cased = pdLong(a, ['restrict-file-names']);
-    for (const u of urls) add(u, urlFileNames(u).flatMap((x) => (cased ? [x, x.toLowerCase(), x.toUpperCase()] : [x])));
+    for (const u of urls) add(u, urlFileNames(u, 'wget').flatMap((x) => (cased ? [x, x.toLowerCase(), x.toUpperCase()] : [x])));
+    // a URL that ends in / is saved under --default-page's name, index.html unless it is given (a local run of wget 1.21.4)
+    for (const v of pdLongValues(a, 'default-page')) if (v !== null) add(v, cased ? [v, v.toLowerCase(), v.toUpperCase()] : [v]);
     // -r, -m and -p save every file under a directory named after its host (10.10.10.5/.curlrc, also for ../.curlrc: a local
     // run of wget 1.21.4), where no loader looks; -nH and -nd keep them in the working directory under the server's names
     if ((pdCluster(a, s.program, 'rmp') || pdLong(a, ['recursive', 'mirror', 'page-requisites'])) && wgetFlat(a)) {
@@ -2047,6 +2086,11 @@ function segmentWrites(s) {
   // stdout); less and more -o or -O FILE and --log-file or --LOG-FILE FILE
   if (s.program === 'sort') for (const v of getoptValues(a, 'kSoTty', 'o').concat(pdLongValues(a, 'output'))) if (v !== null) add(v);
   if (s.program === 'uniq') { const ops = uniqOperands(a); if (ops.length > 1 && ops[1] !== '-') add(ops[1]); }
+  if (s.program === 'awk') { const w = []; awkEscape(a, w); for (const p of w) add(p); }
+  // ike-scan 1.9.5: --pskcrack=FILE (-PFILE) writes the PSK parameters the target sent, --writepkttofile=FILE the packet
+  if (tool === 'ike-scan') for (const [n, v] of longOnlyWalk(a, IKE_SHORT, IKE_LONG).opts) if (v && ['--pskcrack', '-P', '--writepkttofile'].includes(n)) add(v);
+  // Samba's -l/--log-basename DIR writes DIR/log.<program> (lib/cmdline)
+  if (tool === 'smbclient' || tool === 'rpcclient') for (const d of optValues(walkOpts(a, OPT_SPECS[tool]), ['-l', '--log-basename'])) add(`${d}/log.${tool}`);
   if (s.program === 'less' || s.program === 'more') {
     for (const v of getoptValues(a, LESS_VALUE, 'o').concat(getoptValues(a, LESS_VALUE, 'O'), pdLongValues(a, 'log-file'))) if (v !== null) add(v);
   }
@@ -2057,6 +2101,62 @@ function segmentWrites(s) {
   }
   return { paths: paths.filter(Boolean), unknown, dated };
 }
+// The rule holds for every tool on the read-only list, not only the loaders named above: a last review found tools that load
+// code or settings the list did not name (whatweb puts the working directory first in Ruby's load path, so ./json.rb or
+// ./net/http.rb runs: /usr/bin/whatweb:35; Python tools run ~/.local/lib/python3.X/site-packages/usercustomize.py and its
+// .pth files) and writer options faster than a table could list them (abbreviated long options, short clusters, Go's and
+// pflag's -o=FILE, --hsts, --ssl-sessions, --no-clobber's NAME.1). So a tool waits when a part of the command that runs before
+// it (or alongside it, as above) writes a dotfile or a file in a dot folder, an absolute path (/etc/hosts, /etc/resolv.conf,
+// /tmp/krb5cc_0: every program resolves names or reads Kerberos tickets; the runner contract keeps them unwritable too), a
+// name the gate cannot tell, a .rb or .so file before whatweb, or the file (or its numbered copy) a whatweb or rustscan word
+// names; and when that part is a tool that writes files through options the gate does not follow (preloadUnknown).
+// no file options of their own (redirections are read apart; ss -D/--diag FILE writes a raw dump, so ss is not one of them)
+const NO_WRITE_TOOLS = new Set(['ping', 'fping', 'traceroute', 'tracepath', 'arp', 'netstat', 'host', 'dig', 'nslookup', 'whois', 'rpcinfo',
+  'showmount', 'nbtscan']);
+const EXACT_WRITE_TOOLS = new Set(['nmap', 'rustscan', 'smbclient', 'rpcclient', 'ldapsearch', 'ike-scan']);   // segmentWrites reads them all
+// curl and wget before another tool: these options only (a cluster of the flag letters may end in one value letter, its value
+// attached or the next word); their other options include writers the gate does not follow
+const PRELOAD_SAFE = {
+  curl: { flags: 'sSLkiIvfg46O', valueLetters: 'HAebumXxrwoDc', exact: new Set(),
+    long: wordSet('silent show-error location insecure include head verbose fail globoff compressed ipv4 ipv6 path-as-is no-progress-meter http1.1 http2 '
+      + 'get remote-name remote-name-all create-dirs'),
+    value: wordSet('-H --header -A --user-agent -e --referer -b --cookie -u --user -m --max-time --connect-timeout -X --request -x --proxy --resolve '
+      + '--max-redirs -r --range --retry --url -o --output --output-dir -D --dump-header -c --cookie-jar -w --write-out') },
+  wget: { flags: 'qvSNcrmpx', valueLetters: 'UtTwOPoal', exact: new Set(['-nv', '-np', '-nc']),
+    long: wordSet('quiet verbose no-verbose server-response spider no-check-certificate timestamping continue recursive mirror page-requisites '
+      + 'no-parent no-clobber no-glob force-directories'),
+    value: wordSet('-U --user-agent -t --tries -T --timeout --header --user --password --http-user --http-password --referer --max-redirect -w --wait '
+      + '-l --level -O --output-document -P --directory-prefix -o --output-file -a --append-output --default-page --cut-dirs --host-directories '
+      + '--directories') },                                         // =off and -nH: segmentWrites counts the names as unknown
+};
+// a tool segment before another tool -> '' when the gate knows every file it can write, else the option it does not follow
+function preloadUnknown(s) {
+  const tool = toolOf(s.program);
+  if (!READONLY_TOOLS.has(tool) || NO_WRITE_TOOLS.has(tool) || EXACT_WRITE_TOOLS.has(tool)) return '';   // local filters: segmentWrites
+  const safe = PRELOAD_SAFE[tool], a = s.args;
+  for (let k = 0; k < a.length; k++) {
+    const t = a[k];
+    if (t === '--') break;
+    if (!/^-./.test(t)) continue;
+    if (!safe) return `${s.program} ${t}`.slice(0, 50);              // any option of a tool whose writers the gate does not follow
+    if (safe.exact.has(t) || (t.startsWith('--') && safe.long.has(t.slice(2)))) continue;
+    const name = t.startsWith('--') && t.includes('=') ? t.slice(0, t.indexOf('=')) : t;
+    if (safe.value.has(name)) { if (name === t) k++; continue; }
+    if (/^-[A-Za-z0-9]/.test(t)) {                                // flags, then one value letter: its value attached (-qO-) or next
+      let p = 1;
+      while (p < t.length && safe.flags.includes(t[p])) p++;
+      if (p === t.length) continue;
+      if (safe.valueLetters.includes(t[p])) { if (p === t.length - 1) k++; continue; }
+    }
+    return `${s.program} ${t}`.slice(0, 50);
+  }
+  return '';
+}
+const RUBY_LIB = /\.(rb|so)$/i;
+// the system paths every program may read (resolver and Kerberos files, libraries, system-wide settings such as /etc/wgetrc)
+const SYS_PATH = /^\/(etc|usr|var|opt|lib|lib32|lib64|libx32|run|srv|boot|bin|sbin)(\/|$)|^\/tmp\/krb5/;
+// a file that wget (a name already there) or curl --no-clobber saves as NAME.1, NAME.2, ...
+const numberedOf = (p, w) => { const a = pathKey(p), b = pathKey(w); return b.length > a.length + 1 && b.startsWith(a + '.') && /^\d+$/.test(b.slice(a.length + 1)); };
 function stagedConfig(segs) {
   const writes = segs.map(segmentWrites);
   const n = segs.length, bgAt = new Array(n + 1).fill(n), pipeEnd = new Array(n).fill(0);
@@ -2064,14 +2164,23 @@ function stagedConfig(segs) {
     bgAt[k] = segs[k].seg.bg ? k : bgAt[k + 1];                    // the first segment at or after k that a lone & ends
     pipeEnd[k] = k + 1 < n && segs[k + 1].seg.pipedIn ? pipeEnd[k + 1] : k;   // the last member of k's pipe
   }
-  for (const [i, s] of segs.entries()) {
-    const tool = toolOf(s.program);
-    if (!STAGED_LOADERS.has(tool) || (tool === 'dig' && digWalk(s.args).norc)) continue;
-    const named = stagedNames(tool, s.args);
-    for (const [j, w] of writes.entries()) {
-      if (!(j < i || (j > i && (bgAt[i] < j || (STAGED_LATE.has(tool) && j <= pipeEnd[i]))))) continue;   // lands after the load
-      const hit = w.unknown || w.paths.find((p) => STAGED_PATH.test(p) || named.some((x) => sameFile(p, x))) || (named.length ? w.dated[0] : '');
-      if (hit) return `${s.program} loads settings, plugins or targets from HOME or the working directory, and another part of the command writes one (${String(hit).slice(0, 50)})`;
+  // first the loaders above and the files they read, then every tool for the writes the gate cannot follow
+  for (const pass of [1, 2]) {
+    for (const [i, s] of segs.entries()) {
+      const tool = toolOf(s.program);
+      if (!STAGED_LOADERS.has(tool) && (pass === 1 || !READONLY_TOOLS.has(tool))) continue;
+      const rc = !(tool === 'dig' && digWalk(s.args).norc);        // dig -r reads no ~/.digrc
+      const named = pass === 1 ? stagedNames(tool, s.args) : [];
+      for (const [j, w] of writes.entries()) {
+        if (!(j < i || (j > i && (bgAt[i] < j || (STAGED_LATE.has(tool) && j <= pipeEnd[i]))))) continue;   // lands after the load
+        // snmpwalk reads the MIB files -m +PATH names and every file in the -M +DIR directories (net-snmp 5.9.4, under strace)
+        const mibs = tool === 'snmpwalk' && optHas(walkOpts(s.args, OPT_SPECS.snmpwalk), ['-m', '-M']) && (w.paths.find((p) => p !== '-') || '');
+        const hit = pass === 1
+          ? w.unknown || mibs || w.paths.find((p) => (rc && STAGED_PATH.test(p)) || (tool === 'whatweb' && RUBY_LIB.test(p))
+            || named.some((x) => sameFile(p, x) || numberedOf(p, x))) || (named.length ? w.dated[0] : '')
+          : preloadUnknown(segs[j]) || w.unknown || w.paths.find((p) => SYS_PATH.test(p) || (!NO_WRITE_TOOLS.has(tool) && STAGED_PATH.test(p)));
+        if (hit) return `${s.program} loads settings, plugins or targets from HOME or the working directory, and another part of the command writes one (${String(hit).slice(0, 50)})`;
+      }
     }
   }
   return '';
@@ -2593,8 +2702,10 @@ const pdScriptValues = (args) => args.flatMap((t, i) => (/^--?script$/i.test(t) 
 // value local; identity options (accounts, passwords, domains) make it ignored when it looks like one. A value that names
 // a remote place (scheme, UNC path, host:/path, an in-scope host) is data wherever it stands.
 const PD_LOCAL_PROGRAMS = FILTER_TOOLS;                           // without xargs, which runs programs
+// -oN, -oX, -oG, -oA, -oS and -od are whole options only in nmap's family, masscan, ffuf and enum4linux-ng (their tables
+// below); in curl and wget -oA is -o with the name A, and the next word is an option again (local runs of curl 8.5, wget 1.21.4)
 const PD_LOCAL_OPTS = new Map([
-  ...['-o', '-O', '--output', '--output-file', '--output-document', '--output-dir', '-od', '-oN', '-oX', '-oG', '-oA', '-oS'].map((o) => [o, 'output file']),
+  ...['-o', '-O', '--output', '--output-file', '--output-document', '--output-dir'].map((o) => [o, 'output file']),
   ...['-w', '--wordlist', '-iL', '-L', '-P', '-C', '--input-file', '--files-from'].map((o) => [o, 'wordlist or input file']),
   ...['-i', '-F', '-K', '--config'].map((o) => [o, 'key or input file'])]);
 const PD_ID_OPTS = new Set(['-u', '-U', '--user', '--username', '-l', '--login', '-p', '--password', '--pass', '--hashes', '-hashes', '--domain', '-W', '--workgroup']);
@@ -2605,8 +2716,8 @@ const PD_ID_OPTS = new Set(['-u', '-U', '--user', '--username', '-l', '--login',
 const PD_OUT = 'output file', PD_IN = 'wordlist or input file', PD_KEY = 'key or input file', PD_ID = 'identity';
 const pdTool = (none, kinds = {}) => ({ none, opts: new Map(Object.entries(kinds).flatMap(([kind, opts]) => opts.map((o) => [o, kind]))) });
 const PD_TOOL_OPTS = {
-  nmap: pdTool('OF'), rustscan: pdTool(''),
-  masscan: pdTool('', { [PD_OUT]: ['-oL', '-oJ', '-oB', '-oU', '-oD', '--output-filename', '--pcap'], [PD_IN]: ['--readscan', '--includefile'], [PD_KEY]: ['-c', '--conf'] }),
+  nmap: pdTool('OF', { [PD_OUT]: ['-oN', '-oX', '-oG', '-oA', '-oS', '-oM'] }), rustscan: pdTool('', { [PD_OUT]: ['-oN', '-oX', '-oG', '-oA', '-oS', '-oM'] }),
+  masscan: pdTool('', { [PD_OUT]: ['-oX', '-oG', '-oL', '-oJ', '-oB', '-oU', '-oD', '--output-filename', '--pcap'], [PD_IN]: ['--readscan', '--includefile'], [PD_KEY]: ['-c', '--conf'] }),
   ping: pdTool(''), fping: pdTool(''), traceroute: pdTool(''), tracepath: pdTool(''), arp: pdTool(''), host: pdTool(''), dig: pdTool(''),
   nslookup: pdTool(''), whois: pdTool(''),
   dnsrecon: pdTool('w', { [PD_OUT]: ['-x', '--xml', '-c', '--csv', '-j', '--json', '--db'], [PD_IN]: ['-D', '--dictionary'] }),
@@ -2626,16 +2737,16 @@ const PD_TOOL_OPTS = {
   sslscan: pdTool('', { [PD_OUT]: ['--xml'], [PD_IN]: ['--targets'] }),
   sslyze: pdTool('', { [PD_OUT]: ['--json_out'], [PD_IN]: ['--targets_in'] }),
   'testssl.sh': pdTool('UOLCFPWp', { [PD_OUT]: ['-oL', '--logfile', '-oj', '--jsonfile', '-oJ', '--jsonfile-pretty', '-oC', '--csvfile', '-oH',
-    '--htmlfile', '-oa', '--outfile', '--outFile', '--outprefix'], [PD_IN]: ['--file'], [PD_ID]: ['--basicauth'] }),
+    '--htmlfile', '-oa', '-oA', '--outfile', '--outFile', '--outprefix'], [PD_IN]: ['--file'], [PD_ID]: ['--basicauth'] }),
   gobuster: pdTool('l'),
-  ffuf: pdTool('', { [PD_OUT]: ['-debug-log'], [PD_IN]: ['-request'], [PD_KEY]: ['-config'] }),
+  ffuf: pdTool('', { [PD_OUT]: ['-od', '-debug-log'], [PD_IN]: ['-request'], [PD_KEY]: ['-config'] }),
   feroxbuster: pdTool('', { [PD_OUT]: ['--debug-log'], [PD_IN]: ['--resume-from'] }),
   dirb: pdTool('ilw', { [PD_IN]: ['-x'] }),
   dirbuster: pdTool('', { [PD_OUT]: ['-r'], [PD_IN]: ['-l'] }),
   wfuzz: pdTool('L', { [PD_OUT]: ['-f', '--dump-recipe'], [PD_KEY]: ['--recipe'] }),
   nikto: pdTool('', { [PD_OUT]: ['-output', '--output'], [PD_KEY]: ['-config'], [PD_ID]: ['-id', '--id'] }),
   enum4linux: pdTool('UPloi'),
-  'enum4linux-ng': pdTool('UCPOL', { [PD_OUT]: ['-oJ', '-oY'], [PD_IN]: ['-s'] }),
+  'enum4linux-ng': pdTool('UCPOL', { [PD_OUT]: ['-oJ', '-oY', '-oA'], [PD_IN]: ['-s'] }),
   smbmap: pdTool('L', { [PD_OUT]: ['-g', '--csv'], [PD_IN]: ['--host-file'], [PD_ID]: ['-d'] }),
   smbclient: pdTool('', { [PD_KEY]: ['-A', '--authentication-file'] }),
   ldapsearch: pdTool('LuCW', { [PD_IN]: ['-f'], [PD_KEY]: ['-y'] }),
