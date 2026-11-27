@@ -272,6 +272,10 @@ TPL_ALWAYS = USER + "{%- if add_generation_prompt -%}<|assistant|>{{- '<think>' 
 TPL_SWITCH = (USER + "{%- if add_generation_prompt -%}<|assistant|>"
               "{{- '</think>' if (enable_thinking is defined and not enable_thinking) else '<think>' -}}{%- endif -%}")
 TPL_PLAIN = USER + "{%- if add_generation_prompt -%}<|assistant|>{%- endif -%}"
+# GLM-4.5 / 4.6: the model opens the block itself after '<|assistant|>'; the switch adds '/nothink' and a closed block
+TPL_45 = ("{%- for m in messages %}<|{{ m.role }}|>{{ m.content }}{%- if enable_thinking is defined and not enable_thinking %}"
+          "/nothink{%- endif %}{%- endfor %}{%- if add_generation_prompt -%}<|assistant|>"
+          "{%- if enable_thinking is defined and not enable_thinking -%}{{ '\\n<think></think>' }}{%- endif -%}{%- endif -%}")
 
 
 class ReasoningBlock(unittest.TestCase):
@@ -292,6 +296,11 @@ class ReasoningBlock(unittest.TestCase):
         self.assertFalse(hm.close_think)
         self.assertEqual(hm.chat_kwargs, {"enable_thinking": False})
         self.assertEqual(texts, ["<|user|>hi<|assistant|></think>"])           # the template's own non-reasoning prompt
+
+    def test_a_switch_the_model_would_answer_with_reasoning(self):
+        hm, _, _, _, texts = self.encoded(TPL_45)
+        self.assertEqual((hm.close_think, hm.chat_kwargs), (False, {"enable_thinking": False}))
+        self.assertEqual(texts, ["<|user|>hi/nothink<|assistant|>\n<think></think>"])
 
     def test_think_keeps_every_template(self):
         for tpl in (TPL_ALWAYS, TPL_SWITCH):

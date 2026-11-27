@@ -41,22 +41,23 @@ class HookedModel:
         self.device = next(model.parameters()).device
         gen_cfg = getattr(model, "generation_config", None)
         self.eos = getattr(gen_cfg, "eos_token_id", None) or tokenizer.eos_token_id
-        # Measure, scan and validate look at the answer itself, not at reasoning. A template that opens a reasoning block at
-        # the generation prompt is asked for its own non-reasoning prompt first (enable_thinking=False: GLM-4.7,
-        # GLM-4.7-Flash and GLM-5 then end in '<|assistant|></think>'). The GLM-5.3 templates have no such switch: there
-        # the block is closed empty ('<think></think>', what they write for earlier turns without reasoning).
-        # think=True keeps every template's default.
+        # Measure, scan and validate look at the answer itself, not at reasoning. A template with a reasoning switch is asked
+        # for its own prompt without reasoning (enable_thinking=False, when that ends the prompt with a closed block:
+        # GLM-4.7, GLM-4.7-Flash and GLM-5 write '<|assistant|></think>', GLM-5.2 '<think></think>', GLM-4.5 / 4.6 add
+        # '/nothink' and '<think></think>' where the model would otherwise open the block itself). The GLM-5.3 templates
+        # have no switch and always open the block: there it is closed empty ('<think></think>', what they write for
+        # earlier turns without reasoning). think=True keeps every template's default.
         self.chat_kwargs, self.close_think = {}, False
         if not think:
             try:
                 def probe(**kw):
                     t = self.tok.apply_chat_template([{"role": "user", "content": "hi"}], add_generation_prompt=True, tokenize=False, **kw)
                     return t if isinstance(t, str) else ""
-                if opens_think(probe()):
-                    if opens_think(probe(enable_thinking=False)):
-                        self.close_think = True
-                    else:
-                        self.chat_kwargs = {"enable_thinking": False}
+                default, off = probe(), probe(enable_thinking=False)
+                if off != default and off.rstrip().endswith("</think>"):
+                    self.chat_kwargs = {"enable_thinking": False}
+                elif opens_think(default):
+                    self.close_think = True
             except Exception:
                 pass
         log(f"hooks: {self.layers_name} ({self.n_layers} layers), d_model={self.d_model}, first device {self.device}"

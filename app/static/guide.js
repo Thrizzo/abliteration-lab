@@ -50,7 +50,7 @@ const GUIDE = [
     why:'Ollama is the easiest way to chat with both models side by side.',
     look:'Two files of about the model size each; the converter runs offline in its own environment.',
     hood:'<code>convert_hf_to_gguf.py --outtype f16</code> in <code>.venv-gguf</code> (older transformers pinned by llama.cpp).',
-    glm5:'llama.cpp at the pinned commit knows GLM-5 (<code>glm-dsa</code>) and GLM-5.3-Flash (<code>glm5-next</code>), but the converter environment in this image pins transformers 4.57.6: too old for GLM-5.3-Flash, whose converter needs transformers 5 (the pipeline skips this stage for it); GLM-5.2/5.3 are untested here. Serve the safetensors with vLLM (v0.34.0, the glm-serve pin, lists both) or SGLang instead.' },
+    glm5:'llama.cpp at the pinned commit converts GLM-5 (<code>glm-dsa</code>) and GLM-5.3-Flash (<code>glm5-next</code>) through the converter view, but serving such a GGUF with Ollama is untested here, and at 0.3 to 1.5 TB it is not how this lab serves them: the GLM-5.x presets untick the Ollama finish. Serve the safetensors with vLLM (v0.34.0, the glm-serve pin, lists both) or SGLang.' },
   { key:'ollama', title:'Import and compare in Ollama', plain:'Both GGUFs are imported as <code>&lt;model&gt;-base</code> and <code>&lt;model&gt;-abl</code> (8-bit), then ten harmful and four normal prompts are sent to both.',
     why:'The end-to-end proof: same prompt, original refuses, abliterated answers, and normal prompts stay the same.',
     look:'Base refusals high, abliterated 0; identical answers on the normal prompts. Then try your own prompts in the A/B chat.',

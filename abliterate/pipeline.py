@@ -94,10 +94,6 @@ def step_download(run, repo, models_dir, token=None):
     return dst
 
 
-# families whose GGUF conversion the converter environment cannot do: the GGUF / Ollama stage is skipped for them
-NO_GGUF = {"glm5_next"}
-
-
 def step_inspect(run, model_dir):
     info = A.inspect(model_dir)
     run.save("arch.json", info)
@@ -317,11 +313,6 @@ def main(argv=None):
     try:
         model_dir = step_download(run, model_repo, os.path.join(project, "models"), args.hf_token)
         info = step_inspect(run, model_dir)
-        if info.get("model_type") in NO_GGUF and not args.no_ollama:
-            run.log(f"{info.get('family')}: no GGUF / Ollama path in this image (llama.cpp's converter for it needs transformers 5, "
-                    "its environment here pins 4.x), so that stage is skipped instead of failing at the end. Serve the edited "
-                    "safetensors with vLLM.")
-            args.no_ollama = True
         out_dir = os.path.abspath(args.out_dir) if args.out_dir else (run.meta.get("out_dir") or os.path.join(project, "out", f"{slug}-abliterated"))
         run.update_meta(model_dir=model_dir, out_dir=out_dir)
         data_dir = os.path.join(project, "data")

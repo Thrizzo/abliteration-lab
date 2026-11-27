@@ -280,8 +280,9 @@ checkpoint shard by shard (about 5 GB of RAM at a time, disk-bound), and leaves 
 Hardware reality: measure and scan need the model loaded, which means a node with about 1.5 TB of GPU memory in bf16 or an
 FP8 copy on 8×H200; CPU offload on a 1.5+ TB RAM node works for the measurement in hours and for a reduced scan
 (`--n-test 8 --layer-range 0.35-0.7`). Convert and serve the edited checkpoint with vLLM or SGLang for validation at that
-scale. llama.cpp at the pinned commit knows GLM-5 (`glm-dsa`), but its GGUF conversion is untested in this image (its
-converter environment pins transformers 4.57.6; the GLM-5.x presets untick the Ollama finish).
+scale. llama.cpp at the pinned commit converts GLM-5.x too (`glm-dsa`; its vocabulary checked with the real tokenizers
+through the converter view), but serving such a GGUF with Ollama is untested here, and at 0.75 to 1.5 TB it is not how this
+lab serves GLM-5: the GLM-5.x presets untick the Ollama finish.
 
 Reasoning: the GLM-4.7, GLM-5.x and GLM-5.3-Flash chat templates open a reasoning block at the generation prompt
 (`<|assistant|><think>`). Measure, scan, validate and the lab ask the template for its own prompt without reasoning
@@ -307,9 +308,9 @@ are dense, the rest MoE with 288 routed + 1 shared expert (8 active). FP8 checkp
 Hardware: about 330 GB in FP8, so one node with 8 FP8-capable 80 GB GPUs (H100 or H200) runs measure and scan; on A100s
 transformers dequantizes the checkpoint to bf16 (about 640 GB), which does not fit with activations. Install the `flash-linear-attention` kernels
 there; without them transformers runs its PyTorch reference code for the linear layers (correct, much slower). vLLM
-v0.34.0 (the glm-serve pin) registers `Glm5NextForConditionalGeneration`. llama.cpp at the pinned commit converts and
-runs it too (arch `glm5-next`), but its converter for this model needs transformers 5 and the converter environment in
-this image pins 4.57.6, so the pipeline skips the GGUF / Ollama stage for GLM-5.3-Flash.
+v0.34.0 (the glm-serve pin) registers `Glm5NextForConditionalGeneration`. llama.cpp at the pinned commit converts it as
+well (arch `glm5-next`; checked through the converter view with the real tokenizer and on a tiny model of the
+architecture), but serving that GGUF with Ollama is untested, and the preset unticks the Ollama finish.
 
 ---
 

@@ -158,7 +158,7 @@ async function loadModels(){
 }
 async function selectModel(e, silent){
   S.model=e; $('#modelCards').querySelectorAll('.mcard').forEach(c=>c.classList.toggle('sel', c.dataset.slug===e.slug));
-  const a=e.local?.arch, p=e.preset, d=$('#modelDetail'); d.style.display='';
+  const a=e.local?.arch, p=e.preset||(S.presets||[]).find(x=>x.repo===e.repo)||null, d=$('#modelDetail'); d.style.display='';
   const supportBadge = a ? `<span class="badge ${a.support==='exact'?'pass':(a.support==='unsupported'?'fail':'info')}">${a.support}</span>` : '';
   const statsHtml = a ? '<div class="stats">' + [[a.n_layers,'layers'],[a.hidden_size,'hidden size'],[a.params_b?a.params_b+'B':'?','parameters'],[supportBadge,'edit'],[a.moe?'MoE':'dense','block type'],[e.local.size_gb+' GB','on disk']].map(([v,l])=>'<div class="stat"><div class="v" style="font-size:18px">'+v+'</div><div class="l">'+l+'</div></div>').join('') + '</div>' + (a.notes||[]).map(n=>'<div class="narr small">'+esc(n)+'</div>').join('') : '';
   const farNote = (p&&!p.local_ok) ? '<div class="narr small">This model does not fit a single 16 GB GPU in bf16. Measure and scan would need <b>device auto</b> (multi-GPU or CPU offload, slow); the weight edit itself streams shard by shard and works anywhere with the disk space.</div>' : '';
@@ -167,7 +167,10 @@ async function selectModel(e, silent){
   if(S.env?.cuda===false) $('#optDevice').value='cpu';            // no GPU: everything on the CPU
   else if(a) $('#optDevice').value = a.fits_16gb_bf16===false ? 'auto' : 'cuda'; else if(p&&!p.local_ok) $('#optDevice').value='auto';
   if(a) $('#optRemote').checked=!!a.needs_remote_code;
-  if(p) $('#optOllama').checked = p.gguf!==false;     // GLM-5.x: no GGUF / Ollama finish here; vLLM serves the safetensors
+  // The Ollama finish: on by default, off for GLM-5.x (0.3 to 1.5 TB; vLLM serves them in the cluster). The box only moves
+  // when that default differs from the last model's, so a change by hand sticks.
+  const ollamaDefault = !(p?.gguf===false || ['glm5_next','glm_moe_dsa'].includes(a?.model_type));
+  if(S.ollamaDefault!==ollamaDefault){ $('#optOllama').checked=ollamaDefault; S.ollamaDefault=ollamaDefault; }
   await loadRuns(); updateHeader();
   if(!silent && S.stage==='model') go('abl');          // not when another step was chosen while the runs loaded
 }

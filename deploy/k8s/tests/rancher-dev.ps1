@@ -354,26 +354,34 @@ function Get-SystemProblems {
     }
     return $out
 }
+# "pod or component: why" when no pod of a component runs and is ready; $null when one does (a pod being replaced
+# does not count against it).
+function Get-ComponentProblem([string]$Name, $Pods) {
+    $mine = @(@($Pods) | Where-Object { $_ })
+    if (@($mine | Where-Object { Test-PodReady $_ }).Count) { return $null }
+    foreach ($p in $mine) {
+        $why = Get-PodProblem $p
+        if ($why) { return "$($p.metadata.name): $why" }
+    }
+    if ($mine.Count) { return "${Name}: not ready" }
+    return "${Name}: no pod"
+}
 # The components the stack cannot start without: CoreDNS, and the local-path provisioner when it backs the default
-# StorageClass. One running, ready pod per component is enough (a pod being replaced does not count against it); no pod
-# at all, or no answer from kubectl, counts as broken. Returns "pod or component: why" per broken component.
+# StorageClass. No pod at all, or no answer from kubectl, counts as broken. Returns one "pod or component: why" each.
 function Get-CriticalProblems {
-    $pods = kcJson @('-n', 'kube-system', 'get', 'pods', '-o', 'json')
-    if (-not $pods) { return @('kube-system: no answer from kubectl') }
-    $items = @(@($pods.items) | Where-Object { $_ })
-    $need = @('coredns')
-    if ($script:LocalPath) { $need += 'local-path-provisioner' }
+    $dns = kcJson @('-n', 'kube-system', 'get', 'pods', '-l', 'k8s-app=kube-dns', '-o', 'json')
+    if (-not $dns) { return @('kube-system: no answer from kubectl') }
     $out = @()
-    foreach ($comp in $need) {
-        $mine = @($items | Where-Object { "$($_.metadata.name)" -like "$comp-*" })
-        if (@($mine | Where-Object { Test-PodReady $_ }).Count) { continue }
-        $shown = "${comp}: no pod in kube-system"
-        foreach ($p in $mine) {
-            $why = Get-PodProblem $p
-            if ($why) { $shown = "$($p.metadata.name): $why"; break }
-            $shown = "${comp}: not ready"
+    $why = Get-ComponentProblem 'coredns' $dns.items
+    if ($why) { $out += $why }
+    if ($script:LocalPath) {
+        # k3s runs it in kube-system, kind and upstream installs in local-path-storage; both label it app=local-path-provisioner
+        $lp = kcJson @('get', 'pods', '-A', '-l', 'app=local-path-provisioner', '-o', 'json')
+        if (-not $lp) { $out += 'local-path-provisioner: no answer from kubectl' }
+        else {
+            $why = Get-ComponentProblem 'local-path-provisioner' $lp.items
+            if ($why) { $out += $why }
         }
-        $out += $shown
     }
     return $out
 }
@@ -431,7 +439,10 @@ function Show-Trouble([string]$Ns) {
         $sys = Show-SystemPods
         if (-not $sys) { Note '| (every pod in kube-system runs)' }
         Show-SystemHints $sys
-        if ($sys -match "(^|`n)local-path-provisioner-") { $script:VolumesStuck = $true }
+        # the remaining waits are skipped only when the provisioner the claims use is down, by the preflight's rule
+        if ($script:LocalPath -and @(Get-CriticalProblems | Where-Object { $_ -like 'local-path-provisioner*' }).Count) {
+            $script:VolumesStuck = $true
+        }
     }
     if ($all -match 'untolerated taint') {
         Note 'hint: the node carries a taint the pods do not tolerate (kubectl describe node): disk or memory pressure, or not ready'
@@ -518,10 +529,13 @@ function Invoke-Preflight {
     if (-not $Teardown) {
         $scs = kcJson @('get', 'storageclass', '-o', 'json')
         $default = @(@($scs.items) | Where-Object { $_ -and ($_.metadata.annotations.'storageclass.kubernetes.io/is-default-class' -eq 'true' -or
-                    $_.metadata.annotations.'storageclass.beta.kubernetes.io/is-default-class' -eq 'true') })
+                    $_.metadata.annotations.'storageclass.beta.kubernetes.io/is-default-class' -eq 'true') } |
+                    Sort-Object { ConvertTo-Utc $_.metadata.creationTimestamp })
         if (-not $default.Count) { Bad 'a default StorageClass: the stack''s claims name none (Rancher Desktop''s k3s ships local-path)'; return $false }
-        $script:LocalPath = ("$($default[0].provisioner)" -eq 'rancher.io/local-path')
-        Ok "default StorageClass $($default[0].metadata.name) ($($default[0].provisioner))"
+        $sc = $default[-1]                              # Kubernetes gives a claim without a class the newest default
+        if ($default.Count -gt 1) { Note "$($default.Count) StorageClasses are marked default; claims without a class get the newest, $($sc.metadata.name)" }
+        $script:LocalPath = ("$($sc.provisioner)" -eq 'rancher.io/local-path')
+        Ok "default StorageClass $($sc.metadata.name) ($($sc.provisioner))"
         $critical = @(Get-CriticalProblems)
         if ($critical.Count) {
             Note ('waiting up to 90 s for k3s''s own pods: ' + ($critical -join '; '))
