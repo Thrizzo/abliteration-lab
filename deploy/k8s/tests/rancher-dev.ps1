@@ -74,6 +74,7 @@ $script:ConsoleOk = $false
 $script:CopilotOk = $false
 $script:Models = @{}
 $script:Retrieval = ''
+$script:VolumesStuck = $false
 
 # ------------------------------------------------------------------------------------------------ output
 function Section([string]$Title) { Write-Host ''; Write-Host "== $Title" -ForegroundColor Cyan }
@@ -268,12 +269,139 @@ function Get-AnyEngine {
     return $null
 }
 
+# ------------------------------------------------------------------------------------------------ diagnosis
+# PowerShell 7 turns JSON dates into DateTime values, Windows PowerShell 5.1 leaves them strings.
+function ConvertTo-Utc($V) {
+    if ($null -eq $V) { return $null }
+    if ($V -is [datetime]) { return $V.ToUniversalTime() }
+    $s = "$V"
+    if (-not $s) { return $null }
+    $d = [datetime]::MinValue
+    $styles = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+    if ([datetime]::TryParse($s, [Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { return $d }
+    return $null
+}
+# When an event last happened. Controllers fill lastTimestamp; the scheduler's events (events.k8s.io) carry only
+# eventTime and series, so "kubectl get events --sort-by=.lastTimestamp" sorts them first and a "last 10" cut drops them.
+function Get-EventTime($E) {
+    foreach ($t in @($E.lastTimestamp, $E.series.lastObservedTime, $E.eventTime, $E.firstTimestamp, $E.metadata.creationTimestamp)) {
+        $u = ConvertTo-Utc $t
+        if ($null -ne $u) { return $u }
+    }
+    return [datetime]::MinValue
+}
+function Format-Age([datetime]$T) {
+    if ($T -eq [datetime]::MinValue) { return '?' }
+    $s = [int][math]::Max(0, ((Get-Date).ToUniversalTime() - $T).TotalSeconds)
+    if ($s -lt 120) { return "${s}s" }
+    if ($s -lt 7200) { return ('{0}m' -f [int][math]::Floor($s / 60)) }
+    if ($s -lt 172800) { return ('{0}h' -f [int][math]::Floor($s / 3600)) }
+    return ('{0}d' -f [int][math]::Floor($s / 86400))
+}
+function Format-Event($E) {
+    $n = 1
+    if ($E.count) { $n = [int]$E.count } elseif ($E.series -and $E.series.count) { $n = [int]$E.series.count }
+    $times = ''
+    if ($n -gt 1) { $times = " (x$n)" }
+    $obj = ("$($E.involvedObject.kind)/$($E.involvedObject.name)").ToLower()
+    $msg = ("$($E.message)" -replace '\s+', ' ').Trim()
+    if ($msg.Length -gt 400) { $msg = $msg.Substring(0, 400) + ' ...' }
+    return ('{0,-5} {1} {2} {3}{4}: {5}' -f (Format-Age (Get-EventTime $E)), $E.type, $E.reason, $obj, $times, $msg)
+}
+# A namespace's events, oldest first: every Warning (up to 12) and the last few others. Returns all reasons and
+# messages as text for the hints below.
+function Show-Events([string]$Ns, [int]$Others = 6) {
+    $j = kcJson @('-n', $Ns, 'get', 'events', '-o', 'json')
+    if (-not $j) { Note "| (no events from kubectl -n $Ns get events)"; return '' }
+    $all = @(@($j.items) | Where-Object { $_ } | Sort-Object { Get-EventTime $_ })
+    $warn = @($all | Where-Object { $_.type -ne 'Normal' } | Select-Object -Last 12)
+    $other = @($all | Where-Object { $_.type -eq 'Normal' } | Select-Object -Last $Others)
+    foreach ($e in @(@($warn + $other) | Sort-Object { Get-EventTime $_ })) { Note ('| ' + (Format-Event $e)) }
+    return (($all | ForEach-Object { "$($_.reason) $($_.message)" }) -join "`n")
+}
+# Why a pod is not running and ready: the waiting or terminated reason of a container, else its phase. $null when it
+# runs, or when it finished (the helm-install Jobs of k3s).
+function Get-PodProblem($P) {
+    $phase = "$($P.status.phase)"
+    if ($phase -eq 'Succeeded') { return $null }
+    $cs = @(@($P.status.containerStatuses) | Where-Object { $_ })
+    $notReady = @($cs | Where-Object { -not $_.ready })
+    if ($phase -eq 'Running' -and $cs.Count -gt 0 -and $notReady.Count -eq 0) { return $null }
+    foreach ($c in $notReady) {
+        if ($c.state.waiting.reason) { return "$($c.state.waiting.reason)" }
+        if ($c.state.terminated.reason) { return "$($c.state.terminated.reason)" }
+    }
+    if ($phase) { return $phase }
+    return 'unknown'
+}
+# k3s's own pods in kube-system (CoreDNS, the volume provisioner, Traefik, metrics-server) that do not run: "name: why".
+function Get-SystemProblems {
+    $pods = kcJson @('-n', 'kube-system', 'get', 'pods', '-o', 'json')
+    if (-not $pods) { return @('kube-system: no answer from kubectl') }
+    $out = @()
+    foreach ($p in @(@($pods.items) | Where-Object { $_ })) {
+        $why = Get-PodProblem $p
+        if ($why) { $out += "$($p.metadata.name): $why" }
+    }
+    return $out
+}
+$SystemCritical = '^(coredns|local-path-provisioner)-'    # without them no pod gets DNS, no claim a volume
+# Prints each system pod that does not run with the newest Warning about it; returns that text for Show-SystemHints.
+function Show-SystemPods {
+    $problems = @(Get-SystemProblems)
+    if (-not $problems.Count) { return '' }
+    $ev = kcJson @('-n', 'kube-system', 'get', 'events', '-o', 'json')
+    $text = ''
+    foreach ($pr in $problems) {
+        Note "| kube-system/$pr"
+        $name = ($pr -split ':')[0]
+        $text += "`n$pr"
+        if (-not $ev) { continue }
+        $last = @(@($ev.items) | Where-Object { $_ -and $_.type -ne 'Normal' -and "$($_.involvedObject.name)" -eq $name } |
+            Sort-Object { Get-EventTime $_ } | Select-Object -Last 1)
+        if ($last.Count) { Note ('|   ' + (Format-Event $last[0])); $text += "`n$($last[0].message)" }
+    }
+    return $text.Trim()
+}
+function Show-SystemHints([string]$Text) {
+    if ($Text -match 'is already in use by container|ResolvConfPath') {
+        Note 'hint: the container engine kept stale Kubernetes containers (seen after an unclean stop, e.g. Windows sleep):'
+        Note '      1. quit Rancher Desktop, run "wsl --shutdown", start it again'
+        Note '      2. if they stay: docker rm -f $(docker ps -aq --filter "name=k8s_")   (removes only what Kubernetes created)'
+        Note '      3. last resort: Rancher Desktop > Troubleshooting > Reset Kubernetes (deletes every workload in this cluster)'
+    }
+    if ($Text -match 'ports are not available') {
+        Note 'hint: Traefik cannot open port 80 or 443 on Windows. Which program holds it:'
+        Note '      Get-NetTCPConnection -LocalPort 80,443 -State Listen | Select-Object LocalPort,OwningProcess'
+    }
+    if ($Text -match 'ErrImagePull|ImagePullBackOff') {
+        Note 'hint: the node cannot pull an image of k3s itself: check the network inside WSL (VPN, proxy, DNS)'
+    }
+}
+# Claims of a namespace that still have no volume.
+function Get-PendingClaims([string]$Ns) {
+    $j = kcJson @('-n', $Ns, 'get', 'pvc', '-o', 'json')
+    if (-not $j) { return @() }
+    return @(@($j.items) | Where-Object { $_ -and "$($_.status.phase)" -eq 'Pending' } | ForEach-Object { "$($_.metadata.name)" })
+}
+
 function Show-Trouble([string]$Ns) {
     $pods = kcOut @('-n', $Ns, 'get', 'pods', '-o', 'wide')
-    $ev = kcOut @('-n', $Ns, 'get', 'events', '--sort-by=.lastTimestamp')
     ($pods -split "`n") | ForEach-Object { Note "| $_" }
-    ($ev -split "`n") | Select-Object -Last 10 | ForEach-Object { Note "| $_" }
+    $ev = Show-Events $Ns
     $all = $pods + "`n" + $ev
+    $pending = @(Get-PendingClaims $Ns)
+    if ($pending.Count) {
+        Note ("claims without a volume in ${Ns}: " + ($pending -join ', ') + '; the provisioner and the rest of kube-system:')
+        $sys = Show-SystemPods
+        if (-not $sys) { Note '| (every pod in kube-system runs)' }
+        Show-SystemHints $sys
+        $all += "`n" + $sys
+        if ($sys -match "(^|`n)(coredns|local-path-provisioner)-") { $script:VolumesStuck = $true }
+    }
+    if ($all -match 'untolerated taint') {
+        Note 'hint: the node carries a taint the pods do not tolerate (kubectl describe node): disk or memory pressure, or not ready'
+    }
     if ($all -match 'Insufficient (memory|cpu)') {
         Note 'hint: the node lacks memory or CPU for these requests: give WSL more in %UserProfile%\.wslconfig ([wsl2] memory=16GB) and restart Rancher Desktop'
     }
@@ -350,6 +478,25 @@ function Invoke-Preflight {
         if ($mem -lt 7.5) { Note 'a pipeline Job requests 2 GiB more: Jobs may wait for memory' }
         if ($mem -lt 14) { Note 'the judge (qwen3:8b) and a CPU scan of GLM-Edge-1.5B together need ~16 GB: %UserProfile%\.wslconfig, [wsl2] memory=16GB' }
     }
+    # k3s's own pods. Without CoreDNS and the volume provisioner every pod of the stack would wait 10 to 15 minutes
+    # for nothing (seen on a Rancher Desktop whose engine kept stale containers after an unclean stop).
+    $null = Wait-For 90 { @(Get-SystemProblems | Where-Object { $_ -match $SystemCritical }).Count -eq 0 } 5
+    $problems = @(Get-SystemProblems)
+    if (-not $problems.Count) { Ok 'k3s system pods run (kube-system)' }
+    else {
+        $critical = @($problems | Where-Object { $_ -match $SystemCritical })
+        Show-SystemHints (Show-SystemPods)
+        if ($critical.Count) {
+            Bad ('k3s system pods: ' + ($critical -join '; ') + ' (without them no pod of the stack gets DNS or a volume)')
+            return $false
+        }
+        Note ('not running in kube-system: ' + ($problems -join '; ') + ' (the stack can start; the Ingress check may fail)')
+    }
+    $scs = kcJson @('get', 'storageclass', '-o', 'json')
+    $default = @(@($scs.items) | Where-Object { $_ -and ($_.metadata.annotations.'storageclass.kubernetes.io/is-default-class' -eq 'true' -or
+                $_.metadata.annotations.'storageclass.beta.kubernetes.io/is-default-class' -eq 'true') })
+    if ($default.Count) { Ok "default StorageClass $($default[0].metadata.name) ($($default[0].provisioner))" }
+    else { Bad 'a default StorageClass: the stack''s claims name none (Rancher Desktop''s k3s ships local-path)'; return $false }
     $script:HasTraefik = [bool](kcJson @('-n', 'kube-system', 'get', 'svc', 'traefik', '-o', 'json'))
     if ($script:HasTraefik) { Ok 'Traefik (the overlays'' Ingress class)' }
     else { Note 'no Traefik in kube-system: the Ingress check is skipped (Rancher Desktop: Preferences > Kubernetes > Traefik)' }
@@ -425,12 +572,28 @@ function Invoke-Apply {
     $changed = @(($out -split "`n") | Where-Object { $_ -match ' (created|configured)$' }).Count
     Ok "applied $Overlay ($changed objects created or changed)"
     $allUp = $true
+    $script:VolumesStuck = $false
     foreach ($w in @('lab-copilot deploy/n8n', 'lab-copilot deploy/ollama', 'lab-copilot statefulset/qdrant', 'lab deploy/console', 'lab deploy/glm-serve')) {
         $ns, $target = $w -split ' '
+        if ($script:VolumesStuck) {                     # the other pods wait for volumes as well: 10 to 15 minutes each
+            Skip "$target ($ns): not waited for, no claim gets a volume (see above)"
+            $allUp = $false
+            continue
+        }
         $t0 = Get-Date
-        $null = kc @('-n', $ns, 'rollout', 'status', $target, '--timeout=900s')
-        if ($LASTEXITCODE -eq 0) { Ok ("$target ($ns) is up after {0:N0} s" -f ((Get-Date) - $t0).TotalSeconds) }
-        else { Bad "$target ($ns) did not come up within 15 minutes"; Show-Trouble $ns; $allUp = $false }
+        $out = kc @('-n', $ns, 'rollout', 'status', $target, '--timeout=900s')
+        $code = $LASTEXITCODE
+        $secs = ((Get-Date) - $t0).TotalSeconds
+        if ($code -eq 0) { Ok ("$target ($ns) is up after {0:N0} s" -f $secs) }
+        else {
+            # a Deployment gives up after its progress deadline (10 minutes), before --timeout
+            $lines = @(($out -split "`n") | Where-Object { $_.Trim() })
+            $why = ''
+            if ($lines.Count) { $why = $lines[-1].Trim() }
+            Bad ("$target ($ns) did not come up (after {0:N0} s; kubectl: {1})" -f $secs, $why)
+            Show-Trouble $ns
+            $allUp = $false
+        }
     }
     return $allUp
 }

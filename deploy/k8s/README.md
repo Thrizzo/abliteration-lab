@@ -109,6 +109,17 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
   - restart Rancher Desktop.
 
   The judge (~5 GB) downloads in the background. Checks that need it are skipped until it is there.
+- **Before anything else** it checks that k3s's own pods in `kube-system` run. Without CoreDNS and the volume
+  provisioner (`local-path-provisioner`) every pod of the stack would wait 10 to 15 minutes for nothing, so the script
+  stops there and prints each broken pod with its newest Warning. One cause seen on Rancher Desktop: after an unclean stop
+  (Windows sleep, a crash) the container engine keeps stale Kubernetes containers, and the events say "container name ...
+  is already in use" or "resolv.conf does not exist". Fix it in this order and stop at the first that works:
+  1. quit Rancher Desktop, run `wsl --shutdown`, start it again;
+  2. if they stay: `docker rm -f $(docker ps -aq --filter "name=k8s_")` (removes only containers Kubernetes created);
+  3. last resort: Rancher Desktop > Troubleshooting > Reset Kubernetes. This deletes every workload in that cluster.
+- **When a pod does not come up** it prints the namespace's Warning events (including the scheduler's, which
+  `kubectl get events --sort-by=.lastTimestamp` sorts first), the claims still without a volume and the state of
+  `kube-system`. It stops waiting for the remaining pods when the volume provisioner is down.
 - **Output:** `ok`, `FAIL` or `skip` per step, and `rancher-dev-<time>.log` in the current folder. The log holds no
   passwords or keys; paste it back when something fails.
 - **CI:** the `k3s` job runs the same script under PowerShell 7 on k3s (k3d), unattended. Windows PowerShell 5.1 itself
