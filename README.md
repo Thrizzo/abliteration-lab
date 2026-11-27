@@ -59,15 +59,19 @@ algebra, and the same procedure transfers unchanged from a 1.5B dense model to a
 
 Supported models (`arch.py`): GLM-Edge (`glm`), GLM-4 0414 / glm-4-9b-chat-hf (`glm4`, post-norm block: the direction is folded
 through the norm weight), GLM-4.1V / 4.5V / 4.6V text decoders, GLM-4.5 / 4.6 MoE (`glm4_moe`, `glm4_moe_lite`), GLM-5 / 5.1 /
-5.2 / 5.3 (`glm_moe_dsa`, MoE + sparse attention; the DSA indexer is left untouched), GLM-5-Next (hybrid attention), and
-legacy ChatGLM checkpoints behind `--trust-remote-code`. Checkpoints may be bf16, fp16/fp32 or FP8 block-scaled.
+5.2 / 5.3 (`glm_moe_dsa`, MoE + sparse attention; the DSA indexer is left untouched), GLM-5.3-Flash (`glm5_next`: hybrid
+linear + sparse attention, MoE, four residual streams per token; see section 6), and legacy ChatGLM checkpoints behind
+`--trust-remote-code`. Checkpoints may be bf16, fp16/fp32 or FP8 block-scaled. The vision models (GLM-4.xV, GLM-5.3-Flash)
+load through `AutoModelForImageTextToText`; only their text decoder is measured and edited.
 
 Verified end to end on an RTX 5080 (16 GB): GLM-Edge-4B (layer 16, 15/16 → 1/16 refusals, validation PASS, Ollama A/B
 9/10 → 0/10) and GLM-Edge-1.5B (layer 12, PASS, 6/10 → 0/10), natively and inside the Docker stack. Without a GPU the
 1.5B run gives the same result on the CPU (float32, layer 12, 9/16 → 0/16 refusals, validation PASS); the GGUF / Ollama
 stage was not part of that CPU run. The sharded edit was also tested on a synthetic checkpoint with per-expert,
 fused-expert, FP8 and post-norm tensors. GLM-5.x has not been run on real weights (no hardware here); its tensor layout was
-read from the model repository.
+read from the model repository. For GLM-5.3-Flash a tiny random model of its architecture (transformers' own implementation,
+`abliterate/tests/test_glm5_next.py`) shows that the edit stays exact across the four residual streams: the edited model's
+logits equal the unedited model's with the direction projected out of every stream.
 
 ---
 
@@ -267,7 +271,9 @@ Options: `--n-train 256 --n-test 16 --batch 16 --gen-batch 4 --max-new-tokens 64
 ## 6. GLM-5.2 / 5.3 specifically
 
 `GlmMoeDsaForCausalLM`: 78 layers, hidden size 6,144, layers 0–2 dense, 3–77 mixture-of-experts with 256 routed + 1 shared
-expert (8 active per token), DSA sparse-attention indexers on every fourth layer, bf16 checkpoint of 1.5 TB in 282 shards.
+expert (8 active per token), DSA sparse-attention indexers on every fourth layer. GLM-5.2 is a bf16 checkpoint of 1.5 TB in
+282 shards; GLM-5.3 ships in FP8 (0.75 TB, 141 shards, 128 × 128 block scales that the edit keeps), `zai-org/GLM-5.3-BF16`
+is its bf16 copy.
 The pipeline edits one attention output and 257 expert outputs per sparse layer (about 19,400 tensors), streams the
 checkpoint shard by shard (about 5 GB of RAM at a time, disk-bound), and leaves routers, indexers and norms untouched.
 
@@ -275,6 +281,29 @@ Hardware reality: measure and scan need the model loaded, which means a node wit
 FP8 copy on 8×H200; CPU offload on a 1.5+ TB RAM node works for the measurement in hours and for a reduced scan
 (`--n-test 8 --layer-range 0.35-0.7`). Convert and serve the edited checkpoint with vLLM or SGLang for validation at that
 scale; llama.cpp / Ollama support for GLM-5's attention may lag.
+
+Reasoning: the GLM-5.3 and GLM-5.3-Flash chat templates open a reasoning block at the generation prompt
+(`<|assistant|><think>`). Measure, scan, validate and the lab close it empty (`<think></think>`, what the template writes
+for earlier turns without reasoning), so the scan judges the answer itself. Check the promoted model with reasoning on as
+well.
+
+**GLM-5.3-Flash** (`zai-org/GLM-5.3-Flash`, `Glm5NextForConditionalGeneration`, MIT): 321B parameters, 45 layers plus one
+MTP layer, hidden size 4,096. 34 layers use linear attention (Kimi Delta Attention), 11 use DSA sparse attention; layers 0–2
+are dense, the rest MoE with 288 routed + 1 shared expert (8 active). FP8 checkpoint of 328 GB in 62 shards
+(`-BF16`: 120 shards). Two differences matter for abliteration:
+- **Four residual streams per token** (manifold-constrained hyper-connections, mHC). Each block reads a weighted mix of the
+  streams, and its output is added to every stream with a per-stream weight. The streams also mix with each other through
+  a 4 × 4 matrix. Every write therefore still goes through the projections the edit changes, and the mixing never acts on
+  the hidden dimension, so the edit stays exact. The hooks measure the streams' mean (the model's own readout before the
+  final norm) and ablate in each stream.
+- **The edit**: the embedding, all 46 `o_proj` (linear and sparse layers alike) and every `down_proj` (3 dense, 12,384
+  experts, 43 shared): 12,477 matrices. Routers, indexers, the mHC weights and the vision encoder stay untouched. Text
+  prompts are fully covered; image tokens keep their own component along the direction, which the edited layers cannot
+  write any further.
+
+Hardware: about 330 GB in FP8, so one 8 × 80 GB node runs measure and scan. Install the `flash-linear-attention` kernels
+there; without them transformers runs its PyTorch reference code for the linear layers (correct, much slower). vLLM
+v0.34.0 (the glm-serve pin) registers `Glm5NextForConditionalGeneration`; there is no GGUF / Ollama path.
 
 ---
 

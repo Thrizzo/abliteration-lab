@@ -22,7 +22,7 @@ FAMILY = {
     "glm4_moe_lite": {"name": "GLM-4.x MoE Lite", "post_norm": False, "moe": True},
     "glm4v_moe": {"name": "GLM-4.5V (text decoder)", "post_norm": False, "moe": True, "text_config": True},
     "glm_moe_dsa": {"name": "GLM-5 / 5.1 / 5.2 / 5.3 (MoE + DSA)", "post_norm": False, "moe": True},
-    "glm5_next": {"name": "GLM-5-Next (hybrid linear / indexed attention, MoE)", "post_norm": False, "moe": True, "text_config": True},
+    "glm5_next": {"name": "GLM-5.3-Flash / GLM-5-Next (hybrid linear + DSA attention, MoE, mHC streams, vision)", "post_norm": False, "moe": True, "text_config": True},
     "chatglm": {"name": "ChatGLM (legacy remote code: ChatGLM2/3, glm-4-9b-chat)", "post_norm": False, "moe": False, "remote_code": True},
 }
 
@@ -103,6 +103,12 @@ def inspect(model_dir):
             notes.append("DSA indexer modules do not write into the residual stream and are left untouched")
         if mt == "glm5_next":
             notes.append("hybrid: linear-attention layers also write through an o_proj and are edited")
+            if text.get("hc_mult"):
+                notes.append(f"mHC: {text.get('hc_mult')} residual streams per token. Block outputs enter them scaled per stream and "
+                             "the streams only mix with each other, so editing the writing projections keeps every stream free of "
+                             "the direction; the hooks measure the streams' mean (the model's readout) and ablate in each")
+            notes.append("the vision encoder is not edited: text prompts are fully covered; image tokens keep their own component "
+                         "along the direction, which the edited layers cannot write further")
         if q:
             fmt = q.get("fmt") or q.get("quant_method")
             notes.append(f"quantized checkpoint ({fmt}, block {q.get('weight_block_size')}): FP8 block-scaled tensors are dequantized, edited and requantized per block")
@@ -118,6 +124,7 @@ def inspect(model_dir):
         "quantization": q or None, "params_b": params_b, "size_gb": round(size_bytes / 1e9, 1) if size_bytes else None,
         "tensor_kinds": tensor_kinds, "code_files": code_files, "needs_remote_code": needs_remote,
         "text_config_nested": "text_config" in cfg, "support": level, "notes": notes,
+        "mhc_streams": text.get("hc_mult"),
         "fits_16gb_bf16": (size_bytes or 0) <= 15e9 and not q,
     }
 

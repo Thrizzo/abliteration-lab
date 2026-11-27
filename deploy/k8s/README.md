@@ -491,14 +491,15 @@ advice. Have legal confirm the points marked **check**.
 | Rancher Desktop, k3s, Traefik, Qdrant, Ollama, Caddy, llama.cpp, vLLM, PyTorch, transformers, FastAPI | Apache-2.0 / MIT / BSD | Free. |
 | Docker Desktop | Paid subscription for companies with 250+ employees or $10M+ revenue | Not needed: the dev path uses Rancher Desktop, and Docker Engine on Linux is free. |
 | n8n Community Edition, self-hosted | Sustainable Use License | Free for internal business use. Offering it to customers, or running it as a service for others, needs a commercial licence. |
-| GLM-5.3 (target) | Modified MIT. Model-as-a-Service providers with more than $10B revenue need a security review by Z.AI before commercial use. | Internal red-team use is not MaaS. **Never offer the model, or the abliterated one, as an API to others** without that review. |
+| GLM-5.3-Flash | MIT | Free. |
+| GLM-5.3 | Modified MIT. Model-as-a-Service providers with more than $10B revenue need a security review by Z.AI before commercial use. | Internal red-team use is not MaaS. **Never offer the model, or the abliterated one, as an API to others** without that review. |
 | GLM-Edge 1.5B / 4B (dev tests) | GLM-4 licence: commercial use after a free registration with Zhipu, plus a "Built with GLM-Edge" notice | **check.** Register, or test with `THUDM/GLM-4-9B-0414` (MIT) instead. |
 | qwen3:8b (judge), nomic-embed-text (embeddings) | Apache-2.0 | Free. |
 | `mlabonne/harmful_behaviors` (AdvBench) | MIT | Free. |
 | `mlabonne/harmless_alpaca` (default harmless prompts) | Unclear: derived from Stanford Alpaca, whose data licence is disputed (CC BY-NC vs CC BY), and which contains OpenAI outputs | **check**, or select another source: `ABL_HARMLESS_DATASET=databricks/databricks-dolly-15k#instruction` (CC BY-SA 3.0, commercial use allowed). |
 | PWK / OSCP course material | Licensed to the student personally | Upload with source `pwk` only into a personal instance, never into a shared company one. |
 
-The real cost is GPU time for GLM-5.3, not licences. Each run also keeps its own edited model of 0.75 to 1.5 TB, so
+The real cost is GPU time for GLM-5.3, not licences. Each run also keeps its own edited model (GLM-5.3: 0.75 TB in FP8, 1.5 TB in bf16; GLM-5.3-Flash: 0.33 TB), so
 delete old runs you no longer need for Rollback.
 
 ## Tested in CI

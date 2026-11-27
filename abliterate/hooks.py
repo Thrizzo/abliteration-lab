@@ -18,21 +18,52 @@ def _hs_from_args(args, kwargs):
     return kwargs.get("hidden_states"), False
 
 
+def _one_stream(x):
+    """A residual vector per token. Models with manifold-constrained hyper-connections (mHC, GLM-5.3-Flash) carry
+    hc_mult parallel streams between layers: x is [..., streams, d] there (x[:, -1] of a [batch, seq, streams, d] layer
+    input). Their readout before the final norm is the unweighted mean of the streams, so the mean is what is measured."""
+    return x.mean(dim=-2) if x.dim() >= 3 else x
+
+
+def opens_think(text):
+    """GLM-5.x chat templates open a reasoning block at the generation prompt ('<|assistant|><think>')."""
+    return text.rstrip().endswith("<think>")
+
+
 class HookedModel:
-    def __init__(self, model, tokenizer, log=print):
+    def __init__(self, model, tokenizer, log=print, think=False):
         self.model, self.tok, self.log = model, tokenizer, log
         self.layers_name, self.layers = find_layers(model)
         self.n_layers = len(self.layers)
-        self.d_model = model.config.hidden_size if hasattr(model.config, "hidden_size") else model.config.text_config.hidden_size
+        text_cfg = getattr(model.config, "text_config", None) or model.config
+        self.d_model = model.config.hidden_size if hasattr(model.config, "hidden_size") else text_cfg.hidden_size
+        self.streams = int(getattr(text_cfg, "hc_mult", 1) or 1)          # mHC models only (glm5_next): 4 in GLM-5.3-Flash
         self.device = next(model.parameters()).device
         gen_cfg = getattr(model, "generation_config", None)
         self.eos = getattr(gen_cfg, "eos_token_id", None) or tokenizer.eos_token_id
-        log(f"hooks: {self.layers_name} ({self.n_layers} layers), d_model={self.d_model}, first device {self.device}")
+        # Measure, scan and validate look at the answer itself: a template that opens a reasoning block at the generation
+        # prompt gets it closed empty ('<think></think>', what the template writes for earlier turns without reasoning).
+        # think=True keeps the template's prompt as it is.
+        self.close_think = False
+        if not think:
+            try:
+                probe = self.tok.apply_chat_template([{"role": "user", "content": "hi"}], add_generation_prompt=True, tokenize=False)
+                self.close_think = isinstance(probe, str) and opens_think(probe)
+            except Exception:
+                pass
+        log(f"hooks: {self.layers_name} ({self.n_layers} layers), d_model={self.d_model}, first device {self.device}"
+            + (f", {self.streams} residual streams (mHC: measured as their mean, ablated in each)" if self.streams > 1 else "")
+            + (", reasoning block closed at the prompt (<think></think>)" if self.close_think else ""))
 
     # ------------------------------------------------------------ tokenization (left padding, chat template)
     def encode(self, prompts):
-        enc = self.tok.apply_chat_template([[{"role": "user", "content": p}] for p in prompts],
-                                           add_generation_prompt=True, padding=True, return_tensors="pt", return_dict=True)
+        convs = [[{"role": "user", "content": p}] for p in prompts]
+        if self.close_think:
+            texts = [t + "</think>" if opens_think(t) else t
+                     for t in self.tok.apply_chat_template(convs, add_generation_prompt=True, tokenize=False)]
+            enc = self.tok(texts, padding=True, return_tensors="pt", add_special_tokens=False)   # the template wrote them
+        else:
+            enc = self.tok.apply_chat_template(convs, add_generation_prompt=True, padding=True, return_tensors="pt", return_dict=True)
         return enc["input_ids"].to(self.device), enc["attention_mask"].to(self.device)
 
     # ------------------------------------------------------------ measurement: resid_pre at the last token
@@ -47,7 +78,8 @@ class HookedModel:
         def make_hook(li):
             def hook(mod, args, kwargs):
                 hs, _ = _hs_from_args(args, kwargs)
-                captured[li] = hs[:, -1, :].detach().to("cpu", torch.float32, copy=True)   # a copy also on the CPU, where .float().cpu() is a view
+                # a copy also on the CPU, where .float().cpu() is a view; mHC streams: their mean
+                captured[li] = _one_stream(hs[:, -1].detach().to("cpu", torch.float32, copy=True))
             return hook
 
         handles = [l.register_forward_pre_hook(make_hook(i), with_kwargs=True) for i, l in enumerate(self.layers)]
@@ -81,7 +113,7 @@ class HookedModel:
         def make_hook(li):
             def hook(mod, args, kwargs):
                 hs, _ = _hs_from_args(args, kwargs)
-                captured[li] = hs[0].detach().to("cpu", torch.float32, copy=True)
+                captured[li] = _one_stream(hs[0].detach().to("cpu", torch.float32, copy=True))
             return hook
 
         handles = [l.register_forward_pre_hook(make_hook(i), with_kwargs=True) for i, l in enumerate(self.layers)]
@@ -97,7 +129,9 @@ class HookedModel:
     @contextlib.contextmanager
     def ablated(self, direction):
         """Removes `direction` from the residual stream at every layer input and output (and from the
-        attention-block output where no post-norm sits in between). Hooks are removed on exit."""
+        attention-block output where no post-norm sits in between). Hooks are removed on exit.
+        With mHC streams ([..., streams, d]) the projection acts on each stream: the streams only mix with each other
+        and take in block outputs scaled per stream, so nothing puts the direction back."""
         if direction is None:
             yield
             return
@@ -201,10 +235,25 @@ def _ram_check(model_dir, dtype, log):
             f"an error (exit code 137) it ran out of memory: give the container / WSL VM more RAM or use a smaller model")
 
 
+def auto_class(model_dir, trust_remote_code=False):
+    """AutoModelForCausalLM, or AutoModelForImageTextToText for the families transformers registers only there: the GLM
+    vision models (glm4v, glm4v_moe, glm46v, glm5_next = GLM-5.3-Flash). Their text-only forward and generate work alike."""
+    import transformers
+    from transformers.models.auto import modeling_auto as ma
+    try:
+        with open(os.path.join(model_dir, "config.json"), encoding="utf-8") as f:
+            mt = json.load(f).get("model_type", "")
+    except (OSError, ValueError, AttributeError):
+        mt = ""
+    if not trust_remote_code and mt not in ma.MODEL_FOR_CAUSAL_LM_MAPPING_NAMES and mt in ma.MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES:
+        return transformers.AutoModelForImageTextToText
+    return transformers.AutoModelForCausalLM
+
+
 def load_model(model_dir, dtype="auto", device_map="cuda", trust_remote_code=False, log=print):
-    """AutoModelForCausalLM + tokenizer with left padding. device_map='auto' shards over all GPUs (+ CPU offload);
+    """The model (see auto_class) + tokenizer with left padding. device_map='auto' shards over all GPUs (+ CPU offload);
     'cuda' falls back to 'cpu' when no GPU is visible (see resolve_device)."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
     device_map, dtype = resolve_device(device_map, dtype, log)
     if device_map == "cpu" or not torch.cuda.is_available():
         _ram_check(model_dir, dtype, log)
@@ -213,11 +262,12 @@ def load_model(model_dir, dtype="auto", device_map="cuda", trust_remote_code=Fal
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     kw = {"dtype": getattr(torch, dtype), "trust_remote_code": trust_remote_code}
+    Auto = auto_class(model_dir, trust_remote_code)
     if device_map == "auto":
         kw["device_map"] = "auto"
-        model = AutoModelForCausalLM.from_pretrained(model_dir, **kw)
+        model = Auto.from_pretrained(model_dir, **kw)
     else:
-        model = AutoModelForCausalLM.from_pretrained(model_dir, **kw).to(device_map)
+        model = Auto.from_pretrained(model_dir, **kw).to(device_map)
     model.eval()
     log(f"model loaded: {type(model).__name__}, dtype {dtype}, device_map {device_map}")
     return model, tok
