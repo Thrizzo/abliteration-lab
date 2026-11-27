@@ -6,9 +6,11 @@
   that Ollama has it. The operator picker keeps its plain behaviour;
 - the judge's info line names a missing default judge with its "ollama pull", and only then;
 - the layer field reads "15 17", "15, 17" and "15 - 17" as the CLI's --layers does;
-- a scan again in the same run starts its live view without the earlier pass's combinations; new directions (measure)
-  end the earlier scan and its pause, so the layer choice never offers a recommendation of other directions, also when
-  run.json says the pause is over; an earlier call's error is over once the next call starts.
+- a scan again in the same run starts its live view without the earlier pass's combinations; new directions (a measure
+  that ends) end the earlier scan and its pause, so the layer choice never offers a recommendation of other directions,
+  and a pause whose scan files are gone is not offered either; a refused or stopped call on a paused run keeps the pause
+  and its Continue; an earlier call's error banner goes once the next call starts, while the steps it left unfinished
+  stay failed.
 
     python -m unittest discover -s app/tests
 """
@@ -63,17 +65,26 @@ const again = f.foldEvents([...first, ev('start', { layers: [1, 2, 3] }), ev('la
 const done = f.foldEvents(first).scan;
 out.fold = { again: { status: again.status, layers: again.layers.length, combos: again.combos.length, planned: again.layers_planned },
              done: { status: done.status, layers: done.layers.length, combos: done.combos.length } };
-// a run paused at the choice, then measured again outside the console (CLI, or the API with run_id)
+// a run paused at the choice, then other calls on it from outside the console (CLI, or the API with run_id). scan: whether
+// the run still has its scan files (rundata's "scan"), which the pipeline removes with new directions (drop_scan)
 const E = (step, status, extra) => ({ t: 1, step, status, ...extra });
-const paused = [E('download', 'done', { cached: true }), E('measure', 'start'), E('measure', 'done'), ...first, E('choose', 'waiting', { recommended: 1, recommended_layers: [1] })];
-const state = (evs, meta, choice) => { S.ES = f.foldEvents(evs); S.run = { meta, choice: choice || { layer: null }, scan: null }; return { choose: f.stepState('choose'), scan: S.ES.scan ? S.ES.scan.status : null, error: !!S.ES._error }; };
+const call = [E('download', 'done', { cached: true })];
+const paused = [...call, E('measure', 'start'), E('measure', 'done'), ...first, E('choose', 'waiting', { recommended: 1, recommended_layers: [1] })];
+const refusal = E('error', 'error', { message: 'layer 99 does not exist' });
+const state = (evs, meta, scan, choice) => {
+  S.ES = f.foldEvents(evs); S.run = { meta, choice: choice || { layer: null }, scan: scan ? { layers: [] } : null };
+  return { choose: f.stepState('choose'), scan: S.ES.scan ? S.ES.scan.status : null, measure: S.ES.measure ? S.ES.measure.status : null, error: !!S.ES._error };
+};
 out.pause = {
-  paused: state(paused, { status: 'awaiting_choice' }),
-  remeasured: state([...paused, E('download', 'done', { cached: true }), E('measure', 'start'), E('measure', 'done')], { status: 'done' }),
-  rescanStopped: state([...paused, E('download', 'done', { cached: true }), E('measure', 'start'), E('measure', 'done'), E('scan', 'start', { layers: [1, 2] }), E('error', 'stopped')], { status: 'stopped' }),
-  leftByMeta: state(paused, { status: 'done' }, { layer: 2 }),
-  refusedThenOk: state([...paused, E('download', 'done', { cached: true }), E('error', 'error', { message: 'layer 9 does not exist' }), E('download', 'done', { cached: true }), E('choose', 'done', { layer: 2, layers: [2], by: 'user' })], { status: 'running' }),
-  refused: state([...paused, E('download', 'done', { cached: true }), E('error', 'error', { message: 'layer 9 does not exist' })], { status: 'error' }),
+  paused: state(paused, { status: 'awaiting_choice' }, true),
+  refused: state([...paused, ...call, refusal], { status: 'error' }, true),
+  refusedThenOk: state([...paused, ...call, refusal, ...call, E('choose', 'done', { layer: 2, layers: [2], by: 'user' })], { status: 'running' }, true),
+  remeasured: state([...paused, ...call, E('measure', 'start'), E('measure', 'done')], { status: 'done' }, false),
+  remeasureStopped: state([...paused, ...call, E('measure', 'start'), E('error', 'stopped')], { status: 'stopped' }, true),
+  rescanStopped: state([...paused, ...call, E('measure', 'start'), E('measure', 'done'), E('scan', 'start', { layers: [1, 2] }), E('scan', 'layer', { layer: 1 }), E('error', 'stopped')], { status: 'stopped' }, false),
+  stoppedThenContinued: state([...paused, ...call, E('measure', 'start'), E('measure', 'done'), E('scan', 'start', { layers: [1, 2] }), E('scan', 'layer', { layer: 1 }), E('error', 'stopped'),
+                               ...call, E('choose', 'done', { layer: 1, layers: [1], by: 'user' }), E('apply', 'start'), E('apply', 'done')], { status: 'done' }, false, { layer: 1 }),
+  scanFilesGone: state(paused, { status: 'error' }, false),
 };
 console.log(JSON.stringify(out));
 """
@@ -133,12 +144,19 @@ class ModelPickers(unittest.TestCase):
 
     def test_new_directions_end_the_pause(self):
         g = self.got["pause"]
-        self.assertEqual(g["paused"], {"choose": "waiting", "scan": "done", "error": False})
-        self.assertEqual(g["remeasured"], {"choose": "pending", "scan": None, "error": False})        # no Continue with layer 1
-        self.assertEqual(g["rescanStopped"], {"choose": "pending", "scan": "error", "error": True})
-        self.assertEqual(g["leftByMeta"]["choose"], "done")                     # run.json: the pause is over, the edit stands
-        self.assertEqual(g["refusedThenOk"], {"choose": "done", "scan": "done", "error": False})   # the refused call is over
-        self.assertEqual(g["refused"]["error"], True)
+        self.assertEqual(g["paused"], {"choose": "waiting", "scan": "done", "measure": "done", "error": False})
+        # a refused Continue keeps the pause and its Continue; the next call ends the banner
+        self.assertEqual(g["refused"], {"choose": "waiting", "scan": "done", "measure": "done", "error": True})
+        self.assertEqual(g["refusedThenOk"], {"choose": "done", "scan": "done", "measure": "done", "error": False})
+        # new directions: no scan and no pause of the earlier ones (no Continue with layer 1)
+        self.assertEqual(g["remeasured"], {"choose": "pending", "scan": None, "measure": "done", "error": False})
+        # a measure stopped before its end changed nothing: the pause stands
+        self.assertEqual(g["remeasureStopped"], {"choose": "waiting", "scan": "done", "measure": "error", "error": True})
+        self.assertEqual(g["rescanStopped"], {"choose": "pending", "scan": "error", "measure": "done", "error": True})
+        # a later call that does not scan again: the stopped scan stays failed, not "running"
+        self.assertEqual(g["stoppedThenContinued"], {"choose": "done", "scan": "error", "measure": "done", "error": False})
+        # the scan files gone (drop_scan without a later event, e.g. a layer range without layers): no pause offered
+        self.assertEqual(g["scanFilesGone"]["choose"], "pending")
 
     def test_the_layer_field_reads_like_the_cli(self):
         self.assertEqual(self.got["layers"], {"15 17": [15, 17], "15, 17": [15, 17], "15 - 17 19": [15, 16, 17, 19], "17,15,17": [17, 15],

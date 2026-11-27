@@ -225,11 +225,13 @@ function chatNames(){ return S.run?.meta?.ollama || S.run?.ollama?.names || {bas
 function foldEvents(evs){
   const ES={};
   for(const e of evs){
-    // every call of the pipeline starts with the download step (a local copy says so too): an earlier call's error is over
+    // every call of the pipeline starts with the download step (a local copy says so too): the banner of an earlier call's
+    // error goes; the steps that call left unfinished stay failed (below)
     if(e.step==='download') delete ES._error;
-    // new directions (measure) end the earlier scan and choice, a new scan the earlier choice: the pipeline removes their
-    // files as well (drop_scan), so the console never offers a recommendation of other directions
-    if(e.status==='start' && (e.step==='measure' || e.step==='scan')){ delete ES.choose; if(e.step==='measure') delete ES.scan; }
+    // new directions end the earlier scan and choice, a new scan the earlier choice, at the point where the pipeline has
+    // removed their files (drop_scan: at the end of measure, before the scan starts), so the console never offers a
+    // recommendation of other directions, and a measure that stops before its end keeps the pause it did not change
+    if((e.step==='measure' && e.status==='done') || (e.step==='scan' && e.status==='start')){ delete ES.choose; if(e.step==='measure') delete ES.scan; }
     const st = ES[e.step] || (ES[e.step]={status:'pending', first:e.t, layers:[], combos:[], progress:null});
     st.last=e.t;
     // the scan's start names the layers it will test: kept apart from the results its 'layer' events add. A scan again
@@ -241,15 +243,15 @@ function foldEvents(evs){
     else if(e.status==='baseline'){ st.status='running'; st.baseline=e; }
     else if(e.status==='waiting'){ st.status='waiting'; Object.assign(st, e); }
     else if(e.status==='done'){ st.status='done'; Object.assign(st, e); }
-    else if(e.status==='error'||e.status==='stopped'){ ES._error=e; }
+    else if(e.status==='error'||e.status==='stopped'){ ES._error=e; for(const k of Object.keys(ES)) if(ES[k].status==='running') ES[k].status='error'; }
   }
-  if(ES._error){ for(const k of Object.keys(ES)) if(ES[k].status==='running') ES[k].status='error'; }
   return ES;
 }
 function stepState(key){
   const st=S.ES[key]; const R=S.run;
-  // a pause the run has left (run.json neither awaits the choice nor runs) is not offered as waiting
-  const left = key==='choose' && st?.status==='waiting' && R?.meta?.status && !['awaiting_choice','running'].includes(R.meta.status);
+  // a pause whose scan is gone (new directions, or a scan again that has not ended) is not offered as waiting; a refused
+  // or stopped call on a paused run leaves the scan, and so the pause and its Continue
+  const left = key==='choose' && st?.status==='waiting' && !!R && !R.scan;
   if(st && st.status && st.status!=='pending' && !left) return st.status;
   if(R){ if(['download','inspect','load','measure'].includes(key)) return R.measure?'done':'pending';
     if(key==='scan') return R.scan?'done':'pending'; if(key==='choose') return R.choice?.layer!=null?'done':'pending';
@@ -352,6 +354,7 @@ const RENDER = {
       el.querySelectorAll('[data-use]').forEach(b=>b.onclick=()=>{ const l=b.dataset.use.split(',').map(Number); $('#chooseLayer').value=l[0]; $('#chooseMore').value=l.slice(1).join(', '); label(); });
       $('#continueBtn').onclick=async()=>{
         const body={engine:'abliterate', stage:'continue', run_id:S.runId, layer:+$('#chooseLayer').value, no_ollama:!$('#optOllama').checked, skip_verify:!$('#optVerify').checked, device_map:$('#optDevice').value};
+        if(!$('#chooseLayer').value.trim() || !Number.isInteger(body.layer) || body.layer<0 || body.layer>top) return toast(`layer: a number from 0 to ${top}`, true);
         if($('#chooseMore').value.trim()){            // several layers: sent as layers (this one first); one layer goes as before
           const more=parseLayers($('#chooseMore').value), all=more && [body.layer, ...more.filter(x=>x!==body.layer)];
           if(!more || all.some(x=>x>top)) return toast(`combine with: layer numbers from 0 to ${top}, e.g. 15, 19 or 15-17`, true);
