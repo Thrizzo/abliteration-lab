@@ -6,8 +6,9 @@
   subspace (glm5_next with its four residual streams, a pre-norm GLM); a post-norm GLM-4 gets what the folded edit
   promises, as for one direction: no residual write keeps a component in the subspace;
 - a sharded checkpoint like the GLM-5.x FP8 ones (block-scaled FP8 weights, two with their scale in another shard, a
-  bias, post-norm weights): two directions against a float64 reference, one direction bitwise as before, the index still
-  naming each tensor's shard;
+  bias, post-norm weights): two directions against a float64 reference, one direction bitwise equal to the single-direction
+  formula with the same block-wise requantization, the index still naming each tensor's shard; scales named weight_scale
+  and one scale for a whole tensor;
 - the pipeline: --layers, the --combine pass, the rule with combinations, apply saving the basis, the weight check;
 - the command line end to end on a tiny GLM: scan with --combine, pause, continue with --layers, validate.
 
@@ -436,20 +437,22 @@ FP8_D = 256
 
 
 def full_scale(scale, shape, blk=128):
-    """One scale per 128 x 128 block (per expert for [E, d, f]) spread over the weight's shape. Written here, not with
-    the editor's expand_scale, so the reference does not share its code."""
-    s = scale.double().repeat_interleave(blk, dim=-2).repeat_interleave(blk, dim=-1)
+    """One scale per 128 x 128 block (per expert for [E, d, f]; blk may be (rows, cols)) spread over the weight's shape.
+    Written here, not with the editor's expand_scale, so the reference does not share its code."""
+    bm, bn = (blk, blk) if isinstance(blk, int) else blk
+    s = scale.double().repeat_interleave(bm, dim=-2).repeat_interleave(bn, dim=-1)
     return s[..., :shape[-2], :shape[-1]]
 
 
 def fp8_blocks(Wf, blk=128):
     """Block-scaled FP8 as in the GLM-5.x / DeepSeek checkpoints: float8_e4m3fn values and weight_scale_inv with the
-    absmax / 448 of each 128 x 128 block (per expert for a fused [E, d, f] tensor)."""
+    absmax / 448 of each 128 x 128 block (per expert for a fused [E, d, f] tensor; blk may be (rows, cols))."""
+    bm, bn = (blk, blk) if isinstance(blk, int) else blk
     m, n = Wf.shape[-2:]
-    scale = torch.empty(*Wf.shape[:-2], -(-m // blk), -(-n // blk))
+    scale = torch.empty(*Wf.shape[:-2], -(-m // bm), -(-n // bn))
     for i in range(scale.shape[-2]):
         for j in range(scale.shape[-1]):
-            scale[..., i, j] = Wf[..., i * blk:(i + 1) * blk, j * blk:(j + 1) * blk].abs().amax(dim=(-2, -1)) / 448.0
+            scale[..., i, j] = Wf[..., i * bm:(i + 1) * bm, j * bn:(j + 1) * bn].abs().amax(dim=(-2, -1)) / 448.0
     q = (Wf.double() / full_scale(scale, Wf.shape, blk)).clamp(-448, 448).to(torch.float8_e4m3fn)
     return q, scale
 
@@ -518,8 +521,10 @@ def scale_of(key, tensors):
 
 class Fp8Checkpoint(unittest.TestCase):
     """The editor on a sharded checkpoint like the GLM-5.x FP8 ones, read back the way a loader reads it (through the
-    index): two directions against an independent float64 (I - P) W, one direction bitwise as the single-direction
-    editor wrote it, pre-norm and post-norm (folded), and the weight check on it."""
+    index): two directions against an independent float64 (I - P) W, one direction bitwise equal to the single-direction
+    formula (r r^T) with the same block-wise requantization, pre-norm and post-norm (folded), and the weight check on it.
+    (Its FP8 widths are not multiples of 128, where the editor before the block fix wrote other scales; for GLM-5.x, whose
+    are, the two agree.)"""
 
     @classmethod
     def setUpClass(cls):
@@ -544,19 +549,37 @@ class Fp8Checkpoint(unittest.TestCase):
         (a loader's view), not three blocks of 100."""
         self.assertEqual(block_size(self.src), (128, 128))
         self.assertEqual(block_size(os.path.join(self.tmp, "nowhere")), (128, 128))
+        for name, cfg, want in (("top", {"quantization_config": {"weight_block_size": [64, 128]}}, (64, 128)),
+                                ("text", {"text_config": {"quantization_config": {"weight_block_size": [64, 128]}}}, (64, 128)),
+                                ("none", {"quantization_config": {"quant_method": "fp8"}}, (128, 128)),
+                                ("odd", {"quantization_config": {"weight_block_size": 128}}, (128, 128))):
+            folder = os.path.join(self.tmp, "cfg-" + name)
+            os.makedirs(folder, exist_ok=True)
+            with open(os.path.join(folder, "config.json"), "w", encoding="utf-8") as f:
+                json.dump(cfg, f)
+            self.assertEqual(block_size(folder), want, name)
         g = torch.Generator().manual_seed(22)
-        for shape, blk in (((256, 300), 128), ((3, 256, 260), 128), ((256, 200), 128), ((256, 300), 64), ((130, 384), 128)):
+        for shape, blk in (((256, 300), 128), ((3, 256, 260), 128), ((256, 200), 128), ((256, 300), 64), ((130, 384), 128),
+                           ((256, 300), (64, 128)), ((300, 256), (128, 64)), ((2, 200, 300), (64, 128))):
             with self.subTest(shape=shape, blk=blk):
+                pair = (blk, blk) if isinstance(blk, int) else blk
                 q, scale = fp8_blocks(torch.randn(*shape, generator=g) * 0.05, blk=blk)
-                torch.testing.assert_close(expand_scale(scale, shape, (blk, blk)).double(), full_scale(scale, shape, blk), rtol=0, atol=0)
+                torch.testing.assert_close(expand_scale(scale, shape, pair).double(), full_scale(scale, shape, blk), rtol=0, atol=0)
                 Wf = q.double() * full_scale(scale, shape, blk)
-                q2, s2 = requantize(Wf.float(), tuple(scale.shape), (blk, blk))
+                q2, s2 = requantize(Wf.float(), tuple(scale.shape), pair)
                 self.assertEqual(tuple(s2.shape), tuple(scale.shape))
                 torch.testing.assert_close(s2.double(), scale.double(), rtol=1e-6, atol=0)        # the same blocks' absmax
                 torch.testing.assert_close(q2.double() * full_scale(s2, shape, blk), Wf, rtol=0.07, atol=0)
         # a scale per row, or one for the whole tensor, still spreads as before
         self.assertTrue(torch.equal(expand_scale(torch.arange(4.0)[:, None], (4, 300)), torch.arange(4.0)[:, None].expand(4, 300)))
         self.assertTrue(torch.equal(expand_scale(torch.tensor(2.0), (4, 300)), torch.full((4, 300), 2.0)))
+
+    def test_only_pairs_split_across_shards_are_edited_up_front(self):
+        ed = Editor(self.src, os.path.join(self.tmp, "pre"), self.dirs.clone(), log=QUIET)
+        early, new_scales = ed._edit_cross_shard()
+        self.assertEqual(set(early), {"model.layers.1.self_attn.o_proj.weight", "model.layers.4.mlp.shared_experts.down_proj.weight"})
+        self.assertEqual(set(new_scales), {"model.layers.1.self_attn.o_proj.weight_scale_inv",
+                                           "model.layers.4.mlp.shared_experts.down_proj.weight_scale_inv"})
 
     def test_each_tensor_stays_in_the_shard_the_index_names(self):
         for (k, post_norm), (dst, stats) in self.edits.items():
@@ -638,6 +661,64 @@ class Fp8Checkpoint(unittest.TestCase):
                 self.assertEqual([c[2] for c in checks], ["PASS", "PASS"], checks)
                 # measured against the other basis (folded vs not), the subspace is still written
                 self.assertGreater(compare_weights(self.src, dst, direction, QUIET, post_norm=not post_norm)["max_rw"], 5e-2)
+
+
+def single_file(folder, tensors):
+    os.makedirs(folder, exist_ok=True)
+    save_file({k: v.contiguous() for k, v in tensors.items()}, os.path.join(folder, "model.safetensors"), metadata={"format": "pt"})
+    with open(os.path.join(folder, "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"model_type": "glm"}, f)
+
+
+def read_single(folder):
+    with safe_open(os.path.join(folder, "model.safetensors"), "pt") as f:
+        return {k: f.get_tensor(k) for k in f.keys()}
+
+
+class Fp8ScaleForms(unittest.TestCase):
+    """FP8 scales stored in the forms the GLM-5.x checkpoints do not use: a compressed-tensors weight_scale (one per
+    row), and one scale for the whole tensor stored as (), (1,) or (1, 1). The editor edits them, keeps each scale's name
+    and shape, and the weight check reads them the same way (its max |Q^T W'| equals the editor's)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.dirs = directions(2, d=FP8_D, seed=23)
+        self.g = torch.Generator().manual_seed(24)
+
+    def check(self, tensors, weight, scale_name):
+        src, dst = os.path.join(self.tmp, "src"), os.path.join(self.tmp, "dst")
+        single_file(src, tensors)
+        for k, direction in ((1, self.dirs[0]), (2, self.dirs)):
+            with self.subTest(k=k, scale=scale_name, shape=tuple(tensors[scale_name].shape)):
+                stats = Editor(src, dst, direction.clone(), log=QUIET).run()
+                after = read_single(dst)
+                self.assertEqual((stats["fp8"], after[scale_name].shape, after[scale_name].dtype),
+                                 (1, tensors[scale_name].shape, tensors[scale_name].dtype))
+                Q = torch.linalg.qr(direction.reshape(-1, FP8_D).T.double())[0]
+                full = lambda W, s: W.double() * s.double().reshape(-1, 1).expand(W.shape) if s.numel() > 1 else W.double() * s.double().reshape(())  # noqa: E731
+                ref = full(tensors[weight], tensors[scale_name])
+                ref = ref - Q @ (Q.T @ ref)
+                got = full(after[weight], after[scale_name])
+                self.assertLess(((got - ref).abs().max() / ref.abs().max()).item(), 7e-2)
+                cmp = compare_weights(src, dst, direction, QUIET)
+                self.assertAlmostEqual(cmp["max_rw"], stats["max_rw"], delta=1e-7)
+                self.assertEqual([c[2] for c in weight_checks(cmp, expected_targets(src))], ["PASS", "PASS"])
+
+    def test_a_weight_scale_per_row(self):
+        W = torch.randn(FP8_D, 200, generator=self.g) * 0.05
+        s = W.abs().amax(dim=1, keepdim=True) / 448.0                      # [d, 1], compressed-tensors' per-channel scale
+        q = (W / s).clamp(-448, 448).to(torch.float8_e4m3fn)
+        self.check({"model.layers.0.mlp.down_proj.weight": q, "model.layers.0.mlp.down_proj.weight_scale": s},
+                   "model.layers.0.mlp.down_proj.weight", "model.layers.0.mlp.down_proj.weight_scale")
+
+    def test_one_scale_for_the_whole_tensor(self):
+        W = torch.randn(FP8_D, 300, generator=self.g) * 0.05
+        amax = W.abs().amax() / 448.0
+        q = (W / amax).clamp(-448, 448).to(torch.float8_e4m3fn)
+        for shape in ((), (1,), (1, 1)):
+            self.check({"model.layers.0.self_attn.o_proj.weight": q, "model.layers.0.self_attn.o_proj.weight_scale_inv": amax.reshape(shape)},
+                       "model.layers.0.self_attn.o_proj.weight", "model.layers.0.self_attn.o_proj.weight_scale_inv")
 
 
 # ----------------------------------------------------------------------------- the pipeline
@@ -793,7 +874,25 @@ class CombinePass(unittest.TestCase):
         self.assertIsNone(combos)
         self.assertFalse(os.path.exists(path))          # its combinations were tested on the scan before
         self.assertEqual(P.choose_layers(scan, (P.Run.load(self.run_, "scan.json") or {}).get("combos")), [1])
-        self.assertIn("removed scan.json", read_text(os.path.join(self.run_.run_dir, "run.log")))
+        self.assertIn("scan: removed scan_results.json and scan.json of the earlier scan", read_text(os.path.join(self.run_.run_dir, "run.log")))
+
+    def test_a_scan_that_stops_in_its_combine_pass_leaves_no_earlier_pass(self):
+        self.scan(3, {(): 8, (1,): 3, (2,): 1, (3,): 2, (4,): 1, (2, 4): 0, (2, 3, 4): 0})
+        self.run_.update_meta(recommended=2, recommended_layers=[2, 4])      # as a paused run records them
+        path = os.path.join(self.run_.run_dir, "scan.json")
+
+        class StoppedHM(FakeHM):                         # Stop (or a crash) while the best layers are tested together
+            def generate(self, prompts, max_new_tokens, batch_size, direction=None):
+                if direction is not None and direction.dim() == 2 and direction.shape[0] > 1:
+                    raise KeyboardInterrupt
+                return super().generate(prompts, max_new_tokens, batch_size, direction)
+
+        args = argparse.Namespace(max_new_tokens=4, gen_batch=2, combine=2)
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(KeyboardInterrupt):
+            P.step_scan(self.run_, StoppedHM(self.dirs, {(): 8, (1,): 0, (2,): 3, (3,): 3, (4,): 3}), args, self.prompts, self.dirs, self.la)
+        self.assertFalse(os.path.exists(path))          # the earlier pass's combinations are gone with the earlier scan
+        self.assertEqual(read_json(os.path.join(self.run_.run_dir, "scan_results.json"))[0]["layer"], 1)
+        self.assertEqual((self.run_.meta["recommended"], self.run_.meta["recommended_layers"]), (None, None))
 
 
 # ----------------------------------------------------------------------------- apply and validate on a tiny GLM
@@ -966,6 +1065,21 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(meta["status"], "error")
         self.assertIn("layer 9 does not exist", meta["error"])
         self.assertEqual((meta["layer"], meta["layers"]), (1, [1, 3]))                 # the edit before stays recorded
+
+        # measured again: the scan belonged to the earlier directions, so it goes, and the rule has nothing to pick from
+        code, log = self.main("--run-dir", rd, "--stage", "measure", "--n-train", "6")
+        self.assertEqual(code, 0, log)
+        self.assertFalse(os.path.exists(os.path.join(rd, "scan_results.json")) or os.path.exists(os.path.join(rd, "scan.json")))
+        self.assertIn("measure: removed scan_results.json and scan.json of the earlier scan", log)
+        meta = read_json(os.path.join(rd, "run.json"))
+        self.assertEqual((meta["recommended"], meta["recommended_layers"]), (None, None))
+        code, log = self.main("--run-dir", rd, "--stage", "apply")
+        self.assertEqual(code, 2)
+        self.assertIn("no scan of its current directions", read_json(os.path.join(rd, "run.json"))["error"])
+        code, log = self.main("--run-dir", rd, "--stage", "apply", "--layers", "2 3")    # a choice needs no scan
+        self.assertEqual(code, 0, log)
+        choose = [e for e in read_events(rd) if e["step"] == "choose" and e["status"] == "done"][-1]
+        self.assertEqual((choose["layers"], choose["recommended"], choose["by"]), ([2, 3], None, "user"))
 
 
 if __name__ == "__main__":

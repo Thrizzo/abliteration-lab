@@ -11,6 +11,7 @@ Handles:
 """
 import glob
 import json
+import math
 import os
 import shutil
 import time
@@ -149,11 +150,19 @@ def _blocks_of(shape, block):
     return [pair[d - lead] if d >= lead else None for d in range(len(shape))]
 
 
+def scale_candidates(name):
+    """The names a weight's FP8 scale goes by: <name>_scale_inv or .weight_scale_inv (GLM-5.x, DeepSeek), <name>_scale or
+    .weight_scale (compressed-tensors). The editor and the validation look them up the same way."""
+    return [s for s in (name + "_scale_inv", name.replace(".weight", ".weight_scale_inv"), name + "_scale", name.replace(".weight", ".weight_scale"))
+            if s != name]
+
+
 def expand_scale(scale, shape, block=(128, 128)):
-    """Broadcast a block/row/tensor scale to the weight's shape. block: the checkpoint's block size (block_size)."""
+    """Broadcast a block/row/tensor scale to the weight's shape. block: the checkpoint's block size (block_size).
+    One scale for the whole tensor may be stored as (), (1,) or (1, 1)."""
     s = scale.float()
-    if s.dim() == 0:
-        return s.expand(shape)
+    if s.numel() == 1:
+        return s.reshape(()).expand(shape)
     blocks = _blocks_of(shape, block)
     for dim in range(s.dim()):
         if s.shape[dim] != shape[dim]:
@@ -165,6 +174,10 @@ def expand_scale(scale, shape, block=(128, 128)):
 def requantize(Wf, scale_shape, block=(128, 128)):
     """Per-block absmax requantization to float8_e4m3fn with the same scale layout as before."""
     shape = Wf.shape
+    if math.prod(scale_shape) == 1:               # one scale for the whole tensor, kept in its stored shape
+        scale = (Wf.abs().amax() / FP8_MAX).clamp_min(1e-12)
+        q = (Wf / scale).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+        return q, scale.reshape(scale_shape)
     per_dim = _blocks_of(shape, block)
     blocks = [_block(shape[i], scale_shape[i], per_dim[i]) if i < len(scale_shape) and scale_shape[i] > 0 else shape[i] for i in range(len(shape))]
     # pad to block multiples, reshape into blocks, absmax per block
@@ -240,8 +253,7 @@ class Editor:
 
     def _scale_name(self, k, keys=()):
         """The scale tensor of weight k: in this shard (keys) or, with an index, in any shard; None when it has none."""
-        return next((s for s in (k + "_scale_inv", k.replace(".weight", ".weight_scale_inv"), k + "_scale", k.replace(".weight", ".weight_scale"))
-                     if s != k and (s in keys or (self.weight_map and s in self.weight_map))), None)
+        return next((s for s in scale_candidates(k) if s in keys or (self.weight_map and s in self.weight_map)), None)
 
     def _edit_cross_shard(self):
         """FP8 weights whose scale lives in another shard (none in the GLM-5.x checkpoints, which keep each pair in one

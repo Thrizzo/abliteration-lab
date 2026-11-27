@@ -11,7 +11,7 @@ from safetensors import safe_open
 
 from .arch import classify, post_norm_name
 from .data import count_refusals
-from .edit import basis, block_size, expand_scale, fold, residual_component
+from .edit import basis, block_size, expand_scale, fold, residual_component, scale_candidates
 
 
 def _index(folder):
@@ -47,7 +47,7 @@ def compare_weights(base_dir, abl_dir, direction, log=print, max_tensors=None, p
             if kind in ("embed", "attn_out", "mlp_out") and ta.dim() >= 1:
                 Wf = ta.float()
                 if ta.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-                    sn = next((s for s in (k + "_scale_inv", k.replace(".weight", ".weight_scale_inv")) if s in ai), None)
+                    sn = next((s for s in scale_candidates(k) if s in ai), None)
                     if sn:
                         Wf = Wf * expand_scale(handles[ai[sn]].get_tensor(sn), ta.shape, block)
                 rr = Q

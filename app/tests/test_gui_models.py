@@ -4,7 +4,9 @@
   -HostOllama: the owner's own Ollama for Windows, with whatever chat models it holds) the list shows the default as
   missing and keeps it chosen; it never quietly takes the first chat model there. A choice the browser kept wins when
   that Ollama has it. The operator picker keeps its plain behaviour;
-- the layer field reads "15 17", "15, 17" and "15 - 17" as the CLI's --layers does.
+- the judge's info line names a missing default judge with its "ollama pull", and only then;
+- the layer field reads "15 17", "15, 17" and "15 - 17" as the CLI's --layers does;
+- a scan again in the same run starts its live view without the earlier pass's combinations.
 
     python -m unittest discover -s app/tests
 """
@@ -24,10 +26,11 @@ const src = require('fs').readFileSync(__APP_JS__, 'utf8').replace(/\r/g, '');
 const grab = (start, end) => { const i = src.indexOf(start), j = src.indexOf(end, i); if (i < 0 || j < 0) throw new Error('app.js: ' + start); return src.slice(i, j + end.length); };
 const line = (start) => grab(start, '\n');
 const code = [line('const esc = '), line('const escA = '), line('const sameModel = '), grab('const parseLayers = ', 'return out; };'),
-  grab('function cpFillSelect(', '\n  return missing;\n}')].join('\n');
+  grab('function cpFillSelect(', '\n  return missing;\n}'), grab('function cpJudgeInfo(', "\n    + (ex ? `not usable as judge: ${ex}` : '');\n}"),
+  grab('function foldEvents(evs){', '\n  return ES;\n}')].join('\n');
 const store = {};
 const cpStore = { get: (k, d) => (k in store ? store[k] : d) };
-const f = new Function('cpStore', code + '; return { cpFillSelect, parseLayers };')(cpStore);
+const f = new Function('cpStore', code + '; return { cpFillSelect, parseLayers, cpJudgeInfo, foldEvents };')(cpStore);
 const fill = (role, list, def, kept) => {
   for (const k of Object.keys(store)) delete store[k];
   if (kept !== undefined) store['model.' + role] = kept;
@@ -45,7 +48,18 @@ const out = {
   down: fill('judge', [], 'qwen3:8b'),
   operator: fill('operator', ['glm-abl-v2'], 'glm-abl'),
   layers: Object.fromEntries(['15 17', '15, 17', '15 - 17 19', '17,15,17', '15,,17', 'abc', '-1', '19-15', '5;6'].map((t) => [t, f.parseLayers(t)])),
+  info: {
+    missing: f.cpJudgeInfo({ default: 'qwen3:8b', excluded: [{ name: 'glm-abl', why: 'abliterated: never' }] }, true),
+    present: f.cpJudgeInfo({ default: 'qwen3:8b', excluded: [] }, false),
+    error: f.cpJudgeInfo({ default: '<b>x</b>', error: 'did not list <i>', excluded: [] }, true),
+  },
 };
+const ev = (status, extra) => ({ t: 1, step: 'scan', status, ...extra });
+const first = [ev('start', { layers: [1, 2] }), ev('layer', { layer: 1 }), ev('combo', { layers: [1, 2] }), ev('done', { top_combos: [[[1, 2], 0]] })];
+const again = f.foldEvents([...first, ev('start', { layers: [1, 2, 3] }), ev('layer', { layer: 2 })]).scan;
+const done = f.foldEvents(first).scan;
+out.fold = { again: { status: again.status, layers: again.layers.length, combos: again.combos.length, planned: again.layers_planned },
+             done: { status: done.status, layers: done.layers.length, combos: done.combos.length } };
 console.log(JSON.stringify(out));
 """
 
@@ -87,6 +101,20 @@ class ModelPickers(unittest.TestCase):
         self.assertEqual((g["missing"], g["values"], g["selected"]), (False, ["qwen3:8b"], ["qwen3:8b"]))
         g = self.got["operator"]                                 # the operator picker: what glm-serve serves
         self.assertEqual((g["missing"], g["values"], g["selected"]), (False, ["glm-abl-v2"], ["glm-abl-v2"]))
+
+    def test_the_judges_info_line(self):
+        g = self.got["info"]
+        self.assertIn("qwen3:8b, the default judge, is not on the copilot's Ollama", g["missing"])
+        self.assertIn("ollama pull qwen3:8b", g["missing"])
+        self.assertIn("not usable as judge: glm-abl (abliterated)", g["missing"])
+        self.assertEqual(g["present"], "")
+        self.assertNotIn("<b>", g["error"])                       # names and errors from the Ollama stay text
+        self.assertNotIn("<i>", g["error"])
+        self.assertIn("did not list &lt;i&gt;", g["error"])
+
+    def test_a_scan_again_starts_without_the_earlier_combinations(self):
+        self.assertEqual(self.got["fold"]["done"], {"status": "done", "layers": 1, "combos": 1})
+        self.assertEqual(self.got["fold"]["again"], {"status": "running", "layers": 1, "combos": 0, "planned": [1, 2, 3]})
 
     def test_the_layer_field_reads_like_the_cli(self):
         self.assertEqual(self.got["layers"], {"15 17": [15, 17], "15, 17": [15, 17], "15 - 17 19": [15, 16, 17, 19], "17,15,17": [17, 15],

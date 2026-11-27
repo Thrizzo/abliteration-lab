@@ -227,8 +227,9 @@ function foldEvents(evs){
   for(const e of evs){
     const st = ES[e.step] || (ES[e.step]={status:'pending', first:e.t, layers:[], combos:[], progress:null});
     st.last=e.t;
-    // the scan's start names the layers it will test: kept apart from the results its 'layer' events add
-    if(e.status==='start'){ st.status='running'; Object.assign(st, e); if(e.step==='scan'){ st.layers_planned=e.layers; st.layers=[]; } }
+    // the scan's start names the layers it will test: kept apart from the results its 'layer' events add. A scan again
+    // in the same run starts with no results and no combinations: the earlier pass's belong to the earlier scan
+    if(e.status==='start'){ st.status='running'; Object.assign(st, e); if(e.step==='scan'){ st.layers_planned=e.layers; st.layers=[]; st.combos=[]; } }
     else if(e.status==='progress'){ st.status='running'; st.progress=e; }
     else if(e.status==='layer'){ st.status='running'; st.layers.push(e); }
     else if(e.status==='combo'){ st.status='running'; st.combos.push(e); }
@@ -616,15 +617,18 @@ function cpFillSelect(sel, role, list, def){
   sel.innerHTML = names.map(n => `<option value="${escA(n)}"${n===pick?' selected':''}>${esc(n)}${sameModel(n, def)?(missing?' (default, not on this Ollama)':' (default)'):''}</option>`).join('');
   return missing;
 }
+// the judge's info line: the Ollama's error, a default judge it does not have, the models left out as judges
+function cpJudgeInfo(j, missing){
+  const ex = (j.excluded||[]).map(x => `${esc(x.name)} (${esc(String(x.why).split(':')[0])})`).join(', ');
+  return (j.error ? `<span class="vuln">${esc(j.error)}</span>` : '')
+    + (missing ? `<span class="vuln">${esc(j.default)}, the default judge, is not on the copilot's Ollama: pull it there (<span class="mono">ollama pull ${esc(j.default)}</span>) or choose another judge on purpose.</span> ` : '')
+    + (ex ? `not usable as judge: ${ex}` : '');
+}
 async function cpModelsLoad(fresh){
   let m; try{ m=await api('/copilot/models'+(fresh?'?fresh=true':'')); }catch(e){ $('#cpOpInfo').innerHTML=`<span class="vuln">${esc(e.message)}</span>`; return; }
   CP.models=m;
   cpFillSelect($('#cpOpModel'), 'operator', m.operator.models||[], m.operator.default);
-  const judgeMissing = cpFillSelect($('#cpJudgeModel'), 'judge', m.judge.models||[], m.judge.default);
-  const ex = (m.judge.excluded||[]).map(x => `${esc(x.name)} (${esc(String(x.why).split(':')[0])})`).join(', ');
-  $('#cpJudgeInfo').innerHTML = (m.judge.error ? `<span class="vuln">${esc(m.judge.error)}</span>` : '')
-    + (judgeMissing ? `<span class="vuln">${esc(m.judge.default)}, the default judge, is not on the copilot's Ollama: pull it there (<span class="mono">ollama pull ${esc(m.judge.default)}</span>) or choose another judge on purpose.</span> ` : '')
-    + (ex ? `not usable as judge: ${ex}` : '');
+  $('#cpJudgeInfo').innerHTML = cpJudgeInfo(m.judge, cpFillSelect($('#cpJudgeModel'), 'judge', m.judge.models||[], m.judge.default));
   if(m.embeddings && m.embeddings.model)
     $('#cpEmbedInfo').innerHTML = `<span class="mono">${esc(m.embeddings.model)}</span> · turns your writeups into vectors for retrieval · writes no text, so it is not a choice here`;
   try{ CP.serving=await api('/serving'); }catch(e){ CP.serving=null; }

@@ -155,8 +155,8 @@ serve them instead: it runs on Windows itself and uses the GPU.
 - **What `-HostOllama` changes in the script:**
   - the preflight checks that Ollama answers on `http://127.0.0.1:11434` and has the copilot's judge
     (`COPILOT_JUDGE_MODEL`) and `nomic-embed-text`, with `-EvalJudge` also `-JudgeModel`. What is missing is a warning
-    with its `ollama pull` command, not a failure: the models can download while the image builds, and `-Check` fails
-    if they are still missing then;
+    with its `ollama pull` command, not a failure: the models can download while the image builds. `-Check` fails if
+    the judge or `nomic-embed-text` is still missing then, and `-EvalJudge` skips without `-JudgeModel`;
   - `-Setup` applies `overlays/dev-host-ollama` (unless `-Overlay` names another) and connects n8n to
     `http://192.168.127.254:11434` (`-HostOllamaUrl`). That overlay opens only this address to the pods, so another
     `-HostOllamaUrl` needs the address changed in `components/host-ollama` as well and `-Overlay`; without `-Overlay`

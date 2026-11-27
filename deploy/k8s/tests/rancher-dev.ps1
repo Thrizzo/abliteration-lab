@@ -25,7 +25,8 @@ GPU: Rancher Desktop gives pods no GPU, so the copilot's judge and embeddings ru
 -HostOllama to any of the above: Ollama for Windows then serves them, on the GPU. Install it, then run
 "ollama pull qwen3:8b" (the copilot's judge: COPILOT_JUDGE_MODEL in deploy/k8s/base/copilot/copilot.env) and
 "ollama pull nomic-embed-text"; for -EvalJudge also your -JudgeModel. With -HostOllama the preflight says whether this
-Ollama answers on 127.0.0.1:11434 and has those models (-Check fails if it still has not); -Setup applies
+Ollama answers on 127.0.0.1:11434 and has those models (-Check fails without the judge or nomic-embed-text, and
+-EvalJudge skips without -JudgeModel); -Setup applies
 deploy/k8s/overlays/dev-host-ollama (unless -Overlay names another) and connects n8n to -HostOllamaUrl
 (http://192.168.127.254:11434: this machine's 127.0.0.1 as pods reach it; that overlay opens only this address);
 -Check and -EvalJudge use that Ollama. The console's judge list then shows every chat model on it.
@@ -661,10 +662,14 @@ function Invoke-HostPreflight {
         Ok "Ollama on this machine answers ($localUrl, version $($v.Json.version))"
         $tags = (Http -Url "$localUrl/api/tags" -NoAuth -MaxSeconds 10).Json
         $missing = @(Get-HostModels | Where-Object { -not (Test-HasModel $tags $_) })
-        if ($missing.Count) { Warn ('not on the host''s Ollama yet: ' + ($missing -join ', ') + ' (-Check fails if they are still missing then)') }
-        else { Ok ('the host''s Ollama has the copilot''s models: ' + ((Get-HostModels) -join ', ')) }
+        foreach ($m in $missing) {
+            if ($m -eq $JudgeModel -and $m -ne (Get-CopilotJudge)) { Warn "$m is not on the host's Ollama yet (-EvalJudge skips without it)" }
+            else { Warn "$m is not on the host's Ollama yet (-Check fails without it)" }
+        }
+        if (-not $missing.Count) { Ok ('the host''s Ollama has the models this run needs: ' + ((Get-HostModels) -join ', ')) }
     } else {
-        Warn "Ollama for Windows does not answer on $localUrl yet (HTTP $($v.Code)): install it from https://ollama.com/download and start it (-Check fails without it)"
+        Warn ("Ollama for Windows does not answer on $localUrl yet (HTTP $($v.Code)): install it from https://ollama.com/download " +
+              'and start it (-Check fails and -EvalJudge skips without it)')
     }
     foreach ($m in $missing) { Note "on Windows: ollama pull $m" }
     Note '"ollama ps" shows GPU in its PROCESSOR column (e.g. "100% GPU") for a model loaded on the GPU'

@@ -39,7 +39,7 @@ in GLM-5.2) that every layer reads and adds to. Abliteration works on that strea
    differ, and the direction is gone from the saved weights (max |r·W′| below 0.05, typically 1e-3).
 
 **Several directions.** Sometimes one layer's direction leaves a few refusals that another layer's direction catches.
-`--layers 15,17,19` (or `15 17 19`; ranges such as `15-19` work too) removes the directions of all of them at once. They are not parallel,
+`--layers 15,17,19` (or `--layers "15 17 19"`; ranges such as `15-19` work too) removes the directions of all of them at once. They are not parallel,
 so the edit removes the subspace they span: a QR decomposition turns them into an orthonormal basis Q, and every writer
 becomes `W′ = W − Q (Qᵀ W)`. Removing them one after the other would not do it: each step would put back part of the
 directions removed before. `--combine 3` makes the scan also test the best 2 and the best 3 layers together (one more

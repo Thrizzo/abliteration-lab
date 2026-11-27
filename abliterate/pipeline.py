@@ -96,6 +96,20 @@ def layers_label(layers):
     return f"layer {layers[0]}" if len(layers) == 1 else "layers " + "+".join(str(layer) for layer in sorted(layers))
 
 
+def drop_scan(run, step):
+    """scan_results.json and scan.json belong to the directions they were measured with. They go when new directions are
+    measured and when a scan starts, so neither the rule nor the console ever reads a scan of other directions, and a
+    scan that stops before its end leaves none behind."""
+    gone = [name for name in ("scan_results.json", "scan.json") if os.path.isfile(os.path.join(run.run_dir, name))]
+    for name in gone:
+        os.remove(os.path.join(run.run_dir, name))
+    if gone:
+        run.log(f"{step}: removed {' and '.join(gone)} of the earlier scan")
+        if run.meta.get("recommended") is not None or run.meta.get("recommended_layers") is not None:
+            run.update_meta(recommended=None, recommended_layers=None)
+    return gone
+
+
 # ----------------------------------------------------------------------------- steps
 def step_download(run, repo, models_dir, token=None):
     """Local copy under models/<slug>: safe file types only, revision + SHA-256 recorded (like notebook 4.0b)."""
@@ -157,6 +171,7 @@ def step_measure(run, hm, args, prompts):
     dirs = dirs / norms.clamp_min(1e-8).unsqueeze(-1)
     torch.save(dirs, os.path.join(run.run_dir, "refusal_dirs.pt"))
     torch.save({"mean_h": mean_h, "mean_hl": mean_hl, "norms": norms}, os.path.join(run.run_dir, "means.pt"))
+    drop_scan(run, "measure")                     # new directions: an earlier scan tested other ones
     lo_f, hi_f = (float(x) for x in args.layer_range.split("-"))
     n = hm.n_layers
     scan_lo, scan_hi = max(1, int(lo_f * n)), min(n - 1, int(hi_f * n))
@@ -178,6 +193,7 @@ def step_measure(run, hm, args, prompts):
 
 def step_scan(run, hm, args, prompts, dirs, la):
     harmful_test = prompts[1]
+    drop_scan(run, "scan")                        # until this scan ends, the run has none (the rule needs one)
     run.event("scan", "start", n_test=len(harmful_test), layers=list(range(la["scan_range"][0], la["scan_range"][1] + 1)))
     baseline = hm.generate(harmful_test, args.max_new_tokens, args.gen_batch)
     n_base = D.count_refusals(baseline)
@@ -197,14 +213,7 @@ def step_scan(run, hm, args, prompts, dirs, la):
         run.event("scan", "layer", layer=l, refusals=nref, cjk_ratio=round(cjk, 3), seconds=round(time.time() - t, 1), generations=gens)
     scan.sort(key=lambda x: (x["refusals"], x["cjk_ratio"], x["layer"]))
     run.save("scan_results.json", scan)
-    if getattr(args, "combine", 0) >= 2:
-        combos = scan_combos(run, hm, args, harmful_test, dirs, scan)
-    else:
-        combos = None
-        stale = os.path.join(run.run_dir, "scan.json")
-        if os.path.isfile(stale):          # scanned again without --combine: the earlier pass tested the earlier scan's layers
-            os.remove(stale)
-            run.log("scan: removed scan.json, the --combine pass of the earlier scan")
+    combos = scan_combos(run, hm, args, harmful_test, dirs, scan) if getattr(args, "combine", 0) >= 2 else None
     # "top_combos", not "combos": the console keeps the scan's 'combo' events under that name
     run.event("scan", "done", top=[(s["layer"], s["refusals"]) for s in scan[:5]],
               **({"top_combos": [(c["layers"], c["refusals"]) for c in combos]} if combos else {}))
@@ -474,10 +483,14 @@ def main(argv=None):
             baseline = (run.load("baseline.json") or {}).get("baseline")
 
         if args.stage in ("all", "continue", "apply"):
-            rec = choose_layers(scan, combos)
+            if not scan and not picked:
+                raise UsageError("this run has no scan of its current directions (a scan that stopped, or measure ran again after "
+                                 "it): run --stage scan, or give --layer N / --layers A,B")
+            rec = choose_layers(scan, combos) if scan else None
             layers = picked or rec
             check_layers(layers, dirs.shape[0])
-            run.event("choose", "done", layer=layers[0], layers=layers, recommended=rec[0], recommended_layers=rec, by="user" if picked else "rule")
+            run.event("choose", "done", layer=layers[0], layers=layers, recommended=rec[0] if rec else None, recommended_layers=rec,
+                      by="user" if picked else "rule")
             direction = step_apply(run, args, model_dir, out_dir, dirs, layers, info)
             if args.stage == "apply":
                 run.update_meta(status="done"); return
