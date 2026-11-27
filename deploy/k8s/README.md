@@ -139,7 +139,8 @@ Rancher Desktop 1.x gives containers and pods no GPU. So in `dev` the copilot's 
 serve them instead: it runs on Windows itself and uses the GPU.
 
 1. Install Ollama for Windows (https://ollama.com/download). It starts when you log in and listens on `127.0.0.1:11434`.
-2. Pull the two models, in PowerShell:
+2. Pull the two models, in PowerShell: the copilot's judge (`COPILOT_JUDGE_MODEL` in `base/copilot/copilot.env`,
+   `qwen3:8b`) and the embedding model. For `-EvalJudge` with another `-JudgeModel`, pull that one as well.
    ```powershell
    ollama pull qwen3:8b
    ```
@@ -152,19 +153,27 @@ serve them instead: it runs on Windows itself and uses the GPU.
    ```
 
 - **What `-HostOllama` changes in the script:**
-  - the preflight checks that Ollama answers on `http://127.0.0.1:11434` and has the judge (`-JudgeModel`) and
-    `nomic-embed-text`. If not, it fails with the `ollama pull` commands, and the setup still runs;
+  - the preflight checks that Ollama answers on `http://127.0.0.1:11434` and has the copilot's judge
+    (`COPILOT_JUDGE_MODEL`) and `nomic-embed-text`, with `-EvalJudge` also `-JudgeModel`. What is missing is a warning
+    with its `ollama pull` command, not a failure: the models can download while the image builds, and `-Check` fails
+    if they are still missing then;
   - `-Setup` applies `overlays/dev-host-ollama` (unless `-Overlay` names another) and connects n8n to
-    `-HostOllamaUrl`, by default `http://192.168.127.254:11434`;
-  - `-Check` asks the host's Ollama from the console pod instead of waiting for the in-cluster pulls, checks that a
-    stranger pod cannot reach it, and prints where the loaded models run;
-  - `-EvalJudge` measures the judge on the host's Ollama.
+    `http://192.168.127.254:11434` (`-HostOllamaUrl`). That overlay opens only this address to the pods, so another
+    `-HostOllamaUrl` needs the address changed in `components/host-ollama` as well and `-Overlay`; without `-Overlay`
+    the preflight stops;
+  - `-Check` asks the host's Ollama from the console pod instead of waiting for the in-cluster pulls: the console's
+    `RAG_OLLAMA_URL`, its `COPILOT_JUDGE_MODEL` and `nomic-embed-text` there. It checks that a stranger pod cannot
+    reach it, and prints where the loaded models run;
+  - `-EvalJudge` measures `-JudgeModel` on the host's Ollama, and says so when the console pod gets no answer from it.
 - **What the overlay changes against `dev`** (`components/host-ollama`), and nothing else:
   - the in-cluster Ollama in `lab-copilot` is scaled to 0. Its volume stays, with any models it pulled before:
     `kubectl -n lab-copilot delete pvc ollama` frees the space. `glm-serve`, the abliterated model's own Ollama,
     stays in the cluster;
   - the console's `RAG_OLLAMA_URL` is `http://192.168.127.254:11434`. Knowledge uploads must be embedded by the model
-    n8n searches with, so the console and n8n use the same Ollama. The console's judge list comes from it too;
+    n8n searches with, so the console and n8n use the same Ollama. The console's judge list comes from it too: every
+    chat model on it, without embedding and abliterated models. When the default judge is not there, the list shows it
+    as missing and keeps it chosen, and the console refuses a run with it until it is pulled or another judge is
+    chosen on purpose;
   - two egress openings to `192.168.127.254/32` on TCP 11434: `console-host-ollama` for the console pod and
     `n8n-host-ollama` for the n8n pod.
 - **Without the script:** apply `overlays/dev-host-ollama` instead of `overlays/dev` ([Deploy](#deploy)), and add
@@ -179,6 +188,9 @@ serve them instead: it runs on Windows itself and uses the GPU.
     Jobs and every other pod there may not.
   - The NAT itself has no filter: pods in other namespaces (they have no network policies) and containers started
     outside Kubernetes reach every port on Windows' `127.0.0.1` this way, Ollama included.
+  - The base policies' openings to `0.0.0.0/0` reach Windows through the same NAT, with or without this overlay: the
+    console on 443 and 6443, download Jobs and the in-cluster Ollama on 443, each to whatever listens on that port of
+    Windows' `127.0.0.1`.
 - **Is the GPU used?** On Windows, `ollama ps` shows `GPU` in the PROCESSOR column (`100% GPU`) for a model loaded
   on the GPU. `-Check` and `-EvalJudge` print the same after they have used it.
 - **Back to the in-cluster Ollama:** run the script without `-HostOllama`. It applies `dev`, which scales the in-cluster

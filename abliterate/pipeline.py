@@ -70,9 +70,10 @@ class UsageError(Exception):
 
 
 def parse_layers(text):
-    """--layers: "15,17,19", ranges such as "15-19", or both ("12,15-17") -> the layers in the order given, each once."""
+    """--layers: "15,17,19" (commas or spaces between the numbers, as in the console), ranges such as "15-19", or both
+    ("12,15-17") -> the layers in the order given, each once. "15 17" is two layers, never layer 1517."""
     out = []
-    for part in str(text).replace(" ", "").split(","):
+    for part in re.split(r"\s*,\s*|\s+", re.sub(r"\s*-\s*", "-", str(text).strip())):
         m = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
         if not m:
             raise argparse.ArgumentTypeError(f"not a list of layers: {text!r} (e.g. 15,17,19 or 15-19)")
@@ -196,9 +197,17 @@ def step_scan(run, hm, args, prompts, dirs, la):
         run.event("scan", "layer", layer=l, refusals=nref, cjk_ratio=round(cjk, 3), seconds=round(time.time() - t, 1), generations=gens)
     scan.sort(key=lambda x: (x["refusals"], x["cjk_ratio"], x["layer"]))
     run.save("scan_results.json", scan)
-    combos = scan_combos(run, hm, args, harmful_test, dirs, scan) if getattr(args, "combine", 0) >= 2 else None
+    if getattr(args, "combine", 0) >= 2:
+        combos = scan_combos(run, hm, args, harmful_test, dirs, scan)
+    else:
+        combos = None
+        stale = os.path.join(run.run_dir, "scan.json")
+        if os.path.isfile(stale):          # scanned again without --combine: the earlier pass tested the earlier scan's layers
+            os.remove(stale)
+            run.log("scan: removed scan.json, the --combine pass of the earlier scan")
+    # "top_combos", not "combos": the console keeps the scan's 'combo' events under that name
     run.event("scan", "done", top=[(s["layer"], s["refusals"]) for s in scan[:5]],
-              **({"combos": [(c["layers"], c["refusals"]) for c in combos]} if combos else {}))
+              **({"top_combos": [(c["layers"], c["refusals"]) for c in combos]} if combos else {}))
     return scan, baseline, n_base, combos
 
 

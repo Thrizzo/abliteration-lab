@@ -82,8 +82,9 @@ jobs:
           python3 -m unittest discover -s deploy/n8n -v
           # the console's tests that need node, which the image does not have (they skip there): the hints read names as
           # the gate does, the saved engagement through the real gate, the GUI's own code (app.js) on runs and hints, and
-          # tab 4 Pentest: the scripts parse, its own code on a stand-in page (test_gui_tabs)
-          (cd app/tests && python3 -m unittest -v -k test_hint_coverage -k test_n8n_ -k test_gui_ test_engagement test_copilot_runs test_gui_tabs)
+          # tab 4 Pentest: the scripts parse, its own code on a stand-in page (test_gui_tabs); the model pickers and the
+          # layer field (test_gui_models)
+          (cd app/tests && python3 -m unittest -v -k test_hint_coverage -k test_n8n_ -k test_gui_ test_engagement test_copilot_runs test_gui_tabs test_gui_models)
 
       - name: Build the console image (CPU torch)
         run: docker build -f deploy/Dockerfile --build-arg TORCH_FLAVOR=cpu -t ghcr.io/thrizzo/redteam-llm-lab:ci .

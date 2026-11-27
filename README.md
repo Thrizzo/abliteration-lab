@@ -39,7 +39,7 @@ in GLM-5.2) that every layer reads and adds to. Abliteration works on that strea
    differ, and the direction is gone from the saved weights (max |r·W′| below 0.05, typically 1e-3).
 
 **Several directions.** Sometimes one layer's direction leaves a few refusals that another layer's direction catches.
-`--layers 15,17,19` (ranges such as `15-19` work too) removes the directions of all of them at once. They are not parallel,
+`--layers 15,17,19` (or `15 17 19`; ranges such as `15-19` work too) removes the directions of all of them at once. They are not parallel,
 so the edit removes the subspace they span: a QR decomposition turns them into an orthonormal basis Q, and every writer
 becomes `W′ = W − Q (Qᵀ W)`. Removing them one after the other would not do it: each step would put back part of the
 directions removed before. `--combine 3` makes the scan also test the best 2 and the best 3 layers together (one more
@@ -72,7 +72,8 @@ Supported models (`arch.py`): GLM-Edge (`glm`), GLM-4 0414 / glm-4-9b-chat-hf (`
 through the norm weight), GLM-4.1V / 4.5V / 4.6V text decoders, GLM-4.5 / 4.6 MoE (`glm4_moe`, `glm4_moe_lite`), GLM-5 / 5.1 /
 5.2 / 5.3 (`glm_moe_dsa`, MoE + sparse attention; the DSA indexer is left untouched), GLM-5.3-Flash (`glm5_next`: hybrid
 linear + sparse attention, MoE, four residual streams per token; see section 6), and legacy ChatGLM checkpoints behind
-`--trust-remote-code`. Checkpoints may be bf16, fp16/fp32 or FP8 block-scaled. The vision models (GLM-4.xV, GLM-5.3-Flash)
+`--trust-remote-code`. Checkpoints may be bf16, fp16/fp32 or FP8 block-scaled (the blocks of `weight_block_size`, 128 × 128,
+a last partial block included; a scale in another shard than its weight stays in the shard the index names). The vision models (GLM-4.xV, GLM-5.3-Flash)
 load through `AutoModelForImageTextToText`; only their text decoder is measured and edited.
 
 Verified end to end on an RTX 5080 (16 GB): GLM-Edge-4B (layer 16, 15/16 → 1/16 refusals, validation PASS, Ollama A/B

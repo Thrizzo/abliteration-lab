@@ -11,7 +11,7 @@ from safetensors import safe_open
 
 from .arch import classify, post_norm_name
 from .data import count_refusals
-from .edit import basis, expand_scale, fold, residual_component
+from .edit import basis, block_size, expand_scale, fold, residual_component
 
 
 def _index(folder):
@@ -31,6 +31,7 @@ def compare_weights(base_dir, abl_dir, direction, log=print, max_tensors=None, p
     direction norm(g * r), or the folded basis (edit.fold)."""
     bi, ai = _index(base_dir), _index(abl_dir)
     Q = basis(direction, log)[0]
+    block = block_size(abl_dir)
     files = sorted(set(bi.values()) | set(ai.values()))
     handles = {f: safe_open(f, "pt").__enter__() for f in files}
     changed, max_rw, n = [], 0.0, 0
@@ -48,7 +49,7 @@ def compare_weights(base_dir, abl_dir, direction, log=print, max_tensors=None, p
                 if ta.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
                     sn = next((s for s in (k + "_scale_inv", k.replace(".weight", ".weight_scale_inv")) if s in ai), None)
                     if sn:
-                        Wf = Wf * expand_scale(handles[ai[sn]].get_tensor(sn), ta.shape)
+                        Wf = Wf * expand_scale(handles[ai[sn]].get_tensor(sn), ta.shape, block)
                 rr = Q
                 if post_norm and kind != "embed":
                     pn = post_norm_name(k, kind)

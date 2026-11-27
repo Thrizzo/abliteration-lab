@@ -30,8 +30,8 @@ const layersOf = x => (Array.isArray(x?.layers) && x.layers.length) ? x.layers :
 const layerNums = l => [...l].sort((a,b)=>a-b).join('+');
 const layerText = x => { const l=layersOf(x); return l.length>1 ? 'layers '+layerNums(l) : (l.length ? 'layer '+l[0] : ''); };
 const sameLayers = (a, b) => !!(a && b) && a.length===b.length && layerNums(a)===layerNums(b);
-// "15, 19" or "15-17" (as the CLI's --layers): the layer numbers in that order, each once; null when it is not such a list
-const parseLayers = t => { const out=[]; for(const p of String(t||'').split(/[\s,]+/).filter(Boolean)){ const m=p.match(/^(\d+)(?:-(\d+))?$/); if(!m) return null;
+// "15, 19", "15 19" or "15-17" (as the CLI's --layers): the layer numbers in that order, each once; null when it is not such a list
+const parseLayers = t => { const out=[]; for(const p of String(t||'').replace(/\s*-\s*/g,'-').split(/[\s,]+/).filter(Boolean)){ const m=p.match(/^(\d+)(?:-(\d+))?$/); if(!m) return null;
   const a=+m[1], b=m[2]!=null?+m[2]:a; if(b<a||b-a>512) return null; for(let x=a;x<=b;x++) if(!out.includes(x)) out.push(x); } return out; };
 // the scan's --combine pass (scan.json): the best layers tested together. chosen marks the applied set, use adds buttons that
 // put a combination into the layer choice, answers ({prompts, baseline}) adds every answer per combination.
@@ -604,19 +604,27 @@ const cpStore = { get(k, d){ try{ const v=localStorage.getItem('cp.'+k); return 
 const sameModel = (a, b) => String(a||'').replace(/:latest$/,'') === String(b||'').replace(/:latest$/,'');
 
 // ---- models: operators from glm-serve, judges from the copilot's Ollama (never abliterated)
+// The judge vetoes the abliterated operator. When its default is not on that Ollama (with -HostOllama it is the owner's
+// own Ollama for Windows, with whatever models it holds), the list shows the default as missing and keeps it chosen
+// instead of quietly taking the first chat model there: the console then refuses a run with it until it is pulled or
+// another judge is chosen on purpose. Returns true when the judge's default is missing.
 function cpFillSelect(sel, role, list, def){
-  const names = list.length ? list : [def];
+  const missing = role==='judge' && list.length>0 && !!def && !list.some(n => sameModel(n, def));
+  const names = missing ? [def, ...list] : (list.length ? list : [def]);
   const want = cpStore.get('model.'+role, '');
   const pick = names.find(n => want && n===want) || names.find(n => sameModel(n, def)) || names[0];
-  sel.innerHTML = names.map(n => `<option value="${escA(n)}"${n===pick?' selected':''}>${esc(n)}${sameModel(n, def)?' (default)':''}</option>`).join('');
+  sel.innerHTML = names.map(n => `<option value="${escA(n)}"${n===pick?' selected':''}>${esc(n)}${sameModel(n, def)?(missing?' (default, not on this Ollama)':' (default)'):''}</option>`).join('');
+  return missing;
 }
 async function cpModelsLoad(fresh){
   let m; try{ m=await api('/copilot/models'+(fresh?'?fresh=true':'')); }catch(e){ $('#cpOpInfo').innerHTML=`<span class="vuln">${esc(e.message)}</span>`; return; }
   CP.models=m;
   cpFillSelect($('#cpOpModel'), 'operator', m.operator.models||[], m.operator.default);
-  cpFillSelect($('#cpJudgeModel'), 'judge', m.judge.models||[], m.judge.default);
+  const judgeMissing = cpFillSelect($('#cpJudgeModel'), 'judge', m.judge.models||[], m.judge.default);
   const ex = (m.judge.excluded||[]).map(x => `${esc(x.name)} (${esc(String(x.why).split(':')[0])})`).join(', ');
-  $('#cpJudgeInfo').innerHTML = (m.judge.error ? `<span class="vuln">${esc(m.judge.error)}</span>` : '') + (ex ? `not usable as judge: ${ex}` : '');
+  $('#cpJudgeInfo').innerHTML = (m.judge.error ? `<span class="vuln">${esc(m.judge.error)}</span>` : '')
+    + (judgeMissing ? `<span class="vuln">${esc(m.judge.default)}, the default judge, is not on the copilot's Ollama: pull it there (<span class="mono">ollama pull ${esc(m.judge.default)}</span>) or choose another judge on purpose.</span> ` : '')
+    + (ex ? `not usable as judge: ${ex}` : '');
   if(m.embeddings && m.embeddings.model)
     $('#cpEmbedInfo').innerHTML = `<span class="mono">${esc(m.embeddings.model)}</span> · turns your writeups into vectors for retrieval · writes no text, so it is not a choice here`;
   try{ CP.serving=await api('/serving'); }catch(e){ CP.serving=null; }

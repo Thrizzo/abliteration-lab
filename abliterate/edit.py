@@ -120,22 +120,53 @@ def residual_component(Wf, Q, kind):
     return (Q.T @ Wf).abs().max().item()
 
 
-def expand_scale(scale, shape):
-    """Broadcast a block/row/tensor scale to the weight's shape (block size inferred per dim)."""
+def block_size(model_dir):
+    """The FP8 block size (rows, cols) a checkpoint declares in quantization_config.weight_block_size: 128 x 128 in the
+    GLM-5.x and DeepSeek FP8 checkpoints, and (128, 128) when it declares none."""
+    try:
+        with open(os.path.join(model_dir, "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return (128, 128)
+    q = cfg.get("quantization_config") or (cfg.get("text_config") or {}).get("quantization_config") or {}
+    b = q.get("weight_block_size")
+    return tuple(int(x) for x in b[-2:]) if isinstance(b, (list, tuple)) and len(b) >= 2 else (128, 128)
+
+
+def _block(n, s, block):
+    """The length of one block when a scale grid has s entries along a dimension of n: the declared block size when
+    s = ceil(n / block), which counts a last, partial block (n = 300 has blocks of 128, 128 and 44); else ceil(n / s).
+    Inferring ceil(n / s) alone gives 100 for n = 300, s = 3: blocks a loader does not use."""
+    if s == n:
+        return 1
+    return block if block and -(-n // block) == s else -(-n // s)
+
+
+def _blocks_of(shape, block):
+    """The block size for each dim of a weight: block (rows, cols) for its last two dims, none for a leading dim (experts)."""
+    pair = (block, block) if block is None or isinstance(block, int) else tuple(block)
+    lead = len(shape) - 2
+    return [pair[d - lead] if d >= lead else None for d in range(len(shape))]
+
+
+def expand_scale(scale, shape, block=(128, 128)):
+    """Broadcast a block/row/tensor scale to the weight's shape. block: the checkpoint's block size (block_size)."""
     s = scale.float()
     if s.dim() == 0:
         return s.expand(shape)
+    blocks = _blocks_of(shape, block)
     for dim in range(s.dim()):
         if s.shape[dim] != shape[dim]:
-            rep = -(-shape[dim] // s.shape[dim])
+            rep = _block(shape[dim], s.shape[dim], blocks[dim])
             s = s.repeat_interleave(rep, dim=dim).narrow(dim, 0, shape[dim])
     return s
 
 
-def requantize(Wf, scale_shape):
+def requantize(Wf, scale_shape, block=(128, 128)):
     """Per-block absmax requantization to float8_e4m3fn with the same scale layout as before."""
     shape = Wf.shape
-    blocks = [-(-shape[i] // scale_shape[i]) if i < len(scale_shape) and scale_shape[i] > 0 else shape[i] for i in range(len(shape))]
+    per_dim = _blocks_of(shape, block)
+    blocks = [_block(shape[i], scale_shape[i], per_dim[i]) if i < len(scale_shape) and scale_shape[i] > 0 else shape[i] for i in range(len(shape))]
     # pad to block multiples, reshape into blocks, absmax per block
     pad = [b * s - n for n, b, s in zip(shape, blocks, scale_shape)]
     Wp = torch.nn.functional.pad(Wf, [v for p in reversed(pad) for v in (0, p)])
@@ -146,7 +177,7 @@ def requantize(Wf, scale_shape):
         v = Wp.reshape(scale_shape[0], blocks[0], scale_shape[1], blocks[1], scale_shape[2], blocks[2])
         amax = v.abs().amax(dim=(1, 3, 5))
     scale = (amax / FP8_MAX).clamp_min(1e-12)
-    q = (Wf / expand_scale(scale, shape)).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+    q = (Wf / expand_scale(scale, shape, block)).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
     return q, scale
 
 
@@ -157,6 +188,7 @@ class Editor:
         self.src, self.dst, self.log, self.progress = src_dir, dst_dir, log, progress
         self.Q, self.kept = basis(direction, log, names)
         self.post_norm = post_norm
+        self.block = block_size(src_dir)          # FP8: the block the scales cover (128 x 128)
         idx_path = os.path.join(src_dir, "model.safetensors.index.json")
         if os.path.isfile(idx_path):
             self.index = json.load(open(idx_path, encoding="utf-8"))
@@ -191,11 +223,11 @@ class Editor:
         if W.dtype == torch.float8_e4m3fn or W.dtype == torch.float8_e5m2:
             if scale is None:
                 raise RuntimeError(f"{name}: fp8 tensor without a scale tensor")
-            Wf = W.float() * expand_scale(scale, W.shape)
+            Wf = W.float() * expand_scale(scale, W.shape, self.block)
             Wf = orth_rows(Wf, Q) if kind == "embed" else orth_out(Wf, Q)
-            q, new_scale = requantize(Wf, tuple(scale.shape))
+            q, new_scale = requantize(Wf, tuple(scale.shape), self.block)
             self.stats["fp8"] += 1
-            check = residual_component(q.float() * expand_scale(new_scale, W.shape), Q, kind)
+            check = residual_component(q.float() * expand_scale(new_scale, W.shape, self.block), Q, kind)
             return q, new_scale.to(scale.dtype), check
         Wf = W.float()
         if W.dim() == 1:                       # bias
@@ -206,10 +238,33 @@ class Editor:
         out = out.to(W.dtype)
         return out, None, residual_component(out.float(), Q, kind)
 
+    def _scale_name(self, k, keys=()):
+        """The scale tensor of weight k: in this shard (keys) or, with an index, in any shard; None when it has none."""
+        return next((s for s in (k + "_scale_inv", k.replace(".weight", ".weight_scale_inv"), k + "_scale", k.replace(".weight", ".weight_scale"))
+                     if s != k and (s in keys or (self.weight_map and s in self.weight_map))), None)
+
+    def _edit_cross_shard(self):
+        """FP8 weights whose scale lives in another shard (none in the GLM-5.x checkpoints, which keep each pair in one
+        shard) are edited before any shard is written: the new scale then goes into the shard the index names for it,
+        and no tensor ends up in two shards with the index pointing at the old scale."""
+        early, new_scales = {}, {}
+        for k, shard in (self.weight_map or {}).items():
+            kind = classify(k)
+            sn = self._scale_name(k) if kind in ("embed", "attn_out", "mlp_out") else None
+            if not sn or self.weight_map[sn] == shard:
+                continue
+            W = self._tensor(k)
+            if W.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+                continue
+            out, new_scale, check = self._edit(k, W, kind, self._tensor(sn))
+            early[k], new_scales[sn] = (out, check), new_scale
+        return early, new_scales
+
     # -------------------------------------------------------------- run
     def run(self):
         os.makedirs(self.dst, exist_ok=True)
         t0 = time.time()
+        early, new_scales = self._edit_cross_shard()
         for si, shard in enumerate(self.shards):
             t = time.time()
             tensors, scales_done = {}, set()
@@ -220,16 +275,21 @@ class Editor:
                     if k in tensors:
                         continue
                     kind = classify(k)
-                    if kind in ("embed", "attn_out", "mlp_out"):
-                        W = f.get_tensor(k)
-                        scale_name = next((s for s in (k + "_scale_inv", k.replace(".weight", ".weight_scale_inv"), k + "_scale", k.replace(".weight", ".weight_scale"))
-                                           if s != k and (s in keys or (self.weight_map and s in self.weight_map))), None)
-                        scale = (f.get_tensor(scale_name) if scale_name in keys else self._tensor(scale_name)) if scale_name else None
-                        out, new_scale, check = self._edit(k, W, kind, scale)
-                        tensors[k] = out.contiguous()
-                        if new_scale is not None:
-                            tensors[scale_name] = new_scale.contiguous()
-                            scales_done.add(scale_name)
+                    if k in new_scales:                # the scale of an FP8 weight in another shard, edited up front
+                        tensors[k] = new_scales[k].contiguous()
+                    elif kind in ("embed", "attn_out", "mlp_out"):
+                        if k in early:
+                            out, check = early.pop(k)
+                            tensors[k] = out.contiguous()
+                        else:
+                            W = f.get_tensor(k)
+                            scale_name = self._scale_name(k, keys)
+                            scale = (f.get_tensor(scale_name) if scale_name in keys else self._tensor(scale_name)) if scale_name else None
+                            out, new_scale, check = self._edit(k, W, kind, scale)
+                            tensors[k] = out.contiguous()
+                            if new_scale is not None:
+                                tensors[scale_name] = new_scale.contiguous()
+                                scales_done.add(scale_name)
                         self.stats["changed"].append(k)
                         self.stats["kinds"][kind] = self.stats["kinds"].get(kind, 0) + 1
                         self.stats["max_rw"] = max(self.stats["max_rw"], check)

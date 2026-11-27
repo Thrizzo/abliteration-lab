@@ -6,7 +6,8 @@
 #   1. download / scan / apply / validate / deploy each run as a Job; the GUI's status, log and run endpoints follow them
 #   2. Job hygiene: only the download Job may reach the internet, only deploy may reach the model server
 #   3. every run keeps its own model folder and its own GGUF
-#   4. Promote run 1, Promote run 2 (different layer: glm-serve's model changes), Rollback (run 1's model is back)
+#   4. Promote run 1, Promote run 2 (layers 1+2 removed together after a --combine scan: glm-serve's model changes),
+#      Rollback (run 1's model is back)
 #   5. Stop deletes a running Job
 #   6. the kill switch through the login: cross-site and body-less POSTs refused; Isolate cuts traffic while the
 #      model runs, Release restores it; Kill removes the container from the node within seconds and nothing restarts
@@ -121,15 +122,18 @@ check "promote run 1 finished without error" serving_done
 check "serving reports run 1" test "$(API /serving | jq -r .current.run_id)" = "$RUN1"
 D1=$(served_digest)
 check "glm-serve serves glm-abl after promote" test -n "$D1"
-read -r RUN2 code < <(run_stage "{\"engine\": \"abliterate\", \"stage\": \"scan\", \"model\": \"/workspace/src/tiny-glm\", $SMALL}")
+read -r RUN2 code < <(run_stage "{\"engine\": \"abliterate\", \"stage\": \"scan\", \"model\": \"/workspace/src/tiny-glm\", \"combine\": 2, $SMALL}")
 check "second run scanned ($RUN2)" test "$code" = 0 -a "$RUN2" != "$RUN1"
-read -r _ code < <(run_stage "{\"engine\": \"abliterate\", \"stage\": \"apply\", \"run_id\": \"$RUN2\", \"layer\": 2}")
-check "second run applied (layer 2)" test "$code" = 0
+check "its scan also tested its best two layers together (--combine 2)" test "$(API "/runs/$RUN2" | jq -r '.scan.combos | length')" = 1
+read -r _ code < <(run_stage "{\"engine\": \"abliterate\", \"stage\": \"apply\", \"run_id\": \"$RUN2\", \"layers\": [1, 2]}")
+check "second run applied (layers 1+2, one subspace)" test "$code" = 0
+check "run 2 removed two directions" test "$(API "/runs/$RUN2" | jq -r '"\(.meta.layers | join(",")) \(.apply.stats.directions)"')" = "1,2 2"
 read -r _ code < <(run_stage "{\"engine\": \"abliterate\", \"stage\": \"deploy\", \"run_id\": \"$RUN2\"}")
 check "second run deployed" test "$code" = 0
 check "run 1's model folder is still there" console test -f "/workspace/runs/abliterate_$RUN1/model/config.json"
 check "promote run 2 accepted" post_ok /serving/promote "{\"run_id\": \"$RUN2\"}"
 check "promote run 2 finished without error" serving_done
+check "serving reports run 2 with layers 1+2" test "$(API /serving | jq -r '"\(.current.run_id) \(.current.layers | join(","))"')" = "$RUN2 1,2"
 D2=$(served_digest)
 check "glm-serve's model changed with run 2 (per-run GGUF)" test -n "$D2" -a -n "$D1" -a "$D2" != "$D1"
 check "rollback accepted" post_ok /serving/rollback '{}'

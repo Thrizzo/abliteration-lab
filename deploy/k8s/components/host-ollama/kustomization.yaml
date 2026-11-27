@@ -8,7 +8,10 @@
 #   - the console embeds knowledge and lists judges with the host's Ollama (RAG_OLLAMA_URL). The vectors must come from
 #     the embedding model n8n searches with, so n8n's Ollama credential points there as well:
 #       python deploy/n8n/connect_console.py ... --ollama-url http://192.168.127.254:11434
-#   - the n8n and console pods may reach 192.168.127.254 on TCP 11434 (network-policies.yaml); nothing else may.
+#   - in lab and lab-copilot only the n8n and console pods may reach 192.168.127.254 on TCP 11434
+#     (network-policies.yaml). Pods in other namespaces and containers outside Kubernetes are not filtered: the NAT
+#     forwards every port (deploy/k8s/README.md, "GPU: Ollama for Windows").
+#   - the address is fixed here and in network-policies.yaml; rancher-dev.ps1 -HostOllamaUrl must match it.
 # Used by overlays/dev-host-ollama. deploy/k8s/tests/rancher-dev.ps1 -HostOllama sets it up and checks it.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
