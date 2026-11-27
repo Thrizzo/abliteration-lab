@@ -808,7 +808,7 @@
   "patterns": [
    "Backup"
   ],
-  "command": "smbmap -H 10.10.10.20 -u backup -p 'Backup2024'",
+  "command": "smbmap -H 10.10.10.20 --no-write-check -u backup -p 'Backup2024'",
   "expect": "pass",
   "reason_contains": "",
   "why": "A user name equal to a protected share name."
@@ -889,7 +889,7 @@
   "patterns": [
    "/backup/"
   ],
-  "command": "feroxbuster -u http://10.10.10.5 -n -w /usr/share/wordlists/dirb/common.txt",
+  "command": "feroxbuster -u http://10.10.10.5 -n -q -w /usr/share/wordlists/dirb/common.txt",
   "expect": "pass",
   "reason_contains": "",
   "why": "feroxbuster -n does not recurse."
@@ -1057,7 +1057,7 @@
   "patterns": [],
   "command": "nmap -script vuln -p80 10.10.10.5",
   "expect": "human",
-  "reason_contains": "nmap NSE beyond safe/default",
+  "reason_contains": "nmap NSE beyond default (active-recon tier or human)",
   "why": "Prerequisite fix found here: nmap reads -script like --script; the passive check only knew --script. Auto-runs today."
  }
 ]

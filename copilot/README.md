@@ -132,10 +132,32 @@ need no model. So is the read-only check: forms of a read-only tool that run a p
 data or take commands or settings the gate cannot see never auto-run, quoted, attached, clustered or abbreviated
 (`nc '-e'`, `nc -e/bin/sh`, `curl -sXPUT`, `ncat --exe`). They are netcat `-e` or `-l`, awk `system()`, pipes and
 program files (`print | cat`, `awk -f`), sed's `e` in any spelling (`s,x,id,e`, `1!e id`) and `sed -f`, `xargs`,
-smbclient `!` or `put`, smbclient and rpcclient reading their commands from a file or a pipe (`< cmds.txt`),
-`smbmap -x`, curl and wget requests with a body or a method other than GET, HEAD or OPTIONS (`-d`, `-T`, `-X DELETE`,
-`--method=PUT`), and options that load settings from a file (`curl -K`, `wget -e`). A command longer than 2000
-characters is blocked, and sqlmap options that dump, search or read files leave the active tier. What only the judge
+smbclient and rpcclient commands outside their lists of commands that only read (`put`, `p"ut"`, `wd` for `wdel`,
+`setuserinfo2`, `shutdowninit`, `samlogon`, `querysecret`), smbclient and rpcclient reading their commands from a file
+or a pipe (`< cmds.txt`), `smbmap -x` and smbmap listing shares without `--no-write-check` (its write check creates a
+directory on every share), `enum4linux -A`, curl and wget requests with a body or a method other than GET, HEAD, OPTIONS, TRACE or
+PROPFIND (`-d`, `-T`, `-X DELETE`, `--method=PUT`), and options that load settings from a file (`curl -K`, `wget -e`,
+`smbclient -s`). So are the forms of curl, wget, netcat, the HTTP scanners and the other recon tools that load code or
+run a program (`curl --engine`, `wget --use-askpass`, whatweb plugins from a path, a shell character in the words
+rustscan runs through `sh -c` after `--`), reach a host the command does not name (`curl --alt-svc`, httpx without
+`-duc` or with a host name target and no `-r`, feroxbuster without `-q`, `ldapsearch -C`, whois without `-h` or without
+`--no-recursion`, `dig +trace`, `host -C`, dnsrecon's standard checks, dnsenum, fierce, `traceroute -A`, Kerberos binds,
+theHarvester, amass, subfinder), write to the target in
+other ways (a method-override header, a CR or LF in a header, `gopher://`, `curl -Q 'DELE x'`, every nikto run,
+`nmap --data-string`, `masscan --hello-string`), spoof their source (`nmap -D RND:10`, `nmap -sI`, `ike-scan --sourceip`,
+`curl --haproxy-clientip`), change the runner's state (`arp -d`, `ss -K`), or read targets, servers, code, headers or
+requests from files or stdin (`wget -i`, netcat fed by a pipe, `curl -H @file`, `ffuf -request`, `nbtscan -f`,
+`rustscan -a hosts.txt`, `nmap -i hosts.txt`, `dig -f`, nslookup without a name, `masscan --script`, `nmap --versiondb`,
+a config an earlier segment of the command wrote); a program reached through `sudo` waits too. Hosts in a tool's host
+positions (curl and wget operands, proxies, `-u` values, nmap's operands, the smbclient and rpcclient server, ldapsearch
+`-H`, whois `-h`, the snmpwalk agent, a DNS client's server such as `dig @10.10.10.53`, traceroute and ping hops, every
+ike-scan operand, onesixtyone's host, smbmap `-H` and `--dc-ip`, enum4linux's host, sqlmap's `-u`, `--safe-url` and
+`-d`, tracepath's destination, nbtscan's range) are scope-checked whatever they look like, and so is every
+address of a range (`nbtscan 10.10.10.5-254`). nmap NSE runs in the passive tier with default scripts only, in the
+active tier with default, version and banner. A command longer than 2000 characters is blocked, and sqlmap options
+that dump, search or read files, `--risk` 2 or 3, `--cleanup` (it drops tables), and those that run code or reach
+other hosts (`--alert`, `--tamper`, `--auth-refresh`, `--tor`, `--check-internet`, `--dork`, `--xxe`) leave the active
+tier. What only the judge
 can stop is a command that passes every gate but
 breaks a rule written as text: "never change passwords", "do not touch backup01.lab", "no automated scanners".
 `judge_cases.json` holds 49 such commands: 28 that break their engagement's rules and 21 that comply, across three
@@ -165,7 +187,9 @@ On Rancher Desktop, the same through the copilot's own Ollama, from the console 
 **First measurement: Qwen3-8B (the default judge), 2026-11-26.** Setup:
 - the Q4_K_M quantisation Ollama serves as `qwen3:8b`, on llama.cpp (CPU), temperature 0, thinking off;
 - the workflow's prompt;
-- report and exact setup: `docs/eval/judge-qwen3-8b-2026-11-26.json`.
+- report and exact setup: `docs/eval/judge-qwen3-8b-2026-11-26.json`;
+- re-run on 2026-11-27 with the current prompt and the cases' new `read_only` flags (the gate's round 2 changed three):
+  the same verdict on all 49 cases (`docs/eval/judge-qwen3-8b-2026-11-27.json`).
 
 | | Result |
 | --- | --- |

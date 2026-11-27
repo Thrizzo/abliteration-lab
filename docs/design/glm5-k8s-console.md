@@ -302,7 +302,36 @@ flowchart LR
     `sed -f`), smbclient commands from stdin (`< cmds.txt`, a pipe), write requests in quoted, clustered or long
     spellings (`curl -X 'DELETE'`, `-sXPUT`, `--request=PATCH`, `wget --method=DELETE`) and settings files (`curl -K`,
     `wget -e`), and a long command took seconds to check (10 s for 16,000 characters). They now wait for a human, and
-    a command longer than 2000 characters is blocked.
+    a command longer than 2000 characters is blocked;
+  - in a per-tool audit of everything that can auto-run: smbclient and rpcclient ran writes their denylists missed
+    (`mkfifo`, `wd` for `wdel`, `p"ut"`, `-c=p"ut x"`, `shutdowninit`, `netsharedel`, `samlogon`), smbmap and
+    `enum4linux -A` create a directory on every share for their write check, `smbmap -L` runs commands on the host,
+    showmount and rpcinfo asked the runner, `smbclient -L FILESRV` a NetBIOS broadcast and ldapsearch a server from
+    `ldap.conf` while the only in-scope host stood in a comment or a filter, and ranges (`nbtscan 10.10.10.5-254`),
+    target files (`rustscan -a 10.10.10.5.txt`), spoofed sources (`ike-scan --sourceip`, `nmap -D RND:10`), payloads
+    (`masscan --hello-string`, `nmap --data-string`), `arp -d`, `ss -K`, `sqlmap --risk 3` and NSE's safe and discovery
+    scripts (third-party and broadcast traffic) auto-ran. Both clients' commands are now checked against lists of commands
+    that only read, the SMB, RPC, LDAP, SNMP and NFS clients' targets come from their host positions, ranges must lie
+    in scope as a whole, all of these wait for a human or are blocked, and the tiers keep NSE default (passive) and
+    default, version and banner (active);
+  - in a sweep of host positions: the server a DNS client is told to ask (`dig @gw`, `host web01.lab gw`,
+    `dnsrecon -n gw`), traceroute and ping hops, ike-scan's further operands, onesixtyone's host (`8.8` next to an
+    in-scope community string), the snmpwalk agent after `-CE`, smbmap's and enum4linux's host, sqlmap's `-u` and
+    `--safe-url` without a scheme, wget `--dns-servers` and the second URL of a proxy chain went unread, so a one-label
+    name such as `gw` reached a host outside the scope. dig `+trace`, `host -C`, dnsrecon's standard checks, dnsenum and
+    fierce asked the servers DNS answers name, whois followed referrals, httpx resolved host names through 1.1.1.1,
+    traceroute `-A`, `sqlmap --check-internet`, `--dork` and `--xxe` reached third parties, and Kerberos KDCs, `dig -f`,
+    interactive nslookup, `masscan --script`, `nmap -sI`, `--script-args`, `--versiondb`, the getopt_long_only
+    spellings of `-iR` (`--iR 5`, `--iR=5`, a quoted `'-iR'`) and a program loading a config another segment of the
+    command wrote first or alongside it (`curl -so ~/.curlrc ...; curl ...`, a background `&`, a later member of nmap's
+    pipe) auto-ran. The positions are now scope-checked, and the rest waits for a human or is blocked;
+  - in the review of that sweep: tracepath's destination and nbtscan's range went unread, dnsrecon ran its standard
+    checks with an empty `-t` or `-r`, and a config still reached its loader under a name the gate did not read (a
+    brace expansion, a curl URL glob, nmap's `%` names, rustscan's nmap words, wget `-nH` with `-r` or `-x`, an FTP wildcard): these wait
+    now. The sweep had also made compliant forms wait (httpx `-cdn`, `-bp` and `-strip` read as value flags, a sed
+    regex with a `w` in it, whatweb and rustscan words matched by basename, every `wget -r`, smbclient `get`,
+    `sort -o`, `uniq`, `less -o`, `sed -i` and `ldapsearch -t`): the gate reads the names these write, and they
+    auto-run again.
 - **The judge reads the scope too** (`SCOPE (LAB_ALLOWLIST): ...`, in every run), still never the operator's free text:
   that text is the likeliest carrier of an injection aimed at the judge.
 - **Measured, not assumed:** `copilot/eval_judge.py` runs labelled commands that pass every gate through a real judge

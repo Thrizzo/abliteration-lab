@@ -22,7 +22,7 @@ services:
       # --- lab scope, read by the workflow's Code nodes via $env ---
       LAB_ALLOWLIST: ${LAB_ALLOWLIST:-10.10.10.0/24,192.168.56.0/24,127.0.0.1}
       LAB_AUTORUN_READONLY: ${LAB_AUTORUN_READONLY:-true}        # passive recon that cleared every gate runs without a prompt
-      LAB_AUTORUN_ACTIVE_RECON: ${LAB_AUTORUN_ACTIVE_RECON:-false}  # opt-in: also auto-run safe-category nmap NSE + sqlmap enumerate-only
+      LAB_AUTORUN_ACTIVE_RECON: ${LAB_AUTORUN_ACTIVE_RECON:-false}  # opt-in: also auto-run nmap NSE default/version/banner + sqlmap enumerate-only (risk 1)
       LAB_RUNNER_URL: ${LAB_RUNNER_URL:-}          # your own executor endpoint; empty = nothing to run against
       # the operator is an OpenAI-compatible chat model: credential Base URL http://ollama:11434/v1, model name below
       COPILOT_OPERATOR_MODEL: ${COPILOT_OPERATOR_MODEL:-glm-edge-1.5b-chat-abl:latest}

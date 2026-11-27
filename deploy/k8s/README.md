@@ -358,7 +358,7 @@ the program, folded and decoded: case, fullwidth letters, percent-encoding (`%63
   smbclient `mget`, curl `[1-9]` globs, NSE scripts beyond default, version and banner, sqlmap dumps), that reads its
   names at run time (`wget -i`, config files, pipes, `<` files), or that saves a download under a name the server picks
   (`curl -J -O`, `wget --content-disposition`), which can be a dotfile. A wordlist run without recursion (gobuster, ffuf
-  without `-recursion`, feroxbuster `-n`, dirb `-r`, wfuzz without `-R`) still passes.
+  without `-recursion`, feroxbuster `-n -q` with a system wordlist, dirb `-r`, wfuzz without `-R`) still passes.
 - **Too long to check:** a command longer than 2000 characters is blocked before the gate reads it, with or without a
   list. The console refuses a typed command that long; the limit catches the operator model's proposals.
 - **An empty list changes nothing.**
@@ -411,17 +411,20 @@ The console never applies a hint by itself.
   with the judge. LDAP DNs cannot be entered.
 - **The folder behind a share.** `HR$` protects the share's name. An admin share (`D$\Shares\HR`) or a parent share
   reaches the same files under the folder's own name: list that folder too.
-- **Wordlist discovery.** gobuster, ffuf without `-recursion`, feroxbuster `-n`, dirb `-r` and wfuzz without `-R`
-  request names from a wordlist the gate cannot read, so a protected file at the web root can still be requested.
+- **Wordlist discovery.** gobuster, ffuf without `-recursion`, feroxbuster `-n -q` (system wordlists only), dirb `-r`
+  and wfuzz without `-R` request names from a wordlist the gate cannot read, so a protected file at the web root can
+  still be requested.
   Response bodies are not kept; recursion, saved responses and names read from a file wait for you.
 - **Bulk forms of other programs.** The bulk and run-time rules cover the programs that can auto-run. Every other
   program waits for you anyway, and you are the check.
 - **Later commands.** Each command is judged on its own, and a file an earlier command wrote (an rc file, a config, a
-  list) can change what a later one does. The gate sends dotfile writes, downloads the server names and config
-  variables to you; the rest is the runner's job: a fresh HOME and working directory for every command
+  list) can change what a later one does. Within one command, a program that loads settings, plugins or targets from
+  HOME or the working directory (curl, wget, dig, nmap, httpx and others) waits for you when another segment writes
+  such a file before or while it runs (a background `&`, nmap's own pipe), list or not; the gate also sends dotfile writes, downloads the server names and config variables to
+  you. Across commands the rest is the runner's job: a fresh HOME and working directory for every command
   ([runner contract](../n8n/README.md#runner-contract)).
 - **A bash subset.** Aliases, functions and `eval` strings are not expanded; `$VAR` and `$(...)` values are unknown, and
-  such commands wait for you already. A runner that does not use bash would read comments and quotes differently.
+  such commands never auto-run already. A runner that does not use bash would read comments and quotes differently.
 - **Encodings decoded later.** Three rounds of percent-encoding are decoded, and deeper nesting waits for you. A base64
   parameter, `printf %b` or `xxd -r` is decoded after the gate has looked; a client fed through a pipe waits for you.
   Letters from other scripts are other names (Cyrillic `а` is not `a`).

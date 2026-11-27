@@ -6,7 +6,7 @@
  * Privilege split: the ABLITERATED model only SUGGESTS (text, no tools) -> deterministic POLICY gate (the boundary:
  * scope, denylist, auto-run tier, unverifiable targets, injection aimed at the judge) -> a REGULAR "judge" model
  * AUTHORIZEs or REJECTs -> the runner executes the POLICY-VETTED command, never text the judge produced.
- * Read-only recon auto-runs (passive tier); safe NSE + sqlmap-enumerate only with the active tier; else a human.
+ * Read-only recon auto-runs (passive tier); NSE default/version/banner + sqlmap-enumerate (risk 1) only with the active tier; else a human.
  *
  * Two ways in: the web form, and a webhook the lab console calls (header secret). The webhook answers at once with the
  * execution id; the console then follows the run through n8n's API. Console runs end without the form's result pages.
@@ -400,7 +400,7 @@ const notes = [
   [x(10) - 20, 560, 300, 290, '#10AC84', '4 - Policy gate (code)\nThe real boundary: scope (LAB_ALLOWLIST + engagement), denylist, the engagement\'s prohibited tools and window, auto-run tier (variable AND engagement), targets it cannot verify (placeholders, $VARS, -iL, integer/hex IPs, IPv6) and text aimed at the judge: those never auto-run and go to a human. Protected data: a command that names a listed file, folder, share or table is blocked; bulk retrieval and names read at run time wait for a human while the list has entries.'],
   [x(12) - 20, 40, 460, 190, '#EE5253', '5 - Judge (regular model)\nBuild judge prompt refuses an abliterated judge. AUTHORIZE or REJECT the vetted command against the rules of engagement. Veto-only: the runner always executes policy.command, so a judge talked into AUTHORIZE (measured: it happens) cannot widen scope.'],
   [x(16) - 20, 380, 440, 170, '#2E86DE', '6 - Result page (form)\nShows the suggestion, the policy decision, the judge verdict and the next step. Form and model text are HTML-escaped; n8n also sanitizes the page. Blocked runs end here; authorized runs continue to the auto-run split.'],
-  [x(18) - 20, -70, 480, 150, '#F79F1F', '7 - Auto-run + Execute\nRecon that cleared every gate auto-runs (LAB_AUTORUN_READONLY; add LAB_AUTORUN_ACTIVE_RECON for safe NSE + sqlmap-enumerate). Else -> Human approval (Wait). Execute DISABLED on import: set LAB_RUNNER_URL and enable it.'],
+  [x(18) - 20, -70, 480, 150, '#F79F1F', '7 - Auto-run + Execute\nRecon that cleared every gate auto-runs (LAB_AUTORUN_READONLY; add LAB_AUTORUN_ACTIVE_RECON for NSE default/version/banner + sqlmap-enumerate at risk 1). Else -> Human approval (Wait). Execute DISABLED on import: set LAB_RUNNER_URL and enable it.'],
 ];
 notes.forEach(([px, py, w, h, color, content], i) => add({ name: `note${i}`, type: 'n8n-nodes-base.stickyNote', typeVersion: 1, position: [px, py], parameters: { width: w, height: h, color, content } }));
 
