@@ -167,6 +167,7 @@ async function selectModel(e, silent){
   if(S.env?.cuda===false) $('#optDevice').value='cpu';            // no GPU: everything on the CPU
   else if(a) $('#optDevice').value = a.fits_16gb_bf16===false ? 'auto' : 'cuda'; else if(p&&!p.local_ok) $('#optDevice').value='auto';
   if(a) $('#optRemote').checked=!!a.needs_remote_code;
+  if(p) $('#optOllama').checked = p.gguf!==false;     // GLM-5.x: no GGUF / Ollama finish here; vLLM serves the safetensors
   await loadRuns(); updateHeader();
   if(!silent && S.stage==='model') go('abl');          // not when another step was chosen while the runs loaded
 }

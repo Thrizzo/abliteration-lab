@@ -6,7 +6,8 @@ transformers' own implementation, checks:
 - that the weight edit is exact: the edited model's logits equal the unedited model's with the direction projected out
   of every stream (inference-time ablation), and no stream of the edited model carries the direction;
 - the loader picks AutoModelForImageTextToText for the families transformers registers only there;
-- a reasoning block opened by the chat template at the generation prompt is closed empty."""
+- a reasoning block the chat template opens at the generation prompt: the template's own switch turns it off
+  (GLM-4.7, GLM-5), else it is closed empty (GLM-5.3)."""
 import json
 import os
 import tempfile
@@ -225,52 +226,95 @@ def _names(folder):
 class Loader(unittest.TestCase):
     def test_auto_class(self):
         import transformers
+        own = {"auto_map": {"AutoModelForCausalLM": "modeling_x.XForCausalLM"}}
         with tempfile.TemporaryDirectory() as d:
-            for mt, remote, want in (("glm5_next", False, "AutoModelForImageTextToText"), ("glm4v_moe", False, "AutoModelForImageTextToText"),
-                                     ("glm", False, "AutoModelForCausalLM"), ("glm_moe_dsa", False, "AutoModelForCausalLM"),
-                                     ("glm5_next", True, "AutoModelForCausalLM"), ("", False, "AutoModelForCausalLM")):
-                with self.subTest(model_type=mt, remote=remote):
+            for mt, extra, remote, want in (
+                    ("glm5_next", {}, False, "AutoModelForImageTextToText"), ("glm4v_moe", {}, False, "AutoModelForImageTextToText"),
+                    ("glm", {}, False, "AutoModelForCausalLM"), ("glm_moe_dsa", {}, False, "AutoModelForCausalLM"),
+                    ("glm5_next", {}, True, "AutoModelForImageTextToText"),   # "trust remote code" left ticked changes nothing
+                    ("glm5_next", own, True, "AutoModelForCausalLM"),          # a checkpoint that brings its own class
+                    ("chatglm", own, True, "AutoModelForCausalLM"), ("", {}, False, "AutoModelForCausalLM")):
+                with self.subTest(model_type=mt, extra=bool(extra), remote=remote):
                     with open(os.path.join(d, "config.json"), "w") as f:
-                        json.dump({"model_type": mt}, f)
+                        json.dump({"model_type": mt, **extra}, f)
                     self.assertIs(auto_class(d, remote), getattr(transformers, want))
 
 
+class FakeLM(torch.nn.Module):
+    """Just enough model for HookedModel (one decoder layer, no forward)."""
+    def __init__(self):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.layers = torch.nn.ModuleList([type("FakeDecoderLayer", (torch.nn.Module,), {})()])
+        self.p = torch.nn.Parameter(torch.zeros(1))
+        self.config = type("C", (), {"hidden_size": 8})()
+
+
+def chat_tokenizer(template):
+    """A real fast tokenizer (byte level, no merges) with the given chat template: apply_chat_template renders it with
+    jinja and hands extra keywords such as enable_thinking to it, as with the GLM tokenizers."""
+    from tokenizers import Tokenizer, decoders, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast
+    alphabet = sorted(pre_tokenizers.ByteLevel.alphabet())
+    tk = Tokenizer(models.BPE(vocab={c: i for i, c in enumerate(alphabet)}, merges=[]))
+    tk.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tk.decoder = decoders.ByteLevel()
+    tok = PreTrainedTokenizerFast(tokenizer_object=tk)
+    tok.add_tokens(["<pad>", "<|user|>", "<|assistant|>", "<think>", "</think>"], special_tokens=True)
+    tok.pad_token, tok.padding_side, tok.chat_template = "<pad>", "left", template
+    return tok
+
+
+# the generation-prompt tails of the real templates: GLM-5.3 and GLM-5.3-Flash always open the block; GLM-4.7,
+# GLM-4.7-Flash and GLM-5 have a switch and write '</think>' alone without reasoning
+USER = "{%- for m in messages %}<|{{ m.role }}|>{{ m.content }}{%- endfor %}"
+TPL_ALWAYS = USER + "{%- if add_generation_prompt -%}<|assistant|>{{- '<think>' -}}{%- endif -%}"
+TPL_SWITCH = (USER + "{%- if add_generation_prompt -%}<|assistant|>"
+              "{{- '</think>' if (enable_thinking is defined and not enable_thinking) else '<think>' -}}{%- endif -%}")
+TPL_PLAIN = USER + "{%- if add_generation_prompt -%}<|assistant|>{%- endif -%}"
+
+
 class ReasoningBlock(unittest.TestCase):
-    """GLM-5.3 and GLM-5.3-Flash end the generation prompt with '<|assistant|><think>'."""
+    def encoded(self, template, prompts=("hi",), **kw):
+        tok = chat_tokenizer(template)
+        hm = HookedModel(FakeLM(), tok, log=QUIET, **kw)
+        ids, mask = hm.encode(list(prompts))
+        return hm, tok, ids, mask, [tok.decode(i[m.bool()], skip_special_tokens=False) for i, m in zip(ids, mask)]
 
-    class _Model(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.model = torch.nn.Module()
-            self.model.layers = torch.nn.ModuleList([type("FakeDecoderLayer", (torch.nn.Module,), {})()])
-            self.p = torch.nn.Parameter(torch.zeros(1))
-            self.config = type("C", (), {"hidden_size": 8})()
-
-    def test_closed_empty(self):
-        tok = Tok(think_tpl=True)
-        hm = HookedModel(self._Model(), tok, log=QUIET)
+    def test_glm53_template_closed_empty(self):
+        hm, _, _, _, texts = self.encoded(TPL_ALWAYS)
         self.assertTrue(hm.close_think)
-        hm.encode(["hi"])
-        self.assertEqual(tok.seen, ("text", ["<|user|>hi<|assistant|><think></think>"], False))
+        self.assertEqual(hm.chat_kwargs, {})
+        self.assertEqual(texts, ["<|user|>hi<|assistant|><think></think>"])
 
-    def test_kept_with_think(self):
-        tok = Tok(think_tpl=True)
-        hm = HookedModel(self._Model(), tok, log=QUIET, think=True)
+    def test_a_switch_is_used_instead(self):
+        hm, _, _, _, texts = self.encoded(TPL_SWITCH)
         self.assertFalse(hm.close_think)
-        hm.encode(["hi"])
-        self.assertEqual(tok.seen[0], "tokenized")
+        self.assertEqual(hm.chat_kwargs, {"enable_thinking": False})
+        self.assertEqual(texts, ["<|user|>hi<|assistant|></think>"])           # the template's own non-reasoning prompt
+
+    def test_think_keeps_every_template(self):
+        for tpl in (TPL_ALWAYS, TPL_SWITCH):
+            hm, _, _, _, texts = self.encoded(tpl, think=True)
+            self.assertEqual((hm.close_think, hm.chat_kwargs, texts), (False, {}, ["<|user|>hi<|assistant|><think>"]))
 
     def test_other_templates_unchanged(self):
-        tok = Tok(think_tpl=False)
-        hm = HookedModel(self._Model(), tok, log=QUIET)
-        self.assertFalse(hm.close_think)
-        hm.encode(["hi"])
-        self.assertEqual(tok.seen, ("tokenized", ["<|user|>hi<|assistant|>"]))
+        hm, tok, ids, mask, texts = self.encoded(TPL_PLAIN, prompts=("hi", "a longer prompt"))
+        self.assertEqual((hm.close_think, hm.chat_kwargs), (False, {}))
+        want = tok.apply_chat_template([[{"role": "user", "content": p}] for p in ("hi", "a longer prompt")],
+                                       add_generation_prompt=True, padding=True, return_tensors="pt", return_dict=True)
+        self.assertEqual((ids.tolist(), mask.tolist()), (want["input_ids"].tolist(), want["attention_mask"].tolist()))
+
+    def test_closed_batch_is_left_padded(self):
+        _, _, ids, mask, texts = self.encoded(TPL_ALWAYS, prompts=("hi", "a longer prompt"))
+        self.assertEqual((mask[0, 0].item(), mask[0, -1].item(), mask[1, 0].item()), (0, 1, 1))
+        self.assertEqual(texts[1], "<|user|>a longer prompt<|assistant|><think></think>")
 
     def test_opens_think(self):
         self.assertTrue(opens_think("<|assistant|><think>"))
         self.assertTrue(opens_think("<|assistant|><think>\n"))
         self.assertFalse(opens_think("<|assistant|><think></think>"))
+        self.assertFalse(opens_think("<|assistant|></think>"))
         self.assertFalse(opens_think("<|assistant|>"))
 
 

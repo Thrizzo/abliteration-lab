@@ -26,7 +26,7 @@ def _one_stream(x):
 
 
 def opens_think(text):
-    """GLM-5.x chat templates open a reasoning block at the generation prompt ('<|assistant|><think>')."""
+    """Reasoning templates (GLM-4.7, GLM-5.x) open a reasoning block at the generation prompt ('<|assistant|><think>')."""
     return text.rstrip().endswith("<think>")
 
 
@@ -41,18 +41,27 @@ class HookedModel:
         self.device = next(model.parameters()).device
         gen_cfg = getattr(model, "generation_config", None)
         self.eos = getattr(gen_cfg, "eos_token_id", None) or tokenizer.eos_token_id
-        # Measure, scan and validate look at the answer itself: a template that opens a reasoning block at the generation
-        # prompt gets it closed empty ('<think></think>', what the template writes for earlier turns without reasoning).
-        # think=True keeps the template's prompt as it is.
-        self.close_think = False
+        # Measure, scan and validate look at the answer itself, not at reasoning. A template that opens a reasoning block at
+        # the generation prompt is asked for its own non-reasoning prompt first (enable_thinking=False: GLM-4.7,
+        # GLM-4.7-Flash and GLM-5 then end in '<|assistant|></think>'). The GLM-5.3 templates have no such switch: there
+        # the block is closed empty ('<think></think>', what they write for earlier turns without reasoning).
+        # think=True keeps every template's default.
+        self.chat_kwargs, self.close_think = {}, False
         if not think:
             try:
-                probe = self.tok.apply_chat_template([{"role": "user", "content": "hi"}], add_generation_prompt=True, tokenize=False)
-                self.close_think = isinstance(probe, str) and opens_think(probe)
+                def probe(**kw):
+                    t = self.tok.apply_chat_template([{"role": "user", "content": "hi"}], add_generation_prompt=True, tokenize=False, **kw)
+                    return t if isinstance(t, str) else ""
+                if opens_think(probe()):
+                    if opens_think(probe(enable_thinking=False)):
+                        self.close_think = True
+                    else:
+                        self.chat_kwargs = {"enable_thinking": False}
             except Exception:
                 pass
         log(f"hooks: {self.layers_name} ({self.n_layers} layers), d_model={self.d_model}, first device {self.device}"
             + (f", {self.streams} residual streams (mHC: measured as their mean, ablated in each)" if self.streams > 1 else "")
+            + (", reasoning off (the template's enable_thinking=False)" if self.chat_kwargs else "")
             + (", reasoning block closed at the prompt (<think></think>)" if self.close_think else ""))
 
     # ------------------------------------------------------------ tokenization (left padding, chat template)
@@ -63,7 +72,8 @@ class HookedModel:
                      for t in self.tok.apply_chat_template(convs, add_generation_prompt=True, tokenize=False)]
             enc = self.tok(texts, padding=True, return_tensors="pt", add_special_tokens=False)   # the template wrote them
         else:
-            enc = self.tok.apply_chat_template(convs, add_generation_prompt=True, padding=True, return_tensors="pt", return_dict=True)
+            enc = self.tok.apply_chat_template(convs, add_generation_prompt=True, padding=True, return_tensors="pt", return_dict=True,
+                                               **self.chat_kwargs)
         return enc["input_ids"].to(self.device), enc["attention_mask"].to(self.device)
 
     # ------------------------------------------------------------ measurement: resid_pre at the last token
@@ -237,15 +247,21 @@ def _ram_check(model_dir, dtype, log):
 
 def auto_class(model_dir, trust_remote_code=False):
     """AutoModelForCausalLM, or AutoModelForImageTextToText for the families transformers registers only there: the GLM
-    vision models (glm4v, glm4v_moe, glm46v, glm5_next = GLM-5.3-Flash). Their text-only forward and generate work alike."""
+    vision models (glm4v, glm4v_moe, glm46v, glm5_next = GLM-5.3-Flash). Their text-only forward and generate work alike.
+    Remote code decides only for a checkpoint that brings its own causal-LM class (auto_map) or a model_type transformers
+    does not know: a "trust remote code" left ticked from a ChatGLM model must not break a GLM-5.3-Flash run."""
     import transformers
     from transformers.models.auto import modeling_auto as ma
     try:
         with open(os.path.join(model_dir, "config.json"), encoding="utf-8") as f:
-            mt = json.load(f).get("model_type", "")
+            cfg = json.load(f)
+        mt, auto_map = cfg.get("model_type", "") or "", cfg.get("auto_map") or {}
     except (OSError, ValueError, AttributeError):
-        mt = ""
-    if not trust_remote_code and mt not in ma.MODEL_FOR_CAUSAL_LM_MAPPING_NAMES and mt in ma.MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES:
+        mt, auto_map = "", {}
+    causal, i2t = mt in ma.MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, mt in ma.MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
+    if trust_remote_code and ("AutoModelForCausalLM" in auto_map or not (causal or i2t)):
+        return transformers.AutoModelForCausalLM
+    if i2t and not causal:
         return transformers.AutoModelForImageTextToText
     return transformers.AutoModelForCausalLM
 

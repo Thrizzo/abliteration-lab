@@ -53,9 +53,9 @@ PRESETS = [
     {"repo": "THUDM/glm-4-9b-chat-hf", "family": "GLM-4", "size": "9.4B · 19 GB", "local_ok": False, "note": "post-norm block, same as above"},
     {"repo": "zai-org/GLM-4.5-Air", "family": "GLM-4.5 MoE", "size": "106B · 220 GB", "local_ok": False, "note": "MoE: every expert down_proj is edited; multi-GPU node"},
     {"repo": "zai-org/GLM-4.6", "family": "GLM-4.6 MoE", "size": "355B", "local_ok": False, "note": "MoE, multi-GPU cluster"},
-    {"repo": "zai-org/GLM-5.2", "family": "GLM-5.2 MoE + DSA", "size": "744B · 1.5 TB bf16", "local_ok": False, "note": "78 layers, 256 experts, DSA indexer untouched; cluster only"},
-    {"repo": "zai-org/GLM-5.3", "family": "GLM-5.3 MoE + DSA", "size": "744B · 0.75 TB FP8", "local_ok": False, "note": "same architecture as 5.2, in FP8 (block-scaled: edited and requantized per block); zai-org/GLM-5.3-BF16 is the bf16 copy"},
-    {"repo": "zai-org/GLM-5.3-Flash", "family": "GLM-5.3-Flash MoE + mHC", "size": "321B · 0.33 TB FP8", "local_ok": False, "note": "hybrid: 34 linear-attention (KDA) + 11 DSA layers, 4 residual streams (mHC), 288 experts; the vision encoder stays untouched; one 8 × 80 GB node"},
+    {"repo": "zai-org/GLM-5.2", "family": "GLM-5.2 MoE + DSA", "size": "744B · 1.5 TB bf16", "local_ok": False, "gguf": False, "note": "78 layers, 256 experts, DSA indexer untouched; cluster only"},
+    {"repo": "zai-org/GLM-5.3", "family": "GLM-5.3 MoE + DSA", "size": "744B · 0.75 TB FP8", "local_ok": False, "gguf": False, "note": "same architecture as 5.2, in FP8 (block-scaled: edited and requantized per block); zai-org/GLM-5.3-BF16 is the bf16 copy"},
+    {"repo": "zai-org/GLM-5.3-Flash", "family": "GLM-5.3-Flash MoE + mHC", "size": "321B · 0.33 TB FP8", "local_ok": False, "gguf": False, "note": "hybrid: 34 linear-attention (KDA) + 11 DSA layers, 4 residual streams (mHC), 288 experts; the vision encoder stays untouched; 8 × H100 or H200 (FP8-capable)"},
 ]
 
 RUN_ID = re.compile(r"\d{8}_\d{6}")

@@ -75,6 +75,7 @@ $script:CopilotOk = $false
 $script:Models = @{}
 $script:Retrieval = ''
 $script:VolumesStuck = $false
+$script:LocalPath = $true                                # the default StorageClass is k3s's local-path (preflight)
 
 # ------------------------------------------------------------------------------------------------ output
 function Section([string]$Title) { Write-Host ''; Write-Host "== $Title" -ForegroundColor Cyan }
@@ -300,7 +301,9 @@ function Format-Age([datetime]$T) {
 }
 function Format-Event($E) {
     $n = 1
-    if ($E.count) { $n = [int]$E.count } elseif ($E.series -and $E.series.count) { $n = [int]$E.series.count }
+    # the scheduler's events count in series; PowerShell 7 gives every object an intrinsic .count of 1, so ask for a real one
+    if ($E.series -and $E.series.count) { $n = [int]$E.series.count }
+    elseif ($E.PSObject.Properties['count'] -and $E.count) { $n = [int]$E.count }
     $times = ''
     if ($n -gt 1) { $times = " (x$n)" }
     $obj = ("$($E.involvedObject.kind)/$($E.involvedObject.name)").ToLower()
@@ -319,18 +322,24 @@ function Show-Events([string]$Ns, [int]$Others = 6) {
     foreach ($e in @(@($warn + $other) | Sort-Object { Get-EventTime $_ })) { Note ('| ' + (Format-Event $e)) }
     return (($all | ForEach-Object { "$($_.reason) $($_.message)" }) -join "`n")
 }
-# Why a pod is not running and ready: the waiting or terminated reason of a container, else its phase. $null when it
-# runs, or when it finished (the helm-install Jobs of k3s).
+# A pod that runs with every container ready (and is not being deleted).
+function Test-PodReady($P) {
+    if ($P.metadata.deletionTimestamp -or "$($P.status.phase)" -ne 'Running') { return $false }
+    $cs = @(@($P.status.containerStatuses) | Where-Object { $_ })
+    return ($cs.Count -gt 0 -and @($cs | Where-Object { -not $_.ready }).Count -eq 0)
+}
+# Why a pod is not running and ready: the waiting or terminated reason of a container, 'not ready', or its phase. $null
+# when it runs, when it finished (the helm-install Jobs of k3s), or when it is on its way out (being deleted, or Failed:
+# its controller makes a new pod, which counts instead).
 function Get-PodProblem($P) {
     $phase = "$($P.status.phase)"
-    if ($phase -eq 'Succeeded') { return $null }
-    $cs = @(@($P.status.containerStatuses) | Where-Object { $_ })
-    $notReady = @($cs | Where-Object { -not $_.ready })
-    if ($phase -eq 'Running' -and $cs.Count -gt 0 -and $notReady.Count -eq 0) { return $null }
-    foreach ($c in $notReady) {
+    if ($phase -eq 'Succeeded' -or $phase -eq 'Failed' -or $P.metadata.deletionTimestamp) { return $null }
+    if (Test-PodReady $P) { return $null }
+    foreach ($c in @(@($P.status.containerStatuses) | Where-Object { $_ -and -not $_.ready })) {
         if ($c.state.waiting.reason) { return "$($c.state.waiting.reason)" }
         if ($c.state.terminated.reason) { return "$($c.state.terminated.reason)" }
     }
+    if ($phase -eq 'Running') { return 'not ready' }
     if ($phase) { return $phase }
     return 'unknown'
 }
@@ -345,8 +354,31 @@ function Get-SystemProblems {
     }
     return $out
 }
-$SystemCritical = '^(coredns|local-path-provisioner)-'    # without them no pod gets DNS, no claim a volume
-# Prints each system pod that does not run with the newest Warning about it; returns that text for Show-SystemHints.
+# The components the stack cannot start without: CoreDNS, and the local-path provisioner when it backs the default
+# StorageClass. One running, ready pod per component is enough (a pod being replaced does not count against it); no pod
+# at all, or no answer from kubectl, counts as broken. Returns "pod or component: why" per broken component.
+function Get-CriticalProblems {
+    $pods = kcJson @('-n', 'kube-system', 'get', 'pods', '-o', 'json')
+    if (-not $pods) { return @('kube-system: no answer from kubectl') }
+    $items = @(@($pods.items) | Where-Object { $_ })
+    $need = @('coredns')
+    if ($script:LocalPath) { $need += 'local-path-provisioner' }
+    $out = @()
+    foreach ($comp in $need) {
+        $mine = @($items | Where-Object { "$($_.metadata.name)" -like "$comp-*" })
+        if (@($mine | Where-Object { Test-PodReady $_ }).Count) { continue }
+        $shown = "${comp}: no pod in kube-system"
+        foreach ($p in $mine) {
+            $why = Get-PodProblem $p
+            if ($why) { $shown = "$($p.metadata.name): $why"; break }
+            $shown = "${comp}: not ready"
+        }
+        $out += $shown
+    }
+    return $out
+}
+# Prints each system pod that does not run with the newest Warning about it; returns the pods and all their Warnings
+# as text for Show-SystemHints.
 function Show-SystemPods {
     $problems = @(Get-SystemProblems)
     if (-not $problems.Count) { return '' }
@@ -357,9 +389,12 @@ function Show-SystemPods {
         $name = ($pr -split ':')[0]
         $text += "`n$pr"
         if (-not $ev) { continue }
-        $last = @(@($ev.items) | Where-Object { $_ -and $_.type -ne 'Normal' -and "$($_.involvedObject.name)" -eq $name } |
-            Sort-Object { Get-EventTime $_ } | Select-Object -Last 1)
-        if ($last.Count) { Note ('|   ' + (Format-Event $last[0])); $text += "`n$($last[0].message)" }
+        $warns = @(@($ev.items) | Where-Object { $_ -and $_.type -ne 'Normal' -and "$($_.involvedObject.name)" -eq $name } |
+            Sort-Object { Get-EventTime $_ })
+        if ($warns.Count) {                             # the newest on screen; all of them for the hints
+            Note ('|   ' + (Format-Event $warns[-1]))
+            $text += "`n" + (($warns | ForEach-Object { "$($_.message)" }) -join "`n")
+        }
     }
     return $text.Trim()
 }
@@ -396,8 +431,7 @@ function Show-Trouble([string]$Ns) {
         $sys = Show-SystemPods
         if (-not $sys) { Note '| (every pod in kube-system runs)' }
         Show-SystemHints $sys
-        $all += "`n" + $sys
-        if ($sys -match "(^|`n)(coredns|local-path-provisioner)-") { $script:VolumesStuck = $true }
+        if ($sys -match "(^|`n)local-path-provisioner-") { $script:VolumesStuck = $true }
     }
     if ($all -match 'untolerated taint') {
         Note 'hint: the node carries a taint the pods do not tolerate (kubectl describe node): disk or memory pressure, or not ready'
@@ -478,25 +512,34 @@ function Invoke-Preflight {
         if ($mem -lt 7.5) { Note 'a pipeline Job requests 2 GiB more: Jobs may wait for memory' }
         if ($mem -lt 14) { Note 'the judge (qwen3:8b) and a CPU scan of GLM-Edge-1.5B together need ~16 GB: %UserProfile%\.wslconfig, [wsl2] memory=16GB' }
     }
-    # k3s's own pods. Without CoreDNS and the volume provisioner every pod of the stack would wait 10 to 15 minutes
-    # for nothing (seen on a Rancher Desktop whose engine kept stale containers after an unclean stop).
-    $null = Wait-For 90 { @(Get-SystemProblems | Where-Object { $_ -match $SystemCritical }).Count -eq 0 } 5
-    $problems = @(Get-SystemProblems)
-    if (-not $problems.Count) { Ok 'k3s system pods run (kube-system)' }
-    else {
-        $critical = @($problems | Where-Object { $_ -match $SystemCritical })
-        Show-SystemHints (Show-SystemPods)
+    # The default StorageClass and k3s's own pods. Without CoreDNS and the volume provisioner every pod of the stack
+    # would wait 10 to 15 minutes for nothing (seen on a Rancher Desktop whose engine kept stale containers after an
+    # unclean stop). -Teardown needs neither: deleting the namespaces works on such a cluster too.
+    if (-not $Teardown) {
+        $scs = kcJson @('get', 'storageclass', '-o', 'json')
+        $default = @(@($scs.items) | Where-Object { $_ -and ($_.metadata.annotations.'storageclass.kubernetes.io/is-default-class' -eq 'true' -or
+                    $_.metadata.annotations.'storageclass.beta.kubernetes.io/is-default-class' -eq 'true') })
+        if (-not $default.Count) { Bad 'a default StorageClass: the stack''s claims name none (Rancher Desktop''s k3s ships local-path)'; return $false }
+        $script:LocalPath = ("$($default[0].provisioner)" -eq 'rancher.io/local-path')
+        Ok "default StorageClass $($default[0].metadata.name) ($($default[0].provisioner))"
+        $critical = @(Get-CriticalProblems)
         if ($critical.Count) {
+            Note ('waiting up to 90 s for k3s''s own pods: ' + ($critical -join '; '))
+            $null = Wait-For 90 { @(Get-CriticalProblems).Count -eq 0 } 5
+            $critical = @(Get-CriticalProblems)
+        }
+        if ($critical.Count) {
+            Show-SystemHints (Show-SystemPods)
             Bad ('k3s system pods: ' + ($critical -join '; ') + ' (without them no pod of the stack gets DNS or a volume)')
             return $false
         }
-        Note ('not running in kube-system: ' + ($problems -join '; ') + ' (the stack can start; the Ingress check may fail)')
+        if ($script:LocalPath) { Ok 'k3s system pods: CoreDNS and the volume provisioner run' } else { Ok 'k3s system pods: CoreDNS runs' }
+        $others = @(Get-SystemProblems)
+        if ($others.Count) {
+            Show-SystemHints (Show-SystemPods)
+            Note ('not running in kube-system: ' + ($others -join '; ') + ' (the stack can start; the Ingress check may fail)')
+        }
     }
-    $scs = kcJson @('get', 'storageclass', '-o', 'json')
-    $default = @(@($scs.items) | Where-Object { $_ -and ($_.metadata.annotations.'storageclass.kubernetes.io/is-default-class' -eq 'true' -or
-                $_.metadata.annotations.'storageclass.beta.kubernetes.io/is-default-class' -eq 'true') })
-    if ($default.Count) { Ok "default StorageClass $($default[0].metadata.name) ($($default[0].provisioner))" }
-    else { Bad 'a default StorageClass: the stack''s claims name none (Rancher Desktop''s k3s ships local-path)'; return $false }
     $script:HasTraefik = [bool](kcJson @('-n', 'kube-system', 'get', 'svc', 'traefik', '-o', 'json'))
     if ($script:HasTraefik) { Ok 'Traefik (the overlays'' Ingress class)' }
     else { Note 'no Traefik in kube-system: the Ingress check is skipped (Rancher Desktop: Preferences > Kubernetes > Traefik)' }

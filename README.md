@@ -301,7 +301,8 @@ are dense, the rest MoE with 288 routed + 1 shared expert (8 active). FP8 checkp
   prompts are fully covered; image tokens keep their own component along the direction, which the edited layers cannot
   write any further.
 
-Hardware: about 330 GB in FP8, so one 8 × 80 GB node runs measure and scan. Install the `flash-linear-attention` kernels
+Hardware: about 330 GB in FP8, so one node with 8 FP8-capable 80 GB GPUs (H100 or H200) runs measure and scan; on A100s
+transformers dequantizes the checkpoint to bf16 (about 640 GB), which does not fit with activations. Install the `flash-linear-attention` kernels
 there; without them transformers runs its PyTorch reference code for the linear layers (correct, much slower). vLLM
 v0.34.0 (the glm-serve pin) registers `Glm5NextForConditionalGeneration`; there is no GGUF / Ollama path.
 

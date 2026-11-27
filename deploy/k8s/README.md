@@ -109,9 +109,10 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
   - restart Rancher Desktop.
 
   The judge (~5 GB) downloads in the background. Checks that need it are skipped until it is there.
-- **Before anything else** it checks that k3s's own pods in `kube-system` run. Without CoreDNS and the volume
-  provisioner (`local-path-provisioner`) every pod of the stack would wait 10 to 15 minutes for nothing, so the script
-  stops there and prints each broken pod with its newest Warning. One cause seen on Rancher Desktop: after an unclean stop
+- **Before anything else** (not for `-Teardown`) it checks the default StorageClass and that k3s's own pods in
+  `kube-system` run. Without CoreDNS and the volume provisioner (`local-path-provisioner`) every pod of the stack would
+  wait 10 to 15 minutes for nothing, so the script gives them up to 90 s, then stops and prints each broken pod with its
+  newest Warning. One cause seen on Rancher Desktop: after an unclean stop
   (Windows sleep, a crash) the container engine keeps stale Kubernetes containers, and the events say "container name ...
   is already in use" or "resolv.conf does not exist". Fix it in this order and stop at the first that works:
   1. quit Rancher Desktop, run `wsl --shutdown`, start it again;
