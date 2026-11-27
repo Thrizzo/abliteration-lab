@@ -171,6 +171,9 @@ The image is a plain OCI image.
 - On **Windows** Rancher Desktop does not pass the GPU into containers, whatever driver the host has: leave
   `docker-compose.gpu.yml` out and the whole pipeline runs on the CPU (next section). On a Linux host with the NVIDIA
   Container Toolkit the GPU works with either backend.
+- In **the full lab on Kubernetes** (below) Rancher Desktop's pods get no GPU either, but the copilot's judge and
+  embeddings can run on Ollama for Windows, which uses it: `deploy/k8s/tests/rancher-dev.ps1 -HostOllama`, see
+  [GPU: Ollama for Windows](deploy/k8s/README.md#gpu-ollama-for-windows).
 
 ### Without a GPU
 

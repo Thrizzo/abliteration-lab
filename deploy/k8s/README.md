@@ -19,7 +19,9 @@ base/                       shared manifests (do not apply directly)
                             network policies, jobs.json (how stages run as Jobs)
   copilot/                  n8n, Qdrant, Ollama (judge, embeddings), network policies
 components/gpu-node/        puts glm-serve on the labelled, tainted 8-GPU node
+components/host-ollama/     the copilot's judge and embeddings from an Ollama on the host, not in the cluster
 overlays/dev/               no GPU: glm-serve runs Ollama, stages run on the CPU (phase 0)
+overlays/dev-host-ollama/   dev on Rancher Desktop (Windows), judge and embeddings from Ollama for Windows (GPU)
 overlays/onprem/            your own GPU node (e.g. RKE2 + GPU Operator), node-local fast storage
 overlays/cloud/             generic GPU cloud, shared (RWX) fast storage
 overlays/ci/                CI: stub console, network / login / RBAC / Kill tests
@@ -41,6 +43,9 @@ The network policies deny everything that isn't explicitly opened:
 | download Jobs | Hugging Face (443) |
 | deploy Jobs | the model server |
 | scan / apply / validate Jobs, the model server | nothing |
+
+`overlays/dev-host-ollama` opens one more destination, for the console and n8n only: Ollama on the Windows host
+([GPU: Ollama for Windows](#gpu-ollama-for-windows)).
 
 ## Prerequisites
 
@@ -108,7 +113,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
   - set `memory=16GB` under `[wsl2]` in `%UserProfile%\.wslconfig`;
   - restart Rancher Desktop.
 
-  The judge (~5 GB) downloads in the background. Checks that need it are skipped until it is there.
+  The judge (~5 GB) downloads in the background. Checks that need it are skipped until it is there. With
+  `-HostOllama` the judge runs on Windows instead ([below](#gpu-ollama-for-windows)).
 - **Before anything else** (not for `-Teardown`) it checks the default StorageClass and that k3s's own pods in
   `kube-system` run. Without CoreDNS and the volume provisioner (`local-path-provisioner`) every pod of the stack would
   wait 10 to 15 minutes for nothing, so the script gives them up to 90 s, then stops and prints each broken pod with its
@@ -125,6 +131,64 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
   passwords or keys; paste it back when something fails.
 - **CI:** the `k3s` job runs the same script under PowerShell 7 on k3s (k3d), unattended. Windows PowerShell 5.1 itself
   is not run in CI.
+
+### GPU: Ollama for Windows
+
+Rancher Desktop 1.x gives containers and pods no GPU. So in `dev` the copilot's judge (`qwen3:8b`) and embeddings
+(`nomic-embed-text`) run on the CPU, 10 to 30 seconds per judge verdict. With an NVIDIA GPU, let Ollama for Windows
+serve them instead: it runs on Windows itself and uses the GPU.
+
+1. Install Ollama for Windows (https://ollama.com/download). It starts when you log in and listens on `127.0.0.1:11434`.
+2. Pull the two models, in PowerShell:
+   ```powershell
+   ollama pull qwen3:8b
+   ```
+   ```powershell
+   ollama pull nomic-embed-text
+   ```
+3. Run the script with `-HostOllama`:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1 -HostOllama
+   ```
+
+- **What `-HostOllama` changes in the script:**
+  - the preflight checks that Ollama answers on `http://127.0.0.1:11434` and has the judge (`-JudgeModel`) and
+    `nomic-embed-text`. If not, it fails with the `ollama pull` commands, and the setup still runs;
+  - `-Setup` applies `overlays/dev-host-ollama` (unless `-Overlay` names another) and connects n8n to
+    `-HostOllamaUrl`, by default `http://192.168.127.254:11434`;
+  - `-Check` asks the host's Ollama from the console pod instead of waiting for the in-cluster pulls, checks that a
+    stranger pod cannot reach it, and prints where the loaded models run;
+  - `-EvalJudge` measures the judge on the host's Ollama.
+- **What the overlay changes against `dev`** (`components/host-ollama`), and nothing else:
+  - the in-cluster Ollama in `lab-copilot` is scaled to 0. Its volume stays, with any models it pulled before:
+    `kubectl -n lab-copilot delete pvc ollama` frees the space. `glm-serve`, the abliterated model's own Ollama,
+    stays in the cluster;
+  - the console's `RAG_OLLAMA_URL` is `http://192.168.127.254:11434`. Knowledge uploads must be embedded by the model
+    n8n searches with, so the console and n8n use the same Ollama. The console's judge list comes from it too;
+  - two egress openings to `192.168.127.254/32` on TCP 11434: `console-host-ollama` for the console pod and
+    `n8n-host-ollama` for the n8n pod.
+- **Without the script:** apply `overlays/dev-host-ollama` instead of `overlays/dev` ([Deploy](#deploy)), and add
+  `--ollama-url http://192.168.127.254:11434` to `connect_console.py`.
+- **How pods reach Windows:** Rancher Desktop's network (the networking tunnel, its only network stack since 1.16)
+  NATs `192.168.127.254` to the Windows host's `127.0.0.1`, for every port. The name `host.rancher-desktop.internal`
+  may not resolve inside pods, so the overlay uses the address.
+- **Security:** Ollama has no login.
+  - It stays on `127.0.0.1`, Ollama for Windows' default, so nothing else on your network reaches it. Don't set
+    `OLLAMA_HOST=0.0.0.0`.
+  - In `lab` and `lab-copilot` only the console and n8n pods may reach it through the NAT. The abliterated model, the
+    Jobs and every other pod there may not.
+  - The NAT itself has no filter: pods in other namespaces (they have no network policies) and containers started
+    outside Kubernetes reach every port on Windows' `127.0.0.1` this way, Ollama included.
+- **Is the GPU used?** On Windows, `ollama ps` shows `GPU` in the PROCESSOR column (`100% GPU`) for a model loaded
+  on the GPU. `-Check` and `-EvalJudge` print the same after they have used it.
+- **Back to the in-cluster Ollama:** run the script without `-HostOllama`. It applies `dev`, which scales the in-cluster
+  Ollama back to 1, and points n8n at it again. The two egress policies stay until you delete them:
+  ```powershell
+  kubectl -n lab delete networkpolicy console-host-ollama
+  ```
+  ```powershell
+  kubectl -n lab-copilot delete networkpolicy n8n-host-ollama
+  ```
 
 ## Deploy
 
@@ -567,4 +631,5 @@ delete old runs you no longer need for Rollback.
       free prompt.
 
 Not covered by CI: GPUs, vLLM with real weights, GLM-5.x itself, Windows PowerShell 5.1 (the `k3s` job runs
-PowerShell 7).
+PowerShell 7), and `-HostOllama`: it needs Ollama on a Windows host, so CI only dry-runs `overlays/dev-host-ollama` and
+parses the script.

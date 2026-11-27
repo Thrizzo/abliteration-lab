@@ -1,0 +1,15 @@
+# Rancher Desktop on Windows with an NVIDIA GPU: the dev overlay, with the copilot's judge (qwen3:8b) and embeddings
+# (nomic-embed-text) served by Ollama for Windows, which uses the GPU. Rancher Desktop 1.x gives pods no GPU, so in dev
+# both run on the CPU. What changes against dev is in components/host-ollama.
+#   1. install Ollama for Windows, then in PowerShell:
+#        ollama pull qwen3:8b
+#        ollama pull nomic-embed-text
+#   2. kubectl apply -k deploy/k8s/overlays/dev-host-ollama
+#   3. connect n8n to that Ollama: python deploy/n8n/connect_console.py ... --ollama-url http://192.168.127.254:11434
+# deploy/k8s/tests/rancher-dev.ps1 -HostOllama does all of it and checks it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+components:
+  - ../../components/host-ollama

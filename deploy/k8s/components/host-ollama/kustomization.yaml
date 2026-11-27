@@ -1,0 +1,34 @@
+# The copilot's judge and embeddings from an Ollama on the host instead of the in-cluster one. Made for Rancher Desktop
+# on Windows: its pods get no GPU, while Ollama for Windows uses the host's GPU.
+# Pods reach the Windows host at 192.168.127.254: Rancher Desktop's network NATs that address to the host's 127.0.0.1,
+# for every port. So Ollama keeps listening on 127.0.0.1:11434 only, where nothing else on the network reaches it.
+# The name host.rancher-desktop.internal may not resolve inside pods, so the address is used.
+#   - the in-cluster Ollama (lab-copilot) scales to 0; its volume stays. In dev nothing else uses it: the console's
+#     OLLAMA_HOST and the Jobs' point at glm-serve, which is a separate Ollama and stays.
+#   - the console embeds knowledge and lists judges with the host's Ollama (RAG_OLLAMA_URL). The vectors must come from
+#     the embedding model n8n searches with, so n8n's Ollama credential points there as well:
+#       python deploy/n8n/connect_console.py ... --ollama-url http://192.168.127.254:11434
+#   - the n8n and console pods may reach 192.168.127.254 on TCP 11434 (network-policies.yaml); nothing else may.
+# Used by overlays/dev-host-ollama. deploy/k8s/tests/rancher-dev.ps1 -HostOllama sets it up and checks it.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - network-policies.yaml
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: ollama, namespace: lab-copilot }
+      spec:
+        replicas: 0
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: console, namespace: lab }
+      spec:
+        template:
+          spec:
+            containers:
+              - name: app
+                env:
+                  - { name: RAG_OLLAMA_URL, value: "http://192.168.127.254:11434" }

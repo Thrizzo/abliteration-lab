@@ -1,0 +1,24 @@
+# The host's Ollama (judge, embeddings), through Rancher Desktop's NAT: 192.168.127.254 is the Windows host's 127.0.0.1.
+# Ollama has no login, so only its two users may reach it, and only on its port:
+#   console  knowledge embeddings and the judge list (RAG_OLLAMA_URL)
+#   n8n      the judge and the retrieval embeddings (its Ollama credential)
+# Network policies add up: each opens one destination next to the base policies, which stay as they are.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: console-host-ollama, namespace: lab, labels: { app.kubernetes.io/part-of: redteam-llm-lab } }
+spec:
+  podSelector: { matchLabels: { lab-role: console } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ ipBlock: { cidr: 192.168.127.254/32 } }]
+      ports: [{ port: 11434, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: n8n-host-ollama, namespace: lab-copilot, labels: { app.kubernetes.io/part-of: redteam-llm-lab } }
+spec:
+  podSelector: { matchLabels: { lab-role: n8n } }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ ipBlock: { cidr: 192.168.127.254/32 } }]
+      ports: [{ port: 11434, protocol: TCP }]

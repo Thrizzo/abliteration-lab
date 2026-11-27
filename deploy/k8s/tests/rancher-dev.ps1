@@ -21,6 +21,13 @@ rancher-dev-<time>.log in the current folder, without passwords or keys: paste t
              the copilot's Ollama with the workflow's exact prompt (copilot/eval_judge.py, run in the console pod;
              10 to 30 seconds per command on a CPU). The report goes to workspace/eval/. -JudgeModel picks the model.
 
+GPU: Rancher Desktop gives pods no GPU, so the copilot's judge and embeddings run on the CPU. With an NVIDIA GPU, add
+-HostOllama to any of the above: Ollama for Windows then serves them, on the GPU. Install it, then run
+"ollama pull qwen3:8b" (or your -JudgeModel) and "ollama pull nomic-embed-text". With -HostOllama the preflight checks
+that this Ollama answers on 127.0.0.1:11434 and has both models; -Setup applies deploy/k8s/overlays/dev-host-ollama
+(unless -Overlay names another) and connects n8n to -HostOllamaUrl (default http://192.168.127.254:11434: this
+machine's 127.0.0.1 as pods reach it); -Check and -EvalJudge use that Ollama.
+
 It talks to the cluster through the kubectl context "rancher-desktop" (-Context), whatever context is current, and
 installs nothing. Needs: Rancher Desktop with Kubernetes and Traefik enabled, and Python 3 for the n8n step.
 Unattended (CI): -NonInteractive, with LAB_PASSWORD, N8N_EMAIL and N8N_PASSWORD in the environment.
@@ -35,6 +42,7 @@ param(
     [switch]$SkipBuild,                                  # use the console image that is already there
     [switch]$Force,                                      # -Teardown without asking
     [switch]$NonInteractive,                             # never prompt: secrets come from the environment
+    [switch]$HostOllama,                                 # judge and embeddings from Ollama for Windows (its GPU)
     [string]$Context = 'rancher-desktop',
     [string]$Overlay = 'deploy/k8s/overlays/dev',
     [string]$Image = 'ghcr.io/thrizzo/redteam-llm-lab:latest',
@@ -43,6 +51,7 @@ param(
     [string]$IngressHost = 'lab.localhost',
     [string]$N8nEmail = $env:N8N_EMAIL,
     [string]$JudgeModel = 'qwen3:8b',
+    [string]$HostOllamaUrl = 'http://192.168.127.254:11434', # -HostOllama: that Ollama as pods reach it
     [int]$ConsolePort = 18080,
     [int]$N8nPort = 15678
 )
@@ -434,6 +443,8 @@ function Show-Trouble([string]$Ns) {
     $ev = Show-Events $Ns
     $all = $pods + "`n" + $ev
     $pending = @(Get-PendingClaims $Ns)
+    # -HostOllama: no pod uses the in-cluster Ollama's claim, and local-path gives a claim its volume only for a pod
+    if ($HostOllama -and $Ns -eq 'lab-copilot') { $pending = @($pending | Where-Object { $_ -ne 'ollama' }) }
     if ($pending.Count) {
         Note ("claims without a volume in ${Ns}: " + ($pending -join ', ') + '; the provisioner and the rest of kube-system:')
         $sys = Show-SystemPods
@@ -491,6 +502,44 @@ function Get-LabUser {
     return $LabUser
 }
 
+# ------------------------------------------------------------------------------------------------ host Ollama
+# -HostOllama: the judge and the embeddings come from Ollama for Windows. Pods reach it at -HostOllamaUrl: Rancher
+# Desktop NATs 192.168.127.254 to this machine's 127.0.0.1, port for port. This script asks it on 127.0.0.1 directly.
+function Get-HostOllamaLocal {
+    $port = 11434
+    try { $port = ([Uri]$HostOllamaUrl).Port } catch { }
+    return "http://127.0.0.1:$port"
+}
+# The models the copilot takes from it: the judge, and the embeddings n8n searches with.
+function Get-HostModels { return @($JudgeModel, 'nomic-embed-text') }
+# Does an /api/tags answer list the model? A name without a tag means :latest, as for "ollama pull".
+function Test-HasModel($Tags, [string]$Model) {
+    $want = $Model
+    if ($want -notmatch ':') { $want += ':latest' }
+    return (@(@($Tags.models) | Where-Object { $_ -and ("$($_.name)" -eq $want -or "$($_.name)" -eq $Model) }).Count -gt 0)
+}
+# GET -HostOllamaUrl plus a path from the console pod, the way the console and n8n reach it: the answer, or $null.
+function Get-HostOllama([string]$Path) {
+    return (kcJson @('-n', 'lab', 'exec', 'deploy/console', '-c', 'app', '--', 'curl', '-sS', '-m', '10', ($HostOllamaUrl.TrimEnd('/') + $Path)))
+}
+# Where the host's Ollama runs the models it has loaded, worked out as "ollama ps" does for its PROCESSOR column.
+function Show-HostOllamaPs {
+    $running = (Http -Url ((Get-HostOllamaLocal) + '/api/ps') -NoAuth -MaxSeconds 10).Json
+    $loaded = @(@($running.models) | Where-Object { $_ })
+    if (-not $loaded.Count) { Note 'the host''s Ollama has no model loaded right now ("ollama ps" on Windows)'; return }
+    foreach ($m in $loaded) {
+        $size = [double]$m.size
+        $vram = [double]$m.size_vram
+        $proc = '100% GPU'
+        if ($vram -le 0) { $proc = '100% CPU' }
+        elseif ($size -gt $vram) {
+            $cpuPct = [int][math]::Round(100 * ($size - $vram) / $size)
+            $proc = "$cpuPct%/$(100 - $cpuPct)% CPU/GPU"
+        }
+        Note ("the host's Ollama runs $($m.name) on $proc" + ' (PROCESSOR in "ollama ps")')
+    }
+}
+
 # ------------------------------------------------------------------------------------------------ preflight
 function Invoke-Preflight {
     Section 'Preflight'
@@ -521,7 +570,7 @@ function Invoke-Preflight {
     else {
         Ok "memory for pods: $mem GiB"
         if ($mem -lt 7.5) { Note 'a pipeline Job requests 2 GiB more: Jobs may wait for memory' }
-        if ($mem -lt 14) { Note 'the judge (qwen3:8b) and a CPU scan of GLM-Edge-1.5B together need ~16 GB: %UserProfile%\.wslconfig, [wsl2] memory=16GB' }
+        if ($mem -lt 14 -and -not $HostOllama) { Note 'the judge (qwen3:8b) and a CPU scan of GLM-Edge-1.5B together need ~16 GB: %UserProfile%\.wslconfig, [wsl2] memory=16GB' }
     }
     # The default StorageClass and k3s's own pods. Without CoreDNS and the volume provisioner every pod of the stack
     # would wait 10 to 15 minutes for nothing (seen on a Rancher Desktop whose engine kept stale containers after an
@@ -557,8 +606,28 @@ function Invoke-Preflight {
     $script:HasTraefik = [bool](kcJson @('-n', 'kube-system', 'get', 'svc', 'traefik', '-o', 'json'))
     if ($script:HasTraefik) { Ok 'Traefik (the overlays'' Ingress class)' }
     else { Note 'no Traefik in kube-system: the Ingress check is skipped (Rancher Desktop: Preferences > Kubernetes > Traefik)' }
+    if ($HostOllama -and -not $Teardown) { Invoke-HostPreflight }
     if (-not (Test-Path (Join-Path $Repo $Overlay))) { Bad "overlay $Overlay in $Repo"; return $false }
     return $true
+}
+
+# -HostOllama: Ollama for Windows answers here and has the copilot's models. The setup does not need it, so a FAIL
+# does not stop the script: the judge (~5 GB) can download while the image builds.
+function Invoke-HostPreflight {
+    $localUrl = Get-HostOllamaLocal
+    $missing = @(Get-HostModels)
+    $v = Http -Url "$localUrl/api/version" -NoAuth -MaxSeconds 10
+    if ($v.Code -eq '200' -and $v.Json -and $v.Json.version) {
+        Ok "Ollama on this machine answers ($localUrl, version $($v.Json.version))"
+        $tags = (Http -Url "$localUrl/api/tags" -NoAuth -MaxSeconds 10).Json
+        $missing = @(Get-HostModels | Where-Object { -not (Test-HasModel $tags $_) })
+        if ($missing.Count) { Bad ('the host''s Ollama has the copilot''s models; missing: ' + ($missing -join ', ')) }
+        else { Ok ('the host''s Ollama has the copilot''s models: ' + ((Get-HostModels) -join ', ')) }
+    } else {
+        Bad "Ollama for Windows answers on $localUrl (got HTTP $($v.Code)): install it from https://ollama.com/download and start it"
+    }
+    foreach ($m in $missing) { Note "on Windows: ollama pull $m" }
+    Note '"ollama ps" shows GPU in its PROCESSOR column (e.g. "100% GPU") for a model loaded on the GPU'
 }
 
 # ------------------------------------------------------------------------------------------------ setup
@@ -632,6 +701,11 @@ function Invoke-Apply {
     $script:VolumesStuck = $false
     foreach ($w in @('lab-copilot deploy/n8n', 'lab-copilot deploy/ollama', 'lab-copilot statefulset/qdrant', 'lab deploy/console', 'lab deploy/glm-serve')) {
         $ns, $target = $w -split ' '
+        # -HostOllama: the overlay scales the in-cluster Ollama to 0, so there is no pod to wait for
+        if ($HostOllama -and $target -eq 'deploy/ollama' -and (kcOut @('-n', $ns, 'get', 'deploy', 'ollama', '-o', 'jsonpath={.spec.replicas}')).Trim() -eq '0') {
+            Ok "$target ($ns) is scaled to 0: n8n and the console use the host's Ollama"
+            continue
+        }
         if ($script:VolumesStuck) {                     # the other pods wait for volumes as well: 10 to 15 minutes each
             Skip "$target ($ns): not waited for, no claim gets a volume (see above)"
             $allUp = $false
@@ -678,12 +752,14 @@ function Invoke-N8n {
     try {
         $a = @($py | Select-Object -Skip 1) + @('deploy/n8n/connect_console.py', '--n8n', "http://127.0.0.1:$N8nPort", '--email', $email,
                                                '--setup-owner', '--secret-file', $secretFile)
+        if ($HostOllama) { $a += @('--ollama-url', $HostOllamaUrl) }    # n8n's judge and embeddings: the host's Ollama
         $out = Exe $py[0] $a
         $code = $LASTEXITCODE
     } finally { $env:N8N_PASSWORD = $old }
     ($out -split "`n") | Where-Object { $_ } | ForEach-Object { Note "| $_" }
     if ($code -ne 0 -or -not (Test-Path $secretFile)) { Bad 'connect_console.py (n8n credentials, workflow, console key)'; return }
     Ok 'connect_console.py: n8n login, credentials, workflow published, an n8n key for the console'
+    if ($HostOllama) { Note "n8n's Ollama credential (judge, embeddings): $HostOllamaUrl" }
     $out = kc @('apply', '-f', $secretFile)
     $code = $LASTEXITCODE
     Remove-Item $secretFile -Force
@@ -756,6 +832,17 @@ function Invoke-Policies {
         $c = Get-Reach 'probe-intruder' $url
         if ($c -eq 7 -or $c -eq 28) { Ok "stranger -/-> $label (curl exit $c)" }
         else { Bad "stranger -/-> ${label}: curl exit $c (0: it got through; 6: no DNS)" }
+    }
+    if ($HostOllama) {
+        # the host's Ollama through Rancher Desktop's NAT: the console may reach it, a stranger may not. A refused
+        # connection proves nothing while Ollama is down, so the stranger is tried only once the console got through.
+        $hv = $HostOllamaUrl.TrimEnd('/') + '/api/version'
+        Step "console -> the host's Ollama ($HostOllamaUrl)" { Wait-For 30 { (Get-Reach 'probe-console' $hv) -eq 0 } 2 }
+        if ($script:LastOk) {
+            $c = Get-Reach 'probe-intruder' $hv
+            if ($c -eq 7 -or $c -eq 28) { Ok "stranger -/-> the host's Ollama (curl exit $c)" }
+            else { Bad "stranger -/-> the host's Ollama: curl exit $c (0: it got through)" }
+        } else { Skip 'stranger -/-> the host''s Ollama (the console does not reach it either: is Ollama running on Windows?)' }
     }
     $null = kc @('-n', 'lab', 'exec', 'deploy/glm-serve', '--', 'timeout', '5', 'bash', '-c', 'true')
     if ($LASTEXITCODE -ne 0) { Skip 'model server -/-> internet (no bash and timeout in its image)'; return }
@@ -833,6 +920,26 @@ function Invoke-Models {
     }
 }
 
+# -HostOllama: the copilot's models on Ollama for Windows, as the console pod sees them. Nothing pulls them in the
+# cluster, so a missing model is a FAIL with its "ollama pull", not a wait.
+function Invoke-HostModels {
+    Section "The copilot's models (Ollama for Windows, $HostOllamaUrl from the pods)"
+    $rag = (kcOut @('-n', 'lab', 'exec', 'deploy/console', '-c', 'app', '--', 'printenv', 'RAG_OLLAMA_URL')).Trim()
+    Step "the console embeds knowledge and lists judges with it (RAG_OLLAMA_URL $rag)" { $rag.TrimEnd('/') -eq $HostOllamaUrl.TrimEnd('/') }
+    $ver = ''
+    $answer = Get-HostOllama '/api/version'
+    if ($answer) { $ver = "$($answer.version)" }
+    Step "the console pod gets an answer from the host's Ollama (/api/version: $ver)" { [bool]$ver }
+    if (-not $script:LastOk) { Note 'is Ollama running on Windows? Did -Setup apply the dev-host-ollama overlay (its network policies)?'; return }
+    $tags = Get-HostOllama '/api/tags'
+    foreach ($m in (Get-HostModels)) {
+        $have = Test-HasModel $tags $m
+        $script:Models[$m] = $have
+        if ($have) { Ok "$m is on the host's Ollama" }
+        else { Bad "$m is not on the host's Ollama; on Windows: ollama pull $m" }
+    }
+}
+
 function Invoke-Copilot {
     Section 'Copilot: the console and n8n'
     $script:CopilotOk = Wait-For 180 { (Api 'GET' '/copilot').Json.configured -eq $true } 10
@@ -893,9 +1000,10 @@ function Invoke-Check {
     Invoke-Ingress
     Invoke-Policies
     Invoke-KillSwitch
-    Invoke-Models
+    if ($HostOllama) { Invoke-HostModels } else { Invoke-Models }
     Invoke-Copilot
     Invoke-Knowledge
+    if ($HostOllama) { Show-HostOllamaPs }               # the upload above has just used the embedding model
     Invoke-Prompt
 }
 
@@ -981,20 +1089,34 @@ function Invoke-Teardown {
 
 function Invoke-EvalJudge {
     Section "The judge on rules of engagement ($JudgeModel, copilot/eval_judge.py)"
-    $have = (kc @('-n', 'lab-copilot', 'exec', 'deploy/ollama', '--', 'ollama', 'list')) -match [regex]::Escape($JudgeModel)
-    if (-not $have) { Skip "$JudgeModel is not pulled in the copilot's Ollama yet (-Check shows the pull); run -EvalJudge again later"; return }
+    $ollama = 'http://ollama.lab-copilot.svc:11434'
+    $pace = 'one line per command, 10 to 30 seconds each on a CPU'
+    if ($HostOllama) {                                   # Ollama for Windows, as the console pod reaches it
+        $ollama = $HostOllamaUrl
+        $pace = 'one line per command; on the GPU usually a few seconds each'
+        if (-not (Test-HasModel (Get-HostOllama '/api/tags') $JudgeModel)) {
+            Skip "$JudgeModel is not on the host's Ollama as the console pod sees it (on Windows: ollama pull $JudgeModel)"
+            return
+        }
+    } else {
+        $have = (kc @('-n', 'lab-copilot', 'exec', 'deploy/ollama', '--', 'ollama', 'list')) -match [regex]::Escape($JudgeModel)
+        if (-not $have) { Skip "$JudgeModel is not pulled in the copilot's Ollama yet (-Check shows the pull); run -EvalJudge again later"; return }
+    }
     $out = '/workspace/eval/judge-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'
-    Note 'one line per command, 10 to 30 seconds each on a CPU'
+    Note $pace
     $a = @('--context', $Context, '-n', 'lab', 'exec', 'deploy/console', '-c', 'app', '--', '/opt/venv/bin/python', '-m',
-           'copilot.eval_judge', '--ollama', 'http://ollama.lab-copilot.svc:11434', '--model', $JudgeModel, '--out', $out)
+           'copilot.eval_judge', '--ollama', $ollama, '--model', $JudgeModel, '--out', $out)
     & kubectl @a                                         # live output: the eval prints each verdict as it comes
     $code = $global:LASTEXITCODE
     if ($code -eq 0) { Ok "judge eval done; the full report is in the workspace: $out" }
     else { Bad "judge eval: exit $code (is the console pod running? kubectl -n lab get pods)" }
+    if ($HostOllama) { Show-HostOllamaPs }               # where the judge ran
 }
 
 # ------------------------------------------------------------------------------------------------ main
 if (-not ($Setup -or $Check -or $Pipeline -or $Teardown -or $EvalJudge)) { $Setup = $true; $Check = $true }
+# -HostOllama brings its overlay, unless -Overlay names another
+if ($HostOllama -and -not $PSBoundParameters.ContainsKey('Overlay')) { $Overlay = 'deploy/k8s/overlays/dev-host-ollama' }
 $what = @()
 if ($Setup) { $what += 'Setup' }
 if ($Pipeline) { $what += 'Pipeline' }
@@ -1007,7 +1129,9 @@ if (-not $OnWindows) { $null = Exe 'chmod' @('700', $script:Tmp) }
 try { $null = Start-Transcript -Path $log } catch { }
 Push-Location $Repo
 try {
-    Write-Host ("rancher-dev.ps1: " + ($what -join ', ') + " | context $Context | overlay $Overlay | PowerShell " + $PSVersionTable.PSVersion)
+    $banner = "rancher-dev.ps1: " + ($what -join ', ') + " | context $Context | overlay $Overlay | PowerShell " + $PSVersionTable.PSVersion
+    if ($HostOllama) { $banner += " | host Ollama $HostOllamaUrl" }
+    Write-Host $banner
     if (Invoke-Preflight) {
         if ($Teardown) { Invoke-Teardown }
         else {

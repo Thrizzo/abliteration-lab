@@ -31,7 +31,7 @@ model_containers() { docker exec "$NODE" crictl ps -q --label io.kubernetes.pod.
 
 echo "== 1. deploy"
 kubectl apply -f deploy/k8s/base/namespaces.yaml
-for o in dev onprem cloud ci-pipeline; do
+for o in dev dev-host-ollama onprem cloud ci-pipeline; do
   check "server-side dry run: $o" kubectl apply --dry-run=server -k "deploy/k8s/overlays/$o" -o name
 done
 kubectl apply -k "$OVERLAY"
