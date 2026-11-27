@@ -272,20 +272,23 @@ Options: `--n-train 256 --n-test 16 --batch 16 --gen-batch 4 --max-new-tokens 64
 
 `GlmMoeDsaForCausalLM`: 78 layers, hidden size 6,144, layers 0–2 dense, 3–77 mixture-of-experts with 256 routed + 1 shared
 expert (8 active per token), DSA sparse-attention indexers on every fourth layer. GLM-5.2 is a bf16 checkpoint of 1.5 TB in
-282 shards; GLM-5.3 ships in FP8 (0.75 TB, 141 shards, 128 × 128 block scales that the edit keeps), `zai-org/GLM-5.3-BF16`
+282 shards; GLM-5.3 ships in FP8 (0.75 TB, 141 shards, 128 × 128 blocks: the edit keeps the layout and writes new per-block scales), `zai-org/GLM-5.3-BF16`
 is its bf16 copy.
-The pipeline edits one attention output and 257 expert outputs per sparse layer (about 19,400 tensors), streams the
+The pipeline edits one attention output and 257 expert outputs per sparse layer (19,615 tensors with the MTP layer), streams the
 checkpoint shard by shard (about 5 GB of RAM at a time, disk-bound), and leaves routers, indexers and norms untouched.
 
 Hardware reality: measure and scan need the model loaded, which means a node with about 1.5 TB of GPU memory in bf16 or an
 FP8 copy on 8×H200; CPU offload on a 1.5+ TB RAM node works for the measurement in hours and for a reduced scan
 (`--n-test 8 --layer-range 0.35-0.7`). Convert and serve the edited checkpoint with vLLM or SGLang for validation at that
-scale; llama.cpp / Ollama support for GLM-5's attention may lag.
+scale. llama.cpp at the pinned commit knows GLM-5 (`glm-dsa`), but its GGUF conversion is untested in this image (its
+converter environment pins transformers 4.57.6; the GLM-5.x presets untick the Ollama finish).
 
-Reasoning: the GLM-5.3 and GLM-5.3-Flash chat templates open a reasoning block at the generation prompt
-(`<|assistant|><think>`). Measure, scan, validate and the lab close it empty (`<think></think>`, what the template writes
-for earlier turns without reasoning), so the scan judges the answer itself. Check the promoted model with reasoning on as
-well.
+Reasoning: the GLM-4.7, GLM-5.x and GLM-5.3-Flash chat templates open a reasoning block at the generation prompt
+(`<|assistant|><think>`). Measure, scan, validate and the lab ask the template for its own prompt without reasoning
+(`enable_thinking=False`: GLM-4.7 and GLM-5 then write `</think>`, GLM-5.2 `<think></think>`). The GLM-5.3 and
+GLM-5.3-Flash templates have no such switch, so the block is closed empty there (`<think></think>`, what they write for
+earlier turns without reasoning). The scan therefore judges the answer itself. Check the promoted model with reasoning on
+as well.
 
 **GLM-5.3-Flash** (`zai-org/GLM-5.3-Flash`, `Glm5NextForConditionalGeneration`, MIT): 321B parameters, 45 layers plus one
 MTP layer, hidden size 4,096. 34 layers use linear attention (Kimi Delta Attention), 11 use DSA sparse attention; layers 0–2
@@ -304,7 +307,9 @@ are dense, the rest MoE with 288 routed + 1 shared expert (8 active). FP8 checkp
 Hardware: about 330 GB in FP8, so one node with 8 FP8-capable 80 GB GPUs (H100 or H200) runs measure and scan; on A100s
 transformers dequantizes the checkpoint to bf16 (about 640 GB), which does not fit with activations. Install the `flash-linear-attention` kernels
 there; without them transformers runs its PyTorch reference code for the linear layers (correct, much slower). vLLM
-v0.34.0 (the glm-serve pin) registers `Glm5NextForConditionalGeneration`; there is no GGUF / Ollama path.
+v0.34.0 (the glm-serve pin) registers `Glm5NextForConditionalGeneration`. llama.cpp at the pinned commit converts and
+runs it too (arch `glm5-next`), but its converter for this model needs transformers 5 and the converter environment in
+this image pins 4.57.6, so the pipeline skips the GGUF / Ollama stage for GLM-5.3-Flash.
 
 ---
 
