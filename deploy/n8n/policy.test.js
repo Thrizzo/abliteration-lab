@@ -1519,6 +1519,8 @@ ok('rpcclient enumeration stays read-only', ['enumdomusers', 'querydominfo', 'ge
       "ss -D ~/.curlrc; curl -s http://10.10.10.5/",
       "ss -D ~/.nmap/nmap-service-probes; nmap -sV 10.10.10.5",
       "dnsrecon -d lab -n 10.10.10.5 -t srv --xm ~/.curlrc; curl -s http://10.10.10.5/"].map((x) => [x, STAGED_ANY]),
+    ...['ss -F f.txt', 'ss -tanF f.txt', 'ss -Ff.txt', 'ss --filter f.txt', 'ss --filter=f.txt', 'ss --fil f.txt'].map((x) => [`curl -so f.txt http://10.10.10.5/f; ${x}`,
+      /^ss -F\/--filter \(a filter from a file the gate cannot see\)$/]),
     ...['--input-list doms.txt', '--inp doms.txt', '-iL doms.txt', '-iLdoms.txt'].map((x) => [`curl -so doms.txt http://10.10.10.5/d; dnsrecon ${x} -n 10.10.10.5 -t srv`,
       /^dnsrecon -iL\/--input-list \(target domains from a file\)$/]),
     // ... and the SMB, LDAP and SNMP tools and the filters: snmpwalk -Lf, onesixtyone -o in clusters, smbmap -qg and --cs,

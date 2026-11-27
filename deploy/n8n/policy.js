@@ -1712,6 +1712,8 @@ function reconEscape(program, args, seg) {
   if (tool === 'fping' && (clusterHas(args, 'f', 'bBcCHiIkOpQrStxXf') || pdLong(args, ['file']))) return 'fping -f (targets from a file or stdin)';
   if (tool === 'arp' && (clusterHas(args, 'dsf', 'AHpit') || pdLong(args, ['delete', 'set', 'file']))) return "arp -d, -s or -f changes the runner's ARP cache";
   if (tool === 'ss' && (clusterHas(args, 'K', 'fADFN') || pdLong(args, ['kill']))) return 'ss -K/--kill closes sockets on the runner';
+  // ss -F/--filter FILE reads its filter from a file and resolves the host names in it (iproute2 6.1.0, under strace)
+  if (tool === 'ss' && (clusterHas(args, 'F', 'fADN') || pdLong(args, ['filter']))) return 'ss -F/--filter (a filter from a file the gate cannot see)';
   // nmap scans what scripts find with --script-args newtargets (snmp-interfaces, a default script, adds the addresses it
   // reads), and reads script arguments from a file with --script-args-file
   if ((tool === 'nmap' || tool === 'rustscan') && (args.some((t) => /newtargets/i.test(t)) || args.some((t) => /^--?script-args-f/i.test(t)))) {
