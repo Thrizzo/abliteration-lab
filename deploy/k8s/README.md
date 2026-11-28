@@ -105,7 +105,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
     first and asks again if n8n would refuse it: the password 8 to 64 characters with a number and a capital letter,
     typed twice.
 
-  Re-running is safe: the build uses its cache, existing Secrets are kept, and n8n is updated in place.
+  Re-running is safe: the build uses its cache, existing Secrets are kept, and n8n is updated in place. A
+  port-forward that an earlier run left on the script's ports is stopped and started afresh.
 - **Needs:**
   - Rancher Desktop with Kubernetes and Traefik on;
   - Python 3 for the n8n step;
@@ -646,6 +647,9 @@ delete old runs you no longer need for Rollback.
   - `tests/test-rancher-dev-n8n.ps1` runs the script's own n8n login step with scripted answers: a fresh n8n's login
     is held to n8n's rules for its owner account and asked again, and the rules give n8n's own answers to
     `deploy/n8n/owner_rule_cases.json`.
+  - `tests/test-rancher-dev-forward.ps1` runs the script's port-forward functions against a faked Windows: Rancher
+    Desktop's `kubectl` is a wrapper (kuberlr) that runs the real kubectl as its child, so a leftover port-forward is
+    two processes. The tests check that both are stopped and that other processes on the port are left alone.
   - The script then:
     - creates the Secrets;
     - connects n8n;

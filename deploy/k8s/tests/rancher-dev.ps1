@@ -226,14 +226,32 @@ function Test-Port([int]$Port) {
     } catch { return $false } finally { $c.Close() }
 }
 
-# kubectl port-forward in the background until the script ends
+# kubectl port-forward in the background until the script ends. On Windows, Rancher Desktop's kubectl is a wrapper
+# (kuberlr) that runs the version-matched kubectl as its child and waits for it, so a port-forward is two processes:
+# stopping only the wrapper left the child holding the port (the owner's next run found 15678 and 18080 still in use).
 function Start-Forward([string]$Ns, [string]$Svc, [int]$Local, [int]$Remote) {
-    if (Test-Port $Local) { throw "port $Local is in use (an old port-forward?): stop it, or pick another port (-ConsolePort / -N8nPort)" }
+    if (Test-Port $Local) {
+        # a port-forward to this service on this port that an earlier run left: stopped, then started afresh (it may
+        # still point at a pod that is gone)
+        $old = @(Get-OldForward $Local $Svc)
+        foreach ($id in $old) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+        if ($old.Count) {
+            $until = (Get-Date).AddSeconds(10)
+            while ((Test-Port $Local) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 300 }
+            Note ('port {0}: stopped a port-forward to svc/{1} that an earlier run left (kubectl, pid {2})' -f $Local, $Svc, ($old -join ', '))
+        }
+        if (Test-Port $Local) {
+            $who = Get-PortHolder $Local
+            if ($who) { $who = " by $who" }
+            throw "port $Local is in use$who (an old port-forward?): stop it, or pick another port (-ConsolePort / -N8nPort)"
+        }
+    }
     $o = Join-Path $script:Tmp "pf-$Svc.out"
     $e = Join-Path $script:Tmp "pf-$Svc.err"
+    $since = Get-Date
     $p = Start-Process -FilePath 'kubectl' -ArgumentList @('--context', $Context, '-n', $Ns, 'port-forward', "svc/$Svc", "${Local}:${Remote}") `
         -NoNewWindow -PassThru -RedirectStandardOutput $o -RedirectStandardError $e
-    $script:PortForwards += $p
+    $script:PortForwards += [pscustomobject]@{ Process = $p; Since = $since }
     $until = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $until) {
         if ($p.HasExited) { break }
@@ -243,6 +261,43 @@ function Start-Forward([string]$Ns, [string]$Svc, [int]$Local, [int]$Remote) {
     $why = ''
     if (Test-Path $e) { $why = (Get-Content $e -Raw) }
     throw "port-forward to $Ns/$Svc did not come up: $why"
+}
+
+# Stops a port-forward this run started: on Windows first the kubectl that the wrapper runs as its child (only children
+# named kubectl* that started after it, so a reused process id cannot take an unrelated process along), then the process
+# it started, unless that has exited (its id may belong to another process by then).
+function Stop-Forward($F) {
+    if ($OnWindows) {
+        foreach ($k in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($F.Process.Id)" -ErrorAction SilentlyContinue)) {
+            if ($k.Name -like 'kubectl*' -and $k.CreationDate -ge $F.Since.AddSeconds(-1)) { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    if (-not $F.Process.HasExited) { Stop-Process -Id $F.Process.Id -Force -ErrorAction SilentlyContinue }
+}
+# Windows: the process that listens on port $Local (a Win32_Process), else $null
+function Get-PortListener([int]$Local) {
+    if (-not $OnWindows) { return $null }
+    try { $c = @(Get-NetTCPConnection -LocalPort $Local -State Listen -ErrorAction Stop) } catch { return $null }
+    if (-not $c.Count) { return $null }
+    return (Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$c[0].OwningProcess)" -ErrorAction SilentlyContinue)
+}
+function Get-PortHolder([int]$Local) {
+    $l = Get-PortListener $Local
+    if ($l) { return ('{0}, pid {1}' -f $l.Name, $l.ProcessId) }
+    return ''
+}
+# The process ids of a port-forward to svc/$Svc on port $Local that an earlier run left: the listener and the kubectl
+# wrapper above it, each only if it is a kubectl whose command line is that port-forward
+function Get-OldForward([int]$Local, [string]$Svc) {
+    $ids = @()
+    $proc = Get-PortListener $Local
+    while ($proc -and $ids.Count -lt 4) {
+        $cl = "$($proc.CommandLine)"
+        if ($proc.Name -notlike 'kubectl*' -or $cl -notmatch 'port-forward' -or -not $cl.Contains("svc/$Svc") -or -not $cl.Contains("${Local}:")) { break }
+        $ids += [int]$proc.ProcessId
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$proc.ParentProcessId)" -ErrorAction SilentlyContinue
+    }
+    return $ids
 }
 
 function Find-Python {
@@ -797,8 +852,9 @@ function Invoke-Apply {
         ($out -split "`n") | Select-Object -Last 10 | ForEach-Object { Note "| $_" }
         return $false
     }
-    $changed = @(($out -split "`n") | Where-Object { $_ -match ' (created|configured)$' }).Count
-    Ok "applied $Overlay ($changed objects created or changed)"
+    $changedLines = @(($out -split "`n") | Where-Object { $_ -match ' (created|configured)$' })
+    Ok "applied $Overlay ($($changedLines.Count) objects created or changed)"
+    $changedLines | ForEach-Object { Note "| $_" }        # on a re-run these say what changed since the last apply
     $allUp = $true
     $script:VolumesStuck = $false
     $ollamaAtZero = Test-OllamaAtZero
@@ -939,12 +995,12 @@ function Invoke-Setup {
 function Open-Console {
     Section 'Console login (Caddy in the console pod)'
     $script:User = Get-LabUser
+    try { Start-Forward 'lab' 'console' $ConsolePort 8080 } catch { Bad $_.Exception.Message; return }   # before the password is asked
     if (-not $script:LabPassword) {
         try { $script:LabPassword = Read-Secret "Console password for $($script:User)" 'LAB_PASSWORD' }
         catch { Bad $_.Exception.Message; return }
     }
     Set-Auth $script:User $script:LabPassword
-    try { Start-Forward 'lab' 'console' $ConsolePort 8080 } catch { Bad $_.Exception.Message; return }
     Step 'login: no password -> 401' { (Http -Url "$Console/" -NoAuth).Code -eq '401' }
     Step 'login: a wrong password -> 401' { (Http -Url "$Console/" -AuthFile $script:WrongAuth).Code -eq '401' }
     Step "login: $($script:User) -> 200" { (Http -Url "$Console/").Code -eq '200' }
@@ -1327,7 +1383,7 @@ try {
         }
     }
 } finally {
-    foreach ($p in $script:PortForwards) { try { if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } } catch { } }
+    foreach ($f in $script:PortForwards) { try { Stop-Forward $f } catch { } }
     if (-not $Teardown) { try { $null = kc @('-n', 'lab', 'delete', 'pod', 'probe-console', 'probe-intruder', '--ignore-not-found', '--wait=false') } catch { } }
     Remove-Item -Recurse -Force $script:Tmp -ErrorAction SilentlyContinue
     Pop-Location

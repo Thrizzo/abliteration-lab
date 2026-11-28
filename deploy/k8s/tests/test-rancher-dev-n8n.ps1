@@ -106,6 +106,7 @@ function Posted([string]$Case, [string]$Email, [string]$Password) {
 
 # ------------------------------------------------------------------------------------------------ the rules
 $cases = Get-Content -Raw -Encoding UTF8 (Join-Path $here '../../n8n/owner_rule_cases.json') | ConvertFrom-Json
+if (@($cases.password).Count -lt 20 -or @($cases.email).Count -lt 20) { Write-Output 'deploy/n8n/owner_rule_cases.json: too few cases read'; exit 1 }
 foreach ($c in $cases.password) {
     $got = Get-N8nPasswordProblem $c.password $c.min
     Expect 'password rule' ($got -ceq $c.problem) ("{0} (min {1}): '{2}', n8n: '{3}'" -f $c.password, $c.min, $got, $c.problem)
