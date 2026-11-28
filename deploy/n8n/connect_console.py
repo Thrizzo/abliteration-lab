@@ -12,11 +12,15 @@ Reach n8n through a port-forward first:
     kubectl -n lab-copilot port-forward svc/n8n 5678:5678
     python deploy/n8n/connect_console.py --email you@example.com --apply-secret
 The password is asked for (or N8N_PASSWORD). Standard library only; works on Windows, macOS and Linux.
+With --setup-owner on a fresh n8n, the login is checked against n8n's rules for its owner account first (8 to 64
+characters with a number and a capital letter; an e-mail address it takes), so nothing is created with a login n8n
+would refuse.
 """
 import argparse
 import getpass
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -48,6 +52,40 @@ NODE_CREDS = {
 }
 # what the public API accepts when it creates or updates a workflow
 WORKFLOW_FIELDS = ("name", "nodes", "connections", "settings")
+
+# What n8n refuses in a new owner account (2.48.7: @n8n/api-types OwnerSetupRequestDto, zod 3). owner_rule_cases.json
+# holds answers taken from n8n's own schema; rancher-dev.ps1 checks the same.
+PASSWORD_MAX = 64
+EMAIL_RULE = re.compile(r"(?!\.)(?!.*\.\.)[A-Za-z0-9_'+\-.]*[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}")
+
+
+def password_problem(password, min_length=8):
+    """What a new account's password lacks for n8n, '' if nothing: min_length (8, or N8N_PASSWORD_MIN_LENGTH) to 64
+    characters, a digit and a capital letter, as JavaScript reads them (/\\d/ is 0-9, /[A-Z]/ is A-Z, the length is in
+    UTF-16 units)."""
+    n = len(password.encode("utf-16-le")) // 2
+    missing = []
+    if not min_length <= n <= PASSWORD_MAX:
+        missing.append(f"{min_length} to {PASSWORD_MAX} characters (it has {n})")
+    if not re.search("[0-9]", password):
+        missing.append("a number")
+    if not re.search("[A-Z]", password):
+        missing.append("a capital letter")
+    return ", ".join(missing)
+
+
+def email_ok(email):
+    """zod's e-mail rule, which n8n's owner setup applies (its /.../i: A-Z there means A-Z and a-z, nothing else)."""
+    return EMAIL_RULE.fullmatch(email or "") is not None
+
+
+def owner_problem(email, password, min_length=8):
+    """What n8n would refuse in a new owner account, '' if nothing."""
+    problems = [] if email_ok(email) else ["the e-mail is not an address n8n takes (name@domain.tld)"]
+    missing = password_problem(password, min_length)
+    if missing:
+        problems.append(f"the password needs {missing}")
+    return "; ".join(problems)
 
 
 class N8n:
@@ -111,6 +149,16 @@ class N8n:
             return f"unreachable, {type(e).__name__}", ""
 
     # ---------------------------------------------------------------- API key (internal REST API, your login)
+    def owner_rule(self):
+        """From n8n's public settings: (True while it has no owner account yet, False once it has one, None when they
+        do not say; the shortest password it takes)."""
+        try:
+            um = self.call("GET", "/rest/settings", auth="none")["data"]["userManagement"]
+            fresh, min_length = um.get("showSetupOnFirstLoad"), max(8, int(um.get("passwordMinLength") or 8))
+        except (RuntimeError, ValueError, TypeError, KeyError, AttributeError):
+            return None, 8
+        return (fresh if isinstance(fresh, bool) else None), min_length
+
     def owner_setup(self, email, password):
         try:
             self.call("POST", "/rest/owner/setup", {"email": email, "firstName": "Lab", "lastName": "Owner", "password": password},
@@ -228,8 +276,17 @@ def main(argv=None):
         if not a.email:
             ap.error("--email is needed to create the API keys (or pass --api-key)")
         password = a.password or os.environ.get("N8N_PASSWORD") or getpass.getpass("n8n password: ")
-        if a.setup_owner and n8n.owner_setup(a.email, password):
-            print("owner account created")
+        if a.setup_owner:
+            # n8n checks a password's form before it looks for an owner: an n8n that has one would answer a short
+            # password with "8 to 64 characters", not with a wrong login. So only a fresh n8n (or one whose settings
+            # do not say) gets the owner setup, and only with a login it takes.
+            fresh, min_length = n8n.owner_rule()
+            problem = owner_problem(a.email, password, min_length) if fresh else ""
+            if problem:
+                raise SystemExit(f"connect_console.py: n8n has no owner account yet and would refuse this one: {problem}. "
+                                 "Nothing was created; run it again with that fixed.")
+            if fresh is not False and n8n.owner_setup(a.email, password):
+                print("owner account created")
         n8n.login(a.email, password)
         n8n.api_key = n8n.create_api_key(SETUP_LABEL)
         console_key = n8n.create_api_key(KEY_LABEL, CONSOLE_SCOPES)
@@ -272,4 +329,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except RuntimeError as e:          # it names the request and n8n's answer; a traceback adds nothing
+        sys.exit(f"connect_console.py: {e}")

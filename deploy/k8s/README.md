@@ -101,7 +101,9 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
     `workspace/eval/`; `-JudgeModel` picks another judge.
 - **It asks for:**
   - a console password the first time (only its bcrypt hash is stored, in Secret `lab/basic-auth`);
-  - an n8n login (a fresh n8n gets it as its owner account).
+  - an n8n login (a fresh n8n gets it as its owner account). For a fresh n8n the script checks it against n8n's rules
+    first and asks again if n8n would refuse it: the password 8 to 64 characters with a number and a capital letter,
+    typed twice.
 
   Re-running is safe: the build uses its cache, existing Secrets are kept, and n8n is updated in place.
 - **Needs:**
@@ -370,7 +372,9 @@ python deploy/n8n/connect_console.py --email <your n8n login> --apply-secret
 - **Login:** it asks for your n8n password. A temporary full-scope key does the setup and is deleted at the end.
 - **No restart:** the console reads the Secret from a mounted file, so it is connected within a minute or two.
 - **Re-running** updates everything in place and rotates the key and the secret.
-- **Fresh n8n:** add `--setup-owner --password ...` to create the owner account.
+- **Fresh n8n:** add `--setup-owner --password ...` to create the owner account. n8n wants 8 to 64 characters with a
+  number and a capital letter; the script checks that first and stops before it creates anything. An n8n that has its
+  owner gets the login only.
 
 **Which model the copilot uses.** The copilot is the n8n flow, and it uses three models: the *copilot model* (operator),
 the *judge*, and the *embedding model* for retrieval. The **Models** card names all three. The *operator* is the
@@ -639,6 +643,9 @@ delete old runs you no longer need for Rollback.
   controller. It runs `tests/rancher-dev.ps1 -Setup -Pipeline -Check` unattended under PowerShell 7, on the `ci-k3s`
   overlay: `dev`, with only the embedding model pulled.
   - PowerShell's parser checks the script first, and that it is plain ASCII as Windows PowerShell 5.1 needs.
+  - `tests/test-rancher-dev-n8n.ps1` runs the script's own n8n login step with scripted answers: a fresh n8n's login
+    is held to n8n's rules for its owner account and asked again, and the rules give n8n's own answers to
+    `deploy/n8n/owner_rule_cases.json`.
   - The script then:
     - creates the Secrets;
     - connects n8n;

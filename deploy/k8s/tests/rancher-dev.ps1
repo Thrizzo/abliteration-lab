@@ -12,7 +12,8 @@ rancher-dev-<time>.log in the current folder, without passwords or keys: paste t
 
   -Setup     builds the console image into Rancher Desktop's container engine; creates the namespaces and Secrets
              (asks for a console password the first time); applies the overlay and waits for every pod; connects
-             n8n (asks for an n8n login; a fresh n8n gets it as its owner account)
+             n8n (asks for an n8n login; a fresh n8n gets it as its owner account, so it is checked against n8n's
+             rules first: the password 8 to 64 characters with a number and a capital letter, typed twice)
   -Check     the login, the Ingress (http://lab.localhost), the network policies, the console's Kubernetes API access,
              the kill switch, the copilot's models, a knowledge upload that a copilot run retrieves, a free prompt
   -Pipeline  a tiny random GLM through every stage as Kubernetes Jobs, then Promote (a few minutes on a laptop)
@@ -194,14 +195,20 @@ function Set-Auth([string]$User, [string]$Password) {
     Write-CurlUser $script:WrongAuth $User ($Password + '-wrong')
 }
 
-# A secret from the environment, else asked for (hidden). -Confirm asks twice.
-function Read-Secret([string]$Prompt, [string]$EnvName, [switch]$Confirm) {
+# A secret from the environment, else asked for (hidden). -Confirm asks twice. -Check: a script block that gets the
+# value and returns what is wrong with it ('' if nothing); a typed value is then asked again, one from the environment
+# is an error.
+function Read-Secret([string]$Prompt, [string]$EnvName, [switch]$Confirm, [scriptblock]$Check = $null) {
     $v = [Environment]::GetEnvironmentVariable($EnvName)
-    if ($v) { return $v }
+    if ($v) {
+        if ($Check) { $why = "$(& $Check $v)"; if ($why) { throw ($EnvName + ': ' + $why) } }
+        return $v
+    }
     if ($NonInteractive) { throw "$EnvName is not set (needed with -NonInteractive)" }
     while ($true) {
         $p1 = (New-Object System.Net.NetworkCredential('', (Read-Host -AsSecureString $Prompt))).Password
         if (-not $p1) { Write-Host 'Empty; again.'; continue }
+        if ($Check) { $why = "$(& $Check $p1)"; if ($why) { Write-Host "$why; again." -ForegroundColor Yellow; continue } }
         if (-not $Confirm) { return $p1 }
         $p2 = (New-Object System.Net.NetworkCredential('', (Read-Host -AsSecureString 'Again, to confirm'))).Password
         if ($p1 -eq $p2) { return $p1 }
@@ -825,6 +832,36 @@ function Invoke-Apply {
     return $allUp
 }
 
+# What n8n refuses in a new owner account (n8n 2.48.7: @n8n/api-types OwnerSetupRequestDto, zod 3), so a fresh n8n's
+# login is checked before the owner setup and asked again, not refused by n8n at the end of the setup. The same rules as
+# connect_console.py; CI runs both through deploy/n8n/owner_rule_cases.json, whose answers came from n8n's own schema.
+# The password: MinLength (8, or N8N_PASSWORD_MIN_LENGTH) to 64 characters (UTF-16 units, as .NET and JavaScript count)
+# with a digit and a capital letter (JavaScript's /\d/ and /[A-Z]/: 0-9 and A-Z only). '' when it fits, else what it lacks.
+function Get-N8nPasswordProblem([string]$Password, [int]$MinLength = 8) {
+    $missing = @()
+    if ($Password.Length -lt $MinLength -or $Password.Length -gt 64) { $missing += ('{0} to 64 characters (it has {1})' -f $MinLength, $Password.Length) }
+    if ($Password -cnotmatch '[0-9]') { $missing += 'a number' }
+    if ($Password -cnotmatch '[A-Z]') { $missing += 'a capital letter' }
+    return ($missing -join ', ')
+}
+# The e-mail: zod's rule, case-insensitive there, so A-Z and a-z here (written out: -match would follow the culture)
+function Test-N8nEmail([string]$Email) {
+    return ($Email -cmatch '^(?!\.)(?!.*\.\.)[A-Za-z0-9_''+\-.]*[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}\z')
+}
+# n8n's public settings say whether it still has to get its owner account, and the shortest password it takes
+function Get-N8nOwnerRule {
+    $rule = @{ Known = $false; Fresh = $false; MinLength = 8 }
+    $r = Http -Url "http://127.0.0.1:$N8nPort/rest/settings" -NoAuth
+    $um = $null
+    if ($r.Code -eq '200' -and $r.Json) { $um = $r.Json.data.userManagement }
+    if ($null -ne $um -and $um.showSetupOnFirstLoad -is [bool]) {
+        $rule.Known = $true
+        $rule.Fresh = $um.showSetupOnFirstLoad
+        try { $rule.MinLength = [Math]::Max(8, [int]$um.passwordMinLength) } catch { }
+    }
+    return $rule
+}
+
 function Invoke-N8n {
     $py = Find-Python
     if (-not $py) { Bad 'Python 3 for deploy/n8n/connect_console.py (python.org, or: winget install Python.Python.3.12), then -Setup again'; return }
@@ -835,12 +872,35 @@ function Invoke-N8n {
     # that (an owner setup in between got a plain 404 in CI). connect_console.py waits for it as well.
     if (Wait-For 300 { (Http -Url "http://127.0.0.1:$N8nPort/healthz/readiness" -NoAuth).Code -eq '200' } 3) { Ok 'n8n is ready (/healthz/readiness)' }
     else { Bad 'n8n is not ready after 5 minutes (/healthz/readiness)'; Show-Trouble 'lab-copilot'; return }
-    $email = $N8nEmail
-    if (-not $email) {
-        if ($NonInteractive) { Bad 'N8N_EMAIL is not set (needed with -NonInteractive)'; return }
-        $email = Read-Host 'n8n login e-mail (a fresh n8n: the owner account to create)'
+    # a fresh n8n makes this login its owner account: checked against n8n's rules first, the password asked twice
+    $rule = Get-N8nOwnerRule
+    $check = $null
+    if ($rule.Fresh) {
+        Note ('n8n has no owner account yet: the login you give now becomes it (password: {0} to 64 characters with a number and a capital letter)' -f $rule.MinLength)
+        $askEmail = "E-mail for n8n's new owner account"
+        $askPw = "Password for n8n's new owner account"
+        $n8nMinLength = $rule.MinLength                  # read by $check, which Read-Secret runs
+        $check = { param($p) $m = Get-N8nPasswordProblem $p $n8nMinLength; if ($m) { "n8n would refuse it for its owner account: it needs $m" } }
+    } elseif ($rule.Known) {
+        $askEmail = 'n8n login e-mail'
+        $askPw = 'n8n password'
+    } else {
+        $askEmail = 'n8n login e-mail (a fresh n8n: the owner account to create)'
+        $askPw = 'n8n password (a fresh n8n: 8+ characters with a number and a capital letter)'
     }
-    try { $pw = Read-Secret 'n8n password (a fresh n8n: 8+ characters with a number and a capital letter)' 'N8N_PASSWORD' }
+    $email = $N8nEmail
+    while ($true) {
+        if (-not $email) {
+            if ($NonInteractive) { Bad 'N8N_EMAIL is not set (needed with -NonInteractive)'; return }
+            $email = "$(Read-Host $askEmail)".Trim()
+            if (-not $email) { continue }
+        }
+        if (-not $rule.Fresh -or (Test-N8nEmail $email)) { break }
+        if ($N8nEmail) { Bad '-N8nEmail (N8N_EMAIL) is not an e-mail address n8n takes for its owner account (name@domain.tld)'; return }
+        Write-Host 'n8n would refuse that e-mail address for its owner account (name@domain.tld); again.' -ForegroundColor Yellow
+        $email = ''
+    }
+    try { $pw = Read-Secret $askPw 'N8N_PASSWORD' -Confirm:($rule.Fresh) -Check $check }
     catch { Bad $_.Exception.Message; return }
     $secretFile = Join-Path $script:Tmp 'copilot-secret.json'
     $old = $env:N8N_PASSWORD
