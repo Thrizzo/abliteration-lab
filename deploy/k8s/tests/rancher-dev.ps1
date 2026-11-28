@@ -1222,7 +1222,9 @@ function Invoke-Knowledge {
     if ($script:CopilotOk) {
         $run = Api 'POST' '/copilot/run' @{ task = 'Enumerate SMB on the box'; target = '10.10.10.5' }
         $id = "$($run.Json.id)"
-        $script:Retrieval = "no run ($($run.Code))"
+        $why = "$($run.Code)"
+        if ($run.Json -and $run.Json.detail) { $why += ': ' + "$($run.Json.detail)" }   # 502: what n8n answered, or why it was not reached
+        $script:Retrieval = "no run ($why)"
         if ($id) {
             $null = Wait-For 300 {
                 $g = (Api 'GET' "/copilot/runs/$id").Json
