@@ -242,47 +242,84 @@ def _arch_covers(arch_list, major, minor):
     return False
 
 
-def gpu_problem():
-    """Why the visible GPUs cannot run this torch build, '' when they can (or no GPU is visible). The cu128 wheels carry
-    kernels for Turing (sm_75) and newer only; for an older GPU torch.cuda.is_available() is still True and only warns,
-    and the first kernel then fails ("no kernel image is available"). Builds with TORCH_FLAVOR=cu126 cover Maxwell,
-    Pascal and Volta."""
+def _bad_gpus(devices=None):
+    """[(index, name, (major, minor))] of the visible GPUs this torch build has no kernels for, and the build's arch list;
+    devices limits the check to these indices. ([], []) when no GPU is visible, for a CPU build, or when torch cannot
+    tell (a build without an arch list, a mocked torch.cuda)."""
     try:
         if not torch.cuda.is_available() or not getattr(torch.version, "cuda", None):
-            return ""
+            return [], []
         archs = torch.cuda.get_arch_list()
         if not archs:
-            return ""
+            return [], []
         bad = []
-        for i in range(torch.cuda.device_count()):
+        for i in (range(torch.cuda.device_count()) if devices is None else devices):
             major, minor = torch.cuda.get_device_capability(i)
             if not _arch_covers(archs, major, minor):
-                bad.append(f"{torch.cuda.get_device_name(i)} (compute capability {major}.{minor})")
+                bad.append((i, torch.cuda.get_device_name(i), (major, minor)))
+        return bad, archs
     except Exception:                                          # a mocked or unusual torch.cuda: no verdict
-        return ""
+        return [], []
+
+
+def gpu_problem(devices=None):
+    """Why GPUs this torch build has no kernels for cannot be used, '' when all can (or no GPU is visible). devices: the
+    indices to check, default every visible GPU. The cu128 wheels carry kernels for Turing (sm_75) up to Blackwell
+    (sm_120); for a GPU outside that, torch.cuda.is_available() is still True and torch only warns, and the first kernel
+    then fails ("no kernel image is available"). Builds with TORCH_FLAVOR=cu126 cover Maxwell, Pascal and Volta instead,
+    and no Blackwell."""
+    bad, archs = _bad_gpus(devices)
     if not bad:
         return ""
-    return (f"this image's PyTorch ({torch.__version__}) has no kernels for {', '.join(bad)}: it covers "
-            f"{', '.join(archs)}. Build the image with TORCH_FLAVOR=cu126 (deploy/.env) for Maxwell, Pascal and Volta GPUs")
+    sm = [divmod(int("".join(ch for ch in a.partition("_")[2] if ch.isdigit()) or 0), 10)
+          for a in archs if a.startswith("sm_")]
+    older = sm and all(cap < min(sm) for _, _, cap in bad)
+    flavor = ("TORCH_FLAVOR=cu126, which covers Maxwell, Pascal and Volta" if older
+              else "the default TORCH_FLAVOR=cu128, which covers Turing to Blackwell")
+    return (f"this image's PyTorch ({torch.__version__}) has no kernels for "
+            f"{', '.join(f'GPU {i}, {name} (compute capability {cap[0]}.{cap[1]})' for i, name, cap in bad)}: it covers "
+            f"{', '.join(archs)}. Build the image with {flavor}: in deploy/.env for Docker (then up -d --build), or with "
+            f"--build-arg for the image Kubernetes runs (the lab-jobs settings name it)")
+
+
+def _current_gpu():
+    try:
+        return torch.cuda.current_device()
+    except Exception:                                          # a mocked torch.cuda
+        return 0
 
 
 def cuda_usable():
-    """A CUDA GPU is visible and this torch build can run on it."""
-    return torch.cuda.is_available() and not gpu_problem()
+    """A CUDA GPU is visible and this torch build can run on the one a run uses by default (device cuda: the current
+    device)."""
+    return torch.cuda.is_available() and not gpu_problem([_current_gpu()])
 
 
 def resolve_device(device_map="cuda", dtype="auto", log=print):
     """What the model is really loaded on: (device_map, dtype name).
-    'cuda' without a CUDA GPU this torch build can use becomes 'cpu', and so does 'auto' when the visible GPU is too old
-    for the build (accelerate would place weights on it). dtype 'auto' is bfloat16 on a GPU; on the CPU it is float32
-    unless the processor has a fast bf16 path. An explicit dtype is kept as given."""
+    'cuda' uses the current GPU only: without a GPU this torch build can run on, it becomes 'cpu'. 'auto' spreads over
+    every visible GPU (accelerate): when some of them are outside the build, it keeps to the current GPU ('cuda') if that
+    one is covered, else it runs on the CPU. dtype 'auto' is bfloat16 on a GPU; on the CPU it is float32 unless the
+    processor has a fast bf16 path. An explicit dtype is kept as given."""
     has_cuda = torch.cuda.is_available()
-    problem = gpu_problem() if has_cuda else ""
-    if problem and device_map in ("cuda", "auto"):
-        log(f"{problem}. Running on the CPU instead (works, but measure and scan take much longer)")
-        device_map, has_cuda = "cpu", False
+    slow = "works, but measure and scan take much longer"
+    if has_cuda and device_map in ("cuda", "auto"):
+        current = _current_gpu()
+        mine = gpu_problem([current])
+        if mine:
+            covered = torch.cuda.device_count() - len(_bad_gpus()[0])
+            hint = (f"; CUDA_VISIBLE_DEVICES can put one of the {covered} GPU{'s' if covered > 1 else ''} this build covers "
+                    f"first") if covered > 0 else ""
+            log(f"{mine}. Running on the CPU instead ({slow}){hint}")
+            device_map, has_cuda = "cpu", False
+        elif device_map == "auto":
+            others = gpu_problem()
+            if others:
+                log(f"{others}. Device auto keeps to GPU {current}, which this build covers; hide the others "
+                    f"(CUDA_VISIBLE_DEVICES) to spread over every GPU it covers")
+                device_map = "cuda"
     if device_map == "cuda" and not has_cuda:
-        log("no CUDA GPU is visible to this process: running on the CPU instead (works, but measure and scan take much longer)")
+        log(f"no CUDA GPU is visible to this process: running on the CPU instead ({slow})")
         device_map = "cpu"
     on_cpu = device_map == "cpu" or (device_map == "auto" and not has_cuda)
     if dtype == "auto":

@@ -51,7 +51,7 @@ PRESETS = [
     {"repo": "THUDM/glm-edge-4b-chat", "family": "GLM-Edge", "size": "4.3B · 8.6 GB", "local_ok": True, "note": "the POC model: dense pre-norm, exact edit"},
     {"repo": "THUDM/glm-edge-1.5b-chat", "family": "GLM-Edge", "size": "1.5B · 3 GB", "local_ok": True, "note": "small and fast"},
     {"repo": "THUDM/GLM-4-9B-0414", "family": "GLM-4", "size": "9.4B · 19 GB", "local_ok": False, "note": "post-norm block: direction folded through the norm; 16 GB VRAM is too small for bf16 (device_map auto offloads to CPU, slow)"},
-    {"repo": "THUDM/glm-4-9b-chat-hf", "family": "GLM-4", "size": "9.4B · 19 GB", "local_ok": False, "note": "post-norm block, same as above"},
+    {"repo": "THUDM/glm-4-9b-chat-hf", "family": "GLM-4", "size": "9.4B · 19 GB", "local_ok": False, "note": "model_type glm: dense pre-norm like GLM-Edge, exact edit; 16 GB VRAM is too small for bf16"},
     {"repo": "zai-org/GLM-4.5-Air", "family": "GLM-4.5 MoE", "size": "106B · 220 GB", "local_ok": False, "note": "MoE: every expert down_proj is edited; multi-GPU node"},
     {"repo": "zai-org/GLM-4.6", "family": "GLM-4.6 MoE", "size": "355B", "local_ok": False, "note": "MoE, multi-GPU cluster"},
     {"repo": "zai-org/GLM-5.2", "family": "GLM-5.2 MoE + DSA", "size": "744B · 1.5 TB bf16", "local_ok": False, "gguf": False, "note": "78 layers, 256 experts, DSA indexer untouched; cluster only"},
@@ -99,6 +99,44 @@ sbom = SbomJob(PROJECT)
 
 
 # ------------------------------------------------------------------------- pipeline subprocess
+# Stages that load no model (downloads, the GGUF and Ollama import, the notebook engine's setup and dataset audit). Every
+# other local stage loads one onto the GPU (or into the RAM): Ollama's models are unloaded first, and no copilot run,
+# free prompt, Compare or embedding may load them again while it runs (_gpu_free), nor run on while it starts (_ollama_busy).
+NON_GPU_STAGES = ("download", "ollama", "deploy", "setup", "data")
+_STREAMS = {"n": 0}
+_STREAMS_LOCK = threading.Lock()
+
+
+def _counted(gen):
+    """An open model stream (a free prompt, Compare), counted while it is read."""
+    with _STREAMS_LOCK:
+        _STREAMS["n"] += 1
+    try:
+        yield from gen
+    finally:
+        with _STREAMS_LOCK:
+            _STREAMS["n"] -= 1
+
+
+def _ollama_busy():
+    """What still has Ollama load or run a model, '' when nothing: copilot runs before their end or approval wait,
+    knowledge uploads still being embedded, open free-prompt and Compare streams. Runs from n8n's own form are not seen."""
+    out = []
+    with copilot.lock:
+        n = sum(1 for r in copilot.runs.values() if r.get("status") == "running")
+    if n:
+        out.append(f"{n} copilot run{'s' if n > 1 else ''}")
+    with knowledge.lock:
+        k = sum(1 for j in knowledge.jobs.values() if (j or {}).get("status") in ("queued", "ingesting"))
+    if k:
+        out.append(f"{k} knowledge upload{'s' if k > 1 else ''} being embedded")
+    with _STREAMS_LOCK:
+        s = _STREAMS["n"]
+    if s:
+        out.append(f"{s} open model stream{'s' if s > 1 else ''} (a free prompt or Compare)")
+    return ", ".join(out)
+
+
 class Pipeline:
     def __init__(self):
         self.proc = None
@@ -116,7 +154,11 @@ class Pipeline:
     def start(self, cmd, engine, stage, run_dir=None, env_extra=None):
         if self.running():
             raise HTTPException(409, f"'{self.stage}' is still running")
-        if stage not in ("download", "ollama", "deploy"):          # GPU stages: free the VRAM first
+        if stage not in NON_GPU_STAGES:                             # GPU stages: nothing else on Ollama, then free the VRAM
+            busy = _ollama_busy()
+            if busy:
+                raise HTTPException(409, f"Ollama is still busy with {busy}, and it shares the GPU (or the RAM) with this "
+                                         f"stage: start {stage} when that has finished, or stop it")
             if lab.hm is not None:
                 lab.unload()
             try:
@@ -593,9 +635,14 @@ def _gpu_free(what):
     the model starts with Ollama's models unloaded, and anything that makes Ollama load one beside it (a copilot run's
     operator and judge, a free prompt, Compare, the embeddings of an upload) can make the stage run out of memory. So
     they wait (409) until the stage ends. In Kubernetes the Jobs and the copilot's models run apart."""
-    if not K8S and pipeline.running() and pipeline.stage not in ("download", "ollama", "deploy"):
+    if K8S:
+        return
+    if pipeline.running() and pipeline.stage not in NON_GPU_STAGES:
         raise HTTPException(409, f"the pipeline's {pipeline.stage} stage is running and needs the GPU (or the RAM) for itself: "
                                  f"{what} can start when it has finished, because Ollama shares that memory with it here")
+    if lab.hm is not None and str(getattr(lab.hm, "device", "")).startswith("cuda"):
+        raise HTTPException(409, f"the lab (step 2) holds a model on the GPU: {what} can start when it is unloaded there, "
+                                 f"because Ollama would load its models beside it")
 
 
 @app.post("/api/copilot/run")
@@ -651,7 +698,7 @@ def model_chat_stream(b: Prompt, request: Request):
     _gpu_free("a free prompt")
     who = _who(request)
     model = copilot_models.operator(b.model)
-    return StreamingResponse((json.dumps(ev) + "\n" for ev in model_chat.stream(b.prompt, b.max_tokens, who, model)),
+    return StreamingResponse(_counted(json.dumps(ev) + "\n" for ev in model_chat.stream(b.prompt, b.max_tokens, who, model)),
                              media_type="application/x-ndjson")
 
 
@@ -811,7 +858,7 @@ def ollama_chat_proxy(c: ChatReq):
                 if not chunk:
                     break
                 yield chunk
-    return StreamingResponse(gen(), media_type="application/x-ndjson")
+    return StreamingResponse(_counted(gen()), media_type="application/x-ndjson")
 
 
 @app.post("/api/ollama/unload")

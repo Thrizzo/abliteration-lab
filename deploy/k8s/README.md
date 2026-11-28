@@ -579,7 +579,7 @@ advice. Have legal confirm the points marked **check**.
 | Part | Licence | What it means internally |
 |---|---|---|
 | Rancher Desktop, k3s, Traefik, Qdrant, Ollama, Caddy, llama.cpp, vLLM, PyTorch, transformers, FastAPI | Apache-2.0 / MIT / BSD | Free. |
-| Docker Desktop | Paid subscription for companies with 250+ employees or $10M+ revenue | Needed for the Docker Compose path on Windows with a GPU (Rancher Desktop gives containers no GPU there); not needed for the Kubernetes dev path (Rancher Desktop) or Docker Engine on Linux, which is free. |
+| Docker Desktop | Paid subscription for companies with 250+ employees or $10M+ revenue | Used by this repository's GPU path on Windows (Rancher Desktop gives containers no GPU there). Docker Engine or Podman inside a WSL 2 distribution with the NVIDIA Container Toolkit is a free alternative these docs do not cover. Not needed for the Kubernetes dev path (Rancher Desktop) or Docker Engine on Linux. |
 | n8n Community Edition, self-hosted | Sustainable Use License | Free for internal business use. Offering it to customers, or running it as a service for others, needs a commercial licence. |
 | GLM-5.3-Flash | MIT | Free. |
 | GLM-5.3 | Modified MIT. Model-as-a-Service providers with more than $10B revenue need a security review by Z.AI before commercial use. | Internal red-team use is not MaaS. **Never offer the model, or the abliterated one, as an API to others** without that review. |

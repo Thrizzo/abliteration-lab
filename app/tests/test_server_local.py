@@ -2,8 +2,10 @@
 the server once per process, in Kubernetes mode. Findings of the Docker audit:
 - the audit log: what the console records (here a free prompt) goes to workspace/audit/*.jsonl and to the log, as in
   Kubernetes, and outlives a restart; the live feed still gets it;
-- one machine for the pipeline and Ollama: while a stage that loads the model runs, copilot runs, free prompts, Compare
-  and knowledge uploads wait (409, with the stage named); a download holds none of them back;
+- one machine for the pipeline and Ollama: while a stage that loads the model runs, or the lab holds one on the GPU,
+  copilot runs, free prompts, Compare and knowledge uploads wait (409, with the reason); a download or the notebook
+  engine's setup holds none of them back; and the other way round, such a stage does not start while a copilot run, an
+  upload being embedded or an open model stream still uses Ollama;
 - the copilot's secrets: a file the console may not read is reported as such, not as missing;
 - the operator list of an Ollama that holds every model of the stack: embedding models left out (and named), the
   abliterated runs first, and messages that name the model server, not glm-serve.
@@ -71,7 +73,44 @@ out["measure"] = held
 server.pipeline.stage = "download"
 st, b = call(server.app, "POST", "/api/model/chat", {}, {"prompt": "hi", "max_tokens": 8})
 out["download"] = st
+server.pipeline.stage = "setup"                       # the notebook engine's setup loads no model
+out["setup"] = call(server.app, "POST", "/api/model/chat", {}, {"prompt": "hi", "max_tokens": 8})[0]
 server.pipeline.proc = None
+
+# the lab holds a model on the GPU (step 2): Ollama would load beside it
+class Lab:
+    device = "cuda:0"
+server.lab.hm = Lab()
+st, b = call(server.app, "POST", "/api/ollama/chat", {}, {"model": "glm-abl", "prompt": "hi"})
+out["lab"] = (st, b.get("detail", "") if isinstance(b, dict) else str(b))
+Lab.device = "cpu"
+out["lab_cpu"] = call(server.app, "POST", "/api/model/chat", {}, {"prompt": "hi", "max_tokens": 8})[0]
+server.lab.hm = None
+
+# the other way round: a GPU stage does not start while Ollama still works for the console
+from fastapi import HTTPException
+def start(stage):
+    try:
+        server.pipeline.start([sys.executable, "-c", "pass"], "abliterate", stage)
+        server.pipeline.proc.wait()
+        return "started"
+    except HTTPException as e:
+        return f"{e.status_code}: {e.detail}"
+with server.copilot.lock:
+    server.copilot.runs["r1"] = {"id": "r1", "status": "running"}
+out["start_copilot"] = start("measure")
+out["start_download"] = start("download")             # a download loads nothing: it may start
+with server.copilot.lock:
+    server.copilot.runs["r1"]["status"] = "waiting"   # parked at Human approval: past the judge
+server._STREAMS["n"] = 1                              # a free prompt or Compare still streaming
+out["start_stream"] = start("scan")
+server._STREAMS["n"] = 0
+with server.knowledge.lock:
+    server.knowledge.jobs["htb/x.md"] = {"status": "ingesting"}
+out["start_ingest"] = start("measure")
+with server.knowledge.lock:
+    server.knowledge.jobs.clear()
+out["start_free"] = start("measure")
 print("RESULT " + json.dumps(out))
 """
 
@@ -107,6 +146,22 @@ class LocalConsole(unittest.TestCase):
             self.assertIn("measure stage is running", detail, path)
         self.assertIn("Compare", self.got["measure"]["/api/ollama/chat"][1])
         self.assertEqual(self.got["download"], 200)                           # a download leaves the GPU alone
+        self.assertEqual(self.got["setup"], 200)                              # so does the notebook engine's setup
+
+    def test_a_lab_model_on_the_gpu_holds_back_ollama_too(self):
+        status, detail = self.got["lab"]
+        self.assertEqual(status, 409)
+        self.assertIn("the lab (step 2) holds a model on the GPU", detail)
+        self.assertEqual(self.got["lab_cpu"], 200)                            # a lab model in the RAM does not
+
+    def test_a_gpu_stage_waits_for_what_still_uses_ollama(self):
+        g = self.got
+        self.assertIn("409: Ollama is still busy with 1 copilot run", g["start_copilot"])
+        self.assertEqual(g["start_download"], "started")
+        self.assertIn("1 open model stream (a free prompt or Compare)", g["start_stream"])
+        self.assertNotIn("copilot run", g["start_stream"])                    # a run waiting for approval is past its models
+        self.assertIn("1 knowledge upload being embedded", g["start_ingest"])
+        self.assertEqual(g["start_free"], "started")
 
 
 class Secrets(unittest.TestCase):

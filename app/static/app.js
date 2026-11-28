@@ -151,9 +151,9 @@ async function loadEnv(){
   if(g){ $('#gpuVal').textContent=`${g.vram_used_gb}/${g.vram_total_gb} GB`; $('#dotGpu').className='dot '+(g.vram_used_gb/g.vram_total_gb>0.5?'busy':'on'); }
   else if(e.cuda===false){ $('#gpuVal').textContent='cpu'; $('#dotGpu').className='dot'; }
   $('#dotOll').className='dot '+(e.ollama.reachable?'on':'bad');
-  if(e.cuda===false && !document.querySelector('#cudaWarn')){ const w=document.createElement('div'); w.id='cudaWarn'; w.className='narr'; w.style.borderLeftColor='var(--warn)'; const f32=e.dtype!=='bfloat16'; w.innerHTML=(e.cuda_problem?'<b style="color:var(--warn)">The GPU is too old for this image: the app runs on the CPU.</b> '+esc(e.cuda_problem)+'. Until then everything works':'<b style="color:var(--warn)">No CUDA GPU is visible to the app: it runs on the CPU.</b> Everything works')+', but measure, scan and the lab take much longer, and the model has to fit into RAM in '+(f32?'float32':'bf16 (this processor has a fast bf16 path)')+': about '+(f32?'7 GB for GLM-Edge-1.5B and 18 GB for the 4B':'6 GB for GLM-Edge-1.5B and 11 GB for the 4B')+'. The Advanced options shorten a CPU run: fewer test prompts, fewer new tokens, a narrower layer range. To use a GPU instead, start the stack with the NVIDIA runtime (<span class="mono">docker-compose.gpu.yml</span> / <span class="mono">--gpus all</span>).'; $('#s-abl').insertBefore(w, $('#s-abl').firstChild.nextSibling); }
+  if(e.cuda===false && !document.querySelector('#cudaWarn')){ const w=document.createElement('div'); w.id='cudaWarn'; w.className='narr'; w.style.borderLeftColor='var(--warn)'; const f32=e.dtype!=='bfloat16'; w.innerHTML=(e.cuda_problem?'<b style="color:var(--warn)">This image\'s PyTorch has no kernels for the GPU: the app runs on the CPU.</b> '+esc(e.cuda_problem)+'. Until then everything works':'<b style="color:var(--warn)">No CUDA GPU is visible to the app: it runs on the CPU.</b> Everything works')+', but measure, scan and the lab take much longer, and the model has to fit into RAM in '+(f32?'float32':'bf16 (this processor has a fast bf16 path)')+': about '+(f32?'7 GB for GLM-Edge-1.5B and 18 GB for the 4B':'6 GB for GLM-Edge-1.5B and 11 GB for the 4B')+'. The Advanced options shorten a CPU run: fewer test prompts, fewer new tokens, a narrower layer range.'+(e.cuda_problem?'':' To use a GPU instead, start the stack with the NVIDIA runtime (<span class="mono">docker-compose.gpu.yml</span> / <span class="mono">--gpus all</span>).'); $('#s-abl').insertBefore(w, $('#s-abl').firstChild.nextSibling); }
   if(e.cuda===false && !S.cpuDefault){ S.cpuDefault=true; if($('#optDevice').value==='cuda') $('#optDevice').value='cpu'; }
-  const chk=[['python + torch'+(e.torch?' '+e.torch:''),e.venv],[e.cuda===false?(e.cuda_problem?'GPU too old for this image: running on the CPU':'no CUDA GPU: running on the CPU'):'CUDA visible',e.cuda!==false,e.cuda===false?'warn':null],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable],[`disk free ${e.disk_free_gb} GB`, e.disk_free_gb>30]];
+  const chk=[['python + torch'+(e.torch?' '+e.torch:''),e.venv],[e.cuda===false?(e.cuda_problem?'no kernels for the GPU in this image: running on the CPU':'no CUDA GPU: running on the CPU'):'CUDA visible',e.cuda!==false,e.cuda===false?'warn':null],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable],[`disk free ${e.disk_free_gb} GB`, e.disk_free_gb>30]];
   $('#envChecks').innerHTML=chk.map(([l,ok,cls])=>`<div class="check"><span class="dot ${cls||(ok?'on':'bad')}"></span>${l}</div>`).join('');
   $('#ollInfo').innerHTML = e.ollama.reachable ? `<b>models</b><span class="mono">${e.ollama.models.filter(m=>/glm/i.test(m)).join(', ')||'none'}</span><b>in VRAM</b><span class="mono">${e.ollama.loaded.map(m=>`${m.name} (${m.vram_gb} GB)`).join(', ')||'none'}</span>` : `<b>status</b><span>not reachable - start Ollama</span>`;
   updateHeader();
@@ -462,7 +462,7 @@ async function chatStatus(){ const names=chatNames(); try{ const j=await api('/o
 let ctrl=null;
 async function ask(model, box, badgeEl, prompt){ const t=box.querySelector('.t'); t.textContent=''; badgeEl.innerHTML='';
   const res=await fetch('/api/ollama/chat', {method:'POST', signal:ctrl.signal, headers:{'Content-Type':'application/json'}, body:JSON.stringify({model, prompt, num_predict:+$('#chatTokens').value||300})});
-  if(!res.ok) throw new Error(`${model}: HTTP ${res.status}`);
+  if(!res.ok){ let m='HTTP '+res.status; try{ m=(await res.json()).detail||m; }catch(e){} throw new Error(`${model}: ${m}`); }
   const rd=res.body.getReader(), dec=new TextDecoder(); let buf='', full='';
   while(true){ const {value,done}=await rd.read(); if(done) break; buf+=dec.decode(value,{stream:true}); let i; while((i=buf.indexOf('\n'))>=0){ const line=buf.slice(0,i); buf=buf.slice(i+1); if(!line.trim()) continue; try{ const j=JSON.parse(line); full+=j.message?.content||''; t.innerHTML=highlight(full); badgeEl.innerHTML=badge(full); }catch(e){} } }
   return full; }
@@ -629,6 +629,7 @@ function cpFillSelect(sel, role, list, def, flag){
   const abl = missing && role==='operator' ? list.find(n => ABL_NAME.test(n)) : null;
   const pick = names.find(n => want && n===want) || abl || names.find(n => sameModel(n, def)) || names[0];
   sel.innerHTML = names.map(n => `<option value="${escA(n)}"${n===pick?' selected':''}>${esc(n)}${sameModel(n, def)?(missing?' (default, not on this Ollama)':' (default)'):''}</option>`).join('');
+  sel._pick = pick;
   return missing;
 }
 // the judge's info line: the Ollama's error, a default judge it does not have, the models left out as judges
@@ -650,9 +651,12 @@ async function cpModelsLoad(fresh){
     // into Ollama as <model>-abl, and the list above is what that Ollama holds
     $('#cpOpRole').textContent = 'abliterated · proposes the command · served by Ollama';
     const opEx = (m.operator.excluded||[]).map(x => esc(x.name)).join(', ');
-    const anyAbl = (m.operator.models||[]).some(n => ABL_NAME.test(n));
+    const anyAbl = (m.operator.models||[]).some(n => ABL_NAME.test(n)), pick = $('#cpOpModel')._pick || '';
+    const instead = ABL_NAME.test(pick) && !sameModel(pick, m.operator.default) ? `${esc(pick)}, an abliterated one, is chosen instead`
+      : anyAbl ? `${pick && !sameModel(pick, m.operator.default) ? esc(pick)+' is your earlier choice; ' : ''}pick one of the abliterated runs`
+      : 'no abliterated model is there yet';
     $('#cpOpInfo').innerHTML = (m.operator.error ? `<span class="vuln">${esc(m.operator.error)}</span> · ` : '')
-      + (opMissing ? `<span class="vuln">${esc(m.operator.default)}, the default copilot model, is not on this Ollama: ${anyAbl ? 'an abliterated one is chosen instead' : 'no abliterated model is there yet'}.</span> ` : '')
+      + (opMissing ? `<span class="vuln">${esc(m.operator.default)}, the default copilot model, is not on this Ollama: ${instead}.</span> ` : '')
       + 'the models Ollama holds: step 2 imports each abliterated run as <span class="mono">&lt;model&gt;-abl</span> (models with a GGUF: GLM-Edge, GLM-4; GLM-5.x runs have none), '
       + '<span class="mono">COPILOT_OPERATOR_MODEL</span> in deploy/.env sets the default'
       + (opEx ? ` · not usable as copilot model: ${opEx} (embedding)` : '');

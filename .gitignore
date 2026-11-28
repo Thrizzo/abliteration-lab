@@ -19,6 +19,12 @@ deploy/.env
 # the copilot's secrets (workspace/.copilot), uploaded writeups, engagements, the Hugging Face cache and Ollama's key
 /workspace/
 /deploy/ollama/
+# the same runtime data of a native console, whose project folder is the clone itself (start_app.bat): the audit log
+# (prompts, answers, typed commands), engagements, uploaded writeups and the copilot's secrets
+/audit/
+/engagement/
+/writeups/
+/.copilot/
 
 # Python bytecode from running the app and the tests
 __pycache__/

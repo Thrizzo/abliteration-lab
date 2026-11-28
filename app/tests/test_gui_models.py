@@ -179,11 +179,11 @@ const code = [line('const esc = '), line('const escA = '), line('const sameModel
 const MODELS = { operator: { models: ['glm-edge-1.5b-chat-abl:latest', 'qwen3:8b'], default: 'glm-edge-1.5b-chat-abl:latest', error: null },
                  judge: { models: ['qwen3:8b'], excluded: [], default: 'qwen3:8b', error: null }, embeddings: { model: 'nomic-embed-text' } };
 const SERVING = { current: { run_id: 'r1' }, candidates: [{ run_id: 'r1', model: 'glm', promotable: true, verdict: 'pass' }] };
-const card = async (runner, models) => {
+const card = async (runner, models, stored) => {
   const els = {}, calls = [];
   const $ = (s) => (els[s] = els[s] || { innerHTML: '', textContent: '', style: {}, disabled: false });
   const api = async (path) => { calls.push(path); if (path.startsWith('/copilot/models')) return models; if (path === '/serving') return SERVING; throw new Error(path); };
-  const S = { env: { runner }, stage: 'model' }, CP = {}, cpStore = { get: (k, d) => d };
+  const S = { env: { runner }, stage: 'model' }, CP = {}, cpStore = { get: (k, d) => (stored && k === 'model.operator' ? stored : d) };
   const f = new Function('$', 'api', 'S', 'CP', 'cpStore', 'layerText', code + '; return cpModelsLoad;')($, api, S, CP, cpStore, (r) => String(r.layer));
   await f(false);
   const hidden = ['label[for=cpLoadRun]', '.cp-loadrow', '#cpLoadInfo'].filter((s) => els[s] && els[s].style.display === 'none');
@@ -202,6 +202,7 @@ const EMB = [{ name: 'nomic-embed-text:latest', why: 'an embedding model, not a 
     k8s: await card('k8s', MODELS),
     localOtherRun: await card('local', OLLAMA(['glm-edge-4b-chat-abl:latest', 'qwen3:8b'], EMB)),
     localNoRun: await card('local', OLLAMA(['qwen3:8b'], EMB)),
+    localStored: await card('local', OLLAMA(['glm-edge-4b-chat-abl:latest', 'qwen3:8b'], EMB), 'qwen3:8b'),
     k8sOther: await card('k8s', OLLAMA(['glm-abl'], [])),
   };
   console.log(JSON.stringify(out));
@@ -238,7 +239,7 @@ class OperatorCard(unittest.TestCase):
         self.assertEqual(g["selected"], "glm-edge-4b-chat-abl:latest")     # the run that is there, not the judge
         self.assertEqual(g["options"], 3)                                   # the missing default stays visible, marked
         self.assertIn("glm-edge-1.5b-chat-abl:latest, the default copilot model, is not on this Ollama", g["info"])
-        self.assertIn("an abliterated one is chosen instead", g["info"])
+        self.assertIn("glm-edge-4b-chat-abl:latest, an abliterated one, is chosen instead", g["info"])
         self.assertIn("nomic-embed-text:latest (embedding)", g["info"])    # left out, and why
 
     def test_the_docker_console_without_a_run_says_so(self):
@@ -246,6 +247,12 @@ class OperatorCard(unittest.TestCase):
         self.assertIn("no abliterated model is there yet", g["info"])
         self.assertEqual(g["selected"], "glm-edge-1.5b-chat-abl:latest")   # never the judge as the "abliterated" model
         self.assertIn("GLM-5.x runs have none", g["info"])
+
+    def test_an_earlier_choice_is_kept_and_said_so(self):
+        g = self.got["localStored"]                                     # chosen in this browser before the first run
+        self.assertEqual(g["selected"], "qwen3:8b")
+        self.assertIn("qwen3:8b is your earlier choice; pick one of the abliterated runs", g["info"])
+        self.assertNotIn("is chosen instead", g["info"])
 
     def test_the_kubernetes_console_lists_what_glm_serve_serves(self):
         g = self.got["k8sOther"]                                          # glm-serve serves one name: nothing to flag

@@ -446,6 +446,8 @@ but the gate cannot see what such a file does to a later command.
 
 Every command runs in the repository's folder, in PowerShell as in bash. `COMPOSE_FILE` in `deploy/.env` names the compose
 files for all of them (the [main README](../../README.md#3-deploy-with-docker-recommended)); step 2 adds this overlay to it.
+A `deploy/.env` from before that list has neither `COMPOSE_PATH_SEPARATOR=;` nor `COMPOSE_FILE` (compose then answers *no
+configuration file provided: not found*): add both, as in `deploy/.env.example`.
 
 1. **Models in Ollama.** The lab's Compare stage already imports `<model>-base` and `<model>-abl`. Also pull a judge and an
    embedding model:
@@ -453,10 +455,12 @@ files for all of them (the [main README](../../README.md#3-deploy-with-docker-re
    docker compose --env-file deploy/.env exec ollama ollama pull qwen3:8b
    docker compose --env-file deploy/.env exec ollama ollama pull nomic-embed-text
    ```
-2. **`deploy/.env`:**
+2. **`deploy/.env`** (without a GPU, leave `;deploy/docker-compose.gpu.yml` out of the list; set the key once: with
+   another key later n8n refuses to start):
    ```
-   COMPOSE_FILE=deploy/docker-compose.yml;deploy/docker-compose.gpu.yml;deploy/n8n/docker-compose.n8n.yml   # no GPU: without the gpu file
-   N8N_ENCRYPTION_KEY=<any long random string>   # once: with another key later n8n refuses to start
+   COMPOSE_PATH_SEPARATOR=;
+   COMPOSE_FILE=deploy/docker-compose.yml;deploy/docker-compose.gpu.yml;deploy/n8n/docker-compose.n8n.yml
+   N8N_ENCRYPTION_KEY=<any long random string>
    LAB_ALLOWLIST=10.10.10.0/24,192.168.56.0/24,127.0.0.1     # lab CIDRs, plus lab host names you want to use (box.htb)
    LAB_AUTORUN_READONLY=true
    LAB_AUTORUN_ACTIVE_RECON=false
@@ -482,8 +486,11 @@ files for all of them (the [main README](../../README.md#3-deploy-with-docker-re
    docker compose --env-file deploy/.env run --rm --no-deps app python /app/deploy/n8n/connect_console.py --n8n http://n8n:5678 --email <your n8n login> --setup-owner --secrets-dir /workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
    ```
    From this machine instead (Python 3; on Windows `py -3` where `python` is missing):
-   `python deploy/n8n/connect_console.py --n8n http://127.0.0.1:<N8N_PORT> ... --secrets-dir <WORKSPACE>/.copilot` with the
-   other options as above.
+   `python deploy/n8n/connect_console.py --n8n http://127.0.0.1:<N8N_PORT> ... --secrets-dir workspace/.copilot` with the
+   other options as above, for the default `WORKSPACE` (it is resolved from `deploy/`, so `../workspace` is the repository's
+   `workspace`); for another `WORKSPACE`, its absolute folder's `.copilot`.
+   Run it again after every update (`git pull`): the copilot's gates are code in the workflow, which lives in n8n's volume;
+   the run updates it in place and keeps the owner, the credentials and n8n's data.
    - **The login:** it asks for the password (or reads `N8N_PASSWORD`). On a fresh n8n, `--setup-owner` creates n8n's
      owner account with it, after checking it against n8n's rules (8 to 64 characters with a digit 0-9 and a capital
      letter A-Z); an n8n that has its owner gets the login only. Without `--setup-owner`, create the login at
@@ -510,8 +517,10 @@ files for all of them (the [main README](../../README.md#3-deploy-with-docker-re
    models, abliterated runs first, so pick your run's `<model>-abl`), your writeups, then a run whose every stage shows
    live. Or open http://localhost:5678/form/pentest-copilot (your `N8N_PORT`), enter a task and one target from
    `LAB_ALLOWLIST`, and click *Ask the copilot*. The result page appears when the judge is done.
-   - **One GPU:** the pipeline and Ollama share it. While a pipeline stage that loads the model runs, the console holds
-     back copilot runs, free prompts, Compare and knowledge uploads; start form runs after it as well.
+   - **One GPU:** the pipeline and Ollama share it. While a pipeline stage that loads the model runs, or the lab holds
+     one on the GPU, the console holds back copilot runs, free prompts, Compare and knowledge uploads, and such a stage
+     does not start while one of them still uses Ollama. The console does not see form runs: start them when no stage
+     runs.
    - **No login:** the form has none of its own. n8n listens on localhost only, so that is fine on a single-user machine;
      otherwise set the Form Trigger's *Authentication* to Basic Auth.
 8. **Approval and execution.** Point the *Human approval* resume URL at Telegram, email or Slack. Only then enable *Execute*

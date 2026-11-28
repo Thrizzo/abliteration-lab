@@ -4,8 +4,9 @@
 #   docker compose --env-file deploy/.env up -d --build
 # COMPOSE_FILE in deploy/.env lists the files every command uses: this one plus docker-compose.gpu.yml by default (Docker
 # Desktop, Linux + NVIDIA container toolkit). No GPU (e.g. Rancher Desktop on Windows, which cannot pass it into
-# containers): drop the gpu file there; the pipeline then runs on the CPU (README, "Without a GPU"). Step 4: add
-# n8n/docker-compose.n8n.yml there. After a git pull, `up -d --build` again: the code is part of the image.
+# containers): drop the gpu file there; the pipeline then runs on the CPU (README, "Without a GPU"). Step 4: append
+# ;deploy/n8n/docker-compose.n8n.yml there. After a git pull, `up -d --build` again: the code is part of the image (with
+# step 4, also connect_console.py again: the copilot's gates live in n8n's workflow, README "Update").
 #   Rancher Desktop containerd backend: nerdctl compose with the same files (-f).
 services:
   app:

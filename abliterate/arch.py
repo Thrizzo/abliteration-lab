@@ -14,8 +14,8 @@ RX_LAYER = re.compile(r"\.layers\.(\d+)\.")
 EXCLUDE = re.compile(r"(^|\.)(visual|vision|vision_tower|vision_model|audio|image_encoder|indexer|gate\.|router)")
 
 FAMILY = {
-    "glm": {"name": "GLM-Edge", "post_norm": False, "moe": False},
-    "glm4": {"name": "GLM-4 (0414 / 9B-hf)", "post_norm": True, "moe": False},
+    "glm": {"name": "GLM-Edge / glm-4-9b-chat-hf", "post_norm": False, "moe": False},
+    "glm4": {"name": "GLM-4 (0414)", "post_norm": True, "moe": False},
     "glm4v": {"name": "GLM-4.1V / 4V (text decoder)", "post_norm": True, "moe": False, "text_config": True},
     "glm46v": {"name": "GLM-4.6V (text decoder)", "post_norm": False, "moe": True, "text_config": True},
     "glm4_moe": {"name": "GLM-4.5 / 4.6 MoE", "post_norm": False, "moe": True},
@@ -114,13 +114,13 @@ def inspect(model_dir):
             notes.append(f"quantized checkpoint ({fmt}, block {q.get('weight_block_size')}): FP8 block-scaled tensors are dequantized, edited and requantized per block")
             if level == "exact":
                 level = "requantized"
-        if needs_remote:
-            notes.append("legacy remote-code checkpoint: loading needs --trust-remote-code (the .py files in the folder run)")
         if fam is FAMILY["chatglm"]:
             level = "unsupported"
             notes.append("legacy ChatGLM code (ChatGLM2/3, glm-4-9b-chat) does not load with transformers 5: its model class "
                          "reads config.max_length, which transformers 5 no longer keeps in the config. The -hf checkpoint of "
-                         "the same model (THUDM/glm-4-9b-chat-hf, family glm4) works")
+                         "the same model (THUDM/glm-4-9b-chat-hf, model_type glm: pre-norm, an exact edit) works")
+        elif needs_remote:
+            notes.append("legacy remote-code checkpoint: loading needs --trust-remote-code (the .py files in the folder run)")
     params_b = round(size_bytes / (1 if q else 2) / 1e9, 1) if size_bytes else None
     return {
         "model_type": mt, "architectures": cfg.get("architectures"), "family": fam["name"] if fam else None,

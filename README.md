@@ -68,7 +68,7 @@ algebra, and the same procedure transfers unchanged from a 1.5B dense model to a
 | `abliteration_pipeline.ipynb`, `run_pipeline.py` | The original notebook (GLM-Edge only, TransformerLens) and its headless runner, kept as the reference implementation. Windows only. |
 | `gui/`, `build_gui.py` | A standalone single-file walkthrough page built from a run folder. |
 
-Supported models (`arch.py`): GLM-Edge (`glm`), GLM-4 0414 / glm-4-9b-chat-hf (`glm4`, post-norm block: the direction is folded
+Supported models (`arch.py`): GLM-Edge and glm-4-9b-chat-hf (`glm`, pre-norm), GLM-4 0414 (`glm4`, post-norm block: the direction is folded
 through the norm weight), GLM-4.1V / 4.5V / 4.6V text decoders, GLM-4.5 / 4.6 MoE (`glm4_moe`, `glm4_moe_lite`), GLM-5 / 5.1 /
 5.2 / 5.3 (`glm_moe_dsa`, MoE + sparse attention; the DSA indexer is left untouched), GLM-5.3-Flash (`glm5_next`: hybrid
 linear + sparse attention, MoE, four residual streams per token; see section 6). Legacy ChatGLM checkpoints (remote code:
@@ -145,13 +145,23 @@ Hugging Face into `workspace/models/`.
 
 **Update** after `git pull`: the same `up -d --build`. The code is part of the image: without `--build` the stack keeps
 running the old one. Only the layers from the code on are rebuilt, a minute or two unless `deploy/requirements.txt`
-changed. The app restarts, which stops a running pipeline stage, so let it finish first. `docker compose --env-file
-deploy/.env pull ollama caddy` (plus `n8n qdrant` with step 4) updates the other images. Stop the stack with `docker compose
---env-file deploy/.env stop` (or `down`); never `down -v`, which deletes Ollama's models, n8n's data and the Qdrant index.
+changed. The app restarts, which stops a running pipeline stage, so let it finish first.
+- A `deploy/.env` made before the file list came has none, and every command then answers *no configuration file provided:
+  not found*. Add the two lines at its top, as in `deploy/.env.example`: `COMPOSE_PATH_SEPARATOR=;` and
+  `COMPOSE_FILE=deploy/docker-compose.yml;deploy/docker-compose.gpu.yml` (without a GPU only the first file; with step 4
+  `;deploy/n8n/docker-compose.n8n.yml` appended).
+- With step 4, run its `connect_console.py` line again after the rebuild: the copilot's scope and policy gates are code in
+  n8n's workflow, which lives in n8n's volume, not in the image. It keeps the owner, the credentials and n8n's data, and
+  updates the workflow in place.
+- The other images: `docker compose --env-file deploy/.env pull ollama caddy`, then `up -d` (n8n and Qdrant change only
+  with their pinned tags).
+
+Stop the stack with `docker compose --env-file deploy/.env stop` (or `down`); never `down -v`, which deletes Ollama's models,
+n8n's data and the Qdrant index.
 
 **The published image** `ghcr.io/thrizzo/redteam-llm-lab:latest` is built from `main`: `docker compose --env-file
-deploy/.env pull app` fetches it instead of a build, and replaces a local build of the same name, so a checkout of another
-branch then runs `main`'s code. If the pull fails with `unauthorized`, the package does not exist yet or is private. Its
+deploy/.env pull app`, then `up -d` without `--build`, runs it instead of a build (and later updates are the same two
+commands). The pull replaces a local build of the same name, so a checkout of another branch then runs `main`'s code. If the pull fails with `unauthorized`, the package does not exist yet or is private. Its
 visibility is separate from the repository's: making the repository public does not make an already published package
 public. The owner can open it up once on the package's page under *Package settings* → *Danger Zone* → *Change visibility*.
 Otherwise log in first with a personal access token (classic) that has the `read:packages` scope: `docker login ghcr.io -u
@@ -162,7 +172,8 @@ What the stack does:
 
 - **app**: the pipeline and the web app, reachable only through Caddy. Starts as root just long enough to hand the mounted
   workspace to its unprivileged user (uid 1000; on a Linux host, a folder that belongs to a user gives the app that user's
-  uid instead, so the files stay theirs), then drops privileges.
+  uid instead, so the files stay theirs), then drops privileges. Under a rootless engine (rootless Docker, Podman), whose
+  root is the host user, it stays that user.
 - **ollama**: serves the base and abliterated models for the Compare stage; the app uploads GGUFs through Ollama's API, so no
   files need to be shared.
 - **caddy**: basic auth on port 8080. `BIND_ADDR=127.0.0.1` (default) keeps it on this machine; use an SSH tunnel or VPN
@@ -205,9 +216,14 @@ The stack above runs steps 1 to 3. Step 4 **Pentest** needs n8n and Qdrant, whic
 1. Set `N8N_ENCRYPTION_KEY` in `deploy/.env` (any long random string; `.env.example` shows how to make one), once: with
    another key later n8n refuses to start. Without it compose stops with *required variable N8N_ENCRYPTION_KEY is missing a
    value*.
-2. Add the overlay to `COMPOSE_FILE` in `deploy/.env`, so that every command from then on uses it:
+2. Append `;deploy/n8n/docker-compose.n8n.yml` to the `COMPOSE_FILE` line in `deploy/.env`, so that every command from
+   then on uses it. With a GPU:
    ```
    COMPOSE_FILE=deploy/docker-compose.yml;deploy/docker-compose.gpu.yml;deploy/n8n/docker-compose.n8n.yml
+   ```
+   without one:
+   ```
+   COMPOSE_FILE=deploy/docker-compose.yml;deploy/n8n/docker-compose.n8n.yml
    ```
    and start the stack (this restarts the app: let a running pipeline stage finish first):
    ```bash
@@ -216,7 +232,8 @@ The stack above runs steps 1 to 3. Step 4 **Pentest** needs n8n and Qdrant, whic
    n8n listens on `127.0.0.1:5678` (`N8N_PORT` in `deploy/.env` moves it). *Bind for 127.0.0.1:5678 failed: port is
    already allocated* means another container holds the port, often an n8n of your own: `docker ps -a --filter
    publish=5678` names it. A Windows program on the port (a leftover `kubectl port-forward`, for one) gives *Ports are not
-   available* instead, and `Get-NetTCPConnection -LocalPort 5678 -State Listen` names it. Stop it, or set `N8N_PORT=5679`.
+   available* instead, and `Get-Process -Id (Get-NetTCPConnection -LocalPort 5678 -State Listen).OwningProcess` names it.
+   Stop it, or set `N8N_PORT=5679`.
 3. Pull the judge and the embedding model into the stack's Ollama:
    ```bash
    docker compose --env-file deploy/.env exec ollama ollama pull qwen3:8b
@@ -236,9 +253,10 @@ The stack above runs steps 1 to 3. Step 4 **Pentest** needs n8n and Qdrant, whic
    in this stack they cannot be the copilot model. `COPILOT_OPERATOR_MODEL` in `deploy/.env` sets the default.
    Details, writeups for retrieval, and the n8n form: [deploy/n8n/README.md](deploy/n8n/README.md#setup).
 
-The pipeline and Ollama share the GPU here. While a stage that loads the model runs, the console holds back copilot runs,
-free prompts, Compare and knowledge uploads (they would load Ollama's models beside it) and says so; runs from the n8n form
-should wait as well. Everything the console does in step 4 also goes into `<WORKSPACE>/audit/` and the app's log
+The pipeline and Ollama share the GPU here. While a stage that loads the model runs, or the lab (step 2) holds one on the
+GPU, the console holds back copilot runs, free prompts, Compare and knowledge uploads (they would load Ollama's models beside
+it) and says so; the other way round, such a stage does not start while one of them still uses Ollama. Runs from the n8n
+form are not seen: start them when no stage runs. Everything the console does in step 4 also goes into `<WORKSPACE>/audit/` and the app's log
 (`docker compose --env-file deploy/.env logs app`).
 
 ### Rancher Desktop

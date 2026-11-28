@@ -143,7 +143,8 @@ def fit_problem(weights_gb, device_map="cuda", dtype="auto"):
     A lower bound: the weights alone as stored, without activations or a wider dtype. device_map as the run gives it:
     cuda is one GPU, auto all GPUs plus RAM (accelerate offloads there), cpu RAM only."""
     import torch
-    from .hooks import resolve_device
+    from .hooks import _current_gpu, gpu_problem, resolve_device
+    asked = device_map
     device_map, _ = resolve_device(device_map, dtype, lambda *a: None)
     ram = free_ram_gb()
     if device_map != "cpu" and torch.cuda.is_available():
@@ -158,7 +159,8 @@ def fit_problem(weights_gb, device_map="cuda", dtype="auto"):
     elif ram is None:
         return ""
     else:
-        room, where = ram, f"{ram:.0f} GB of free RAM and no GPU this process can use"
+        why = gpu_problem([_current_gpu()]) if asked != "cpu" and torch.cuda.is_available() else ""
+        room, where = ram, f"{ram:.0f} GB of free RAM and no GPU this process can use" + (f" ({why})" if why else "")
     if weights_gb <= room:
         return ""
     return f"its weights alone are {weights_gb:.0f} GB, and this machine has {where} for measure and scan"
@@ -182,24 +184,46 @@ def fp8_kernel(model_dir, log):
         return                                  # a CPU build: transformers dequantizes FP8, no kernel is needed
     from huggingface_hub import constants
     offline = bool(constants.HF_HUB_OFFLINE)
+    try:                                        # does a GPU here keep the weights in FP8 (8.9+) and so need the kernel?
+        needs = torch.cuda.is_available() and any(torch.cuda.get_device_capability(i) >= (8, 9)
+                                                  for i in range(torch.cuda.device_count()))
+    except Exception:                           # noqa: BLE001
+        needs = False
     try:
         from kernels import install_kernel
         from transformers.integrations.hub_kernels import _HUB_KERNEL_MAPPING
-        spec = _HUB_KERNEL_MAPPING["finegrained-fp8"]
-        install_kernel(spec["repo_id"], revision=spec.get("revision"), version=spec.get("version"), local_files_only=offline)
-    except Exception as e:                      # noqa: BLE001 - ImportError, offline cache miss, Hub errors
+    except ImportError as e:
+        text = (f"this FP8 checkpoint runs through the finegrained-fp8 kernel on a GPU of compute capability 8.9 or newer, "
+                f"and the kernels package that fetches it is missing ({e}): pip install kernels==0.18.3 (transformers 5.23 "
+                f"takes >=0.18.2,<0.19)")
+        if needs:                               # the run would load hundreds of GB and then fail at the first forward
+            raise UsageError(text) from None
+        log("WARNING: " + text)
+        return
+    spec = _HUB_KERNEL_MAPPING["finegrained-fp8"]
+
+    def fetch(local):
+        install_kernel(spec["repo_id"], revision=spec.get("revision"), version=spec.get("version"), local_files_only=local)
+    try:
+        fetch(offline)
+    except Exception as e:                      # noqa: BLE001 - an offline cache miss, Hub errors
         why = f"{type(e).__name__}: {str(e)[:240]}"
-        try:
-            needs = torch.cuda.is_available() and any(torch.cuda.get_device_capability(i) >= (8, 9)
-                                                      for i in range(torch.cuda.device_count()))
-        except Exception:                       # noqa: BLE001
-            needs = False
+        if not offline:
+            try:
+                fetch(True)
+            except Exception:                   # noqa: BLE001
+                pass
+            else:                               # cached, the Hub out of reach: transformers would ask it at the first forward
+                constants.HF_HUB_OFFLINE = True
+                log(f"model: the Hub cannot be reached ({why}), but the FP8 kernel is in the cache: this run uses the cache "
+                    f"(HF_HUB_OFFLINE)")
+                return
+        text = (f"this FP8 checkpoint runs through the finegrained-fp8 kernel on a GPU of compute capability 8.9 or newer, "
+                f"and the kernel is not in the cache ({why}). Run the download stage again where it has internet: it "
+                f"fetches the kernel with the model")
         if offline and needs:
-            raise UsageError("this FP8 checkpoint runs through the finegrained-fp8 kernel on this GPU (compute capability "
-                             f"8.9 or newer), and the kernel is not in the cache ({why}). Run the download stage again "
-                             "where it has internet: it fetches the kernel with the model") from None
-        log(f"WARNING: FP8 checkpoint, but its kernel could not be fetched ({why}). Measure and scan fail on a GPU of "
-            "compute capability 8.9 or newer until it is in the cache: run the download stage again")
+            raise UsageError(text) from None
+        log("WARNING: " + text)
         return
     log(f"model: FP8 checkpoint, its kernel {spec['repo_id']} (version {spec.get('version')}) is in the cache")
 
@@ -209,6 +233,8 @@ def check_fit(repo, weights_gb, args):
     if getattr(args, "no_fit_check", False) or args.stage not in ("all", "measure", "scan"):
         return
     problem = fit_problem(weights_gb, args.device_map, args.dtype)
+    if problem and "has no kernels for" in problem:      # the GPU is there, the image's PyTorch build is the problem
+        raise UsageError(f"{repo} does not fit this machine as this image runs it: {problem}. --no-fit-check skips this check")
     if problem:
         raise UsageError(f"{repo} does not fit this machine: {problem}. A model this size needs a node with enough GPUs "
                          f"(deploy/k8s, overlays onprem or cloud); here, pick a smaller one. --no-fit-check skips this check")
