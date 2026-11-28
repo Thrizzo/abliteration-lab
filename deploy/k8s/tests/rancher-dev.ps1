@@ -340,14 +340,15 @@ function Get-BuildEngine {
     return @{ Exe = 'nerdctl'; Pre = @('--namespace', 'k8s.io') }
 }
 # Any CLI that can run a throwaway container (for the password hash)
+# An engine for a short helper container (caddy hash-password): docker through its current context, else docker through
+# the context "default" (Rancher Desktop's dockerd while the current one is Docker Desktop's and stopped, as on the
+# owner's machine), else nerdctl. The command and its leading arguments; nothing when none answers (wrap it in @()).
 function Get-AnyEngine {
-    foreach ($e in @('docker', 'nerdctl')) {
-        if (Get-Command $e -ErrorAction SilentlyContinue) {
-            $null = Exe $e @('version') -Out
-            if ($LASTEXITCODE -eq 0) { return $e }
-        }
+    foreach ($cand in @(@('docker'), @('docker', '--context', 'default'), @('nerdctl'))) {
+        if (-not (Get-Command $cand[0] -ErrorAction SilentlyContinue)) { continue }
+        $null = Exe $cand[0] (@($cand | Select-Object -Skip 1) + @('version')) -Out
+        if ($LASTEXITCODE -eq 0) { return $cand }
     }
-    return $null
 }
 
 # ------------------------------------------------------------------------------------------------ diagnosis
@@ -823,11 +824,11 @@ function Invoke-Secrets {
         try { $pw = Read-Secret "New console password for user $LabUser (8+ characters, no double quotes)" 'LAB_PASSWORD' -Confirm }
         catch { Bad $_.Exception.Message; return $false }
         if ($pw.Length -lt 8 -or $pw.Contains('"')) { Bad 'console password: 8+ characters, no double quotes'; return $false }
-        $engine = Get-AnyEngine
-        if (-not $engine) { Bad 'docker or nerdctl, to hash the password (caddy hash-password)'; return $false }
+        $engine = @(Get-AnyEngine)
+        if (-not $engine.Count) { Bad 'docker or nerdctl, to hash the password (caddy hash-password): none answers'; return $false }
         # bcrypt by the Caddy the login runs; the password is a process argument for a second, on this machine only
-        $hash = (Exe $engine @('run', '--rm', 'caddy:2.11.9', 'caddy', 'hash-password', '--plaintext', $pw) -Out).Trim()
-        if ($hash -notmatch '^\$2[aby]\$\d\d\$') { Bad 'the password hash (caddy hash-password gave no bcrypt hash)'; return $false }
+        $hash = "$(Exe $engine[0] (@($engine | Select-Object -Skip 1) + @('run', '--rm', 'caddy:2.11.9', 'caddy', 'hash-password', '--plaintext', $pw)) -Out)".Trim()
+        if ($hash -notmatch '^\$2[aby]\$\d\d\$') { Bad ('the password hash: caddy hash-password through ' + ($engine -join ' ') + ' gave no bcrypt hash (can it pull caddy:2.11.9?)'); return $false }
         $out = kc @('-n', 'lab', 'create', 'secret', 'generic', 'basic-auth', "--from-literal=user=$LabUser", "--from-literal=hash=$hash")
         if ($LASTEXITCODE -ne 0) { Bad "Secret lab/basic-auth: $out"; return $false }
         Ok "Secret lab/basic-auth (user $LabUser, bcrypt hash)"

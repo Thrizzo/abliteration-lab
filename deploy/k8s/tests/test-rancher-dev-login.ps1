@@ -28,8 +28,8 @@ function Note([string]$Text) { $script:Log.Add("note $Text") }
 function Section([string]$Text) { }
 function Get-LabUser { return 'admin' }
 function Read-Secret { return 'NewPassw0rd' }
-function Get-AnyEngine { return 'docker' }
-function Exe([string]$Program, [string[]]$A, [switch]$Out) { return ('$2a$14$' + ('x' * 53)) }
+function Get-AnyEngine { return @('docker', '--context', 'default') }   # as on a machine whose current context is Docker Desktop's
+function Exe([string]$Program, [string[]]$A, [switch]$Out) { $script:Hashed = ($Program + ' ' + ($A -join ' ')); return ('$2a$14$' + ('x' * 53)) }
 function Start-Forward { }
 function Set-Auth { }
 function Invoke-Build { return $true }
@@ -66,6 +66,7 @@ $Console = 'http://127.0.0.1:18080'
 $ConsolePort = 18080
 $script:WrongAuth = 'auth-wrong'
 $script:Failed = 0
+$script:Hashed = ''
 function Expect([string]$Case, [bool]$Cond, [string]$What) {
     if ($Cond) { return }
     $script:Failed++
@@ -95,6 +96,7 @@ Setup $false $false
 Expect $k ($script:SetupResult -eq $true) 'the setup failed'
 Expect $k (-not ($script:Kc | Where-Object { $_ -like '*rollout*' })) 'a restart'
 Expect $k (Has 'ok Secret lab/basic-auth (user admin, bcrypt hash)') 'the new Secret'
+Expect $k ($script:Hashed -eq 'docker --context default run --rm caddy:2.11.9 caddy hash-password --plaintext NewPassw0rd') "the hash through the engine found: $($script:Hashed)"
 
 $k = 'the Secret kept: no restart'
 Setup $true $true
