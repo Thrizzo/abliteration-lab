@@ -470,16 +470,24 @@ but the gate cannot see what such a file does to a later command.
    docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
      run --rm app python -m copilot.ingest --src /workspace/writeups
    ```
-5. **Credentials and the workflow**, in one go. Create your n8n login at http://localhost:5678 first, then:
+5. **n8n's owner, the credentials, the workflow and the console's step 4**, in one go. One line, so it runs the same in
+   PowerShell and bash, from the repository's folder (Python 3 on this machine; the script needs nothing else):
    ```bash
-   python deploy/n8n/connect_console.py --n8n http://localhost:5678 --email <your n8n login> \
-     --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
+   python deploy/n8n/connect_console.py --n8n http://localhost:5678 --email <your n8n login> --setup-owner --secrets-dir workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
    ```
+   - **The login:** it asks for the password (or reads `N8N_PASSWORD`). On a fresh n8n, `--setup-owner` creates n8n's
+     owner account with it, after checking it against n8n's rules (8 to 64 characters with a digit 0-9 and a capital
+     letter A-Z); an n8n that has its owner gets the login only. Without `--setup-owner`, create the login at
+     http://localhost:5678 first.
    - **What it sets up:**
      - the **operator** as an OpenAI-compatible credential: Ollama serves the same API under `/v1`, and so does vLLM;
      - **Ollama** for the judge and the embeddings, and **Qdrant**;
      - a **Header Auth** credential for the console webhook, which the workflow needs before it can be published;
-     - the workflow itself, imported with those credentials selected and published.
+     - the workflow itself, imported with those credentials selected and published;
+     - with `--secrets-dir`, the console's two secrets as files: the webhook secret and an n8n API key that may only read
+       and stop executions. The console reads them from `/workspace/.copilot` (`COPILOT_SECRETS_DIR` in the overlay) on
+       every use, so step 4 works without a restart. If `WORKSPACE` in `deploy/.env` names another folder, give that
+       folder's `.copilot` instead.
    - **Model names:** the console sends the operator and judge it chose. Without them, the operator comes from
      `COPILOT_OPERATOR_MODEL` (compose default `glm-edge-1.5b-chat-abl:latest`; set it in `deploy/.env` to what
      `ollama list` shows) and the judge from `COPILOT_JUDGE_MODEL` (default `qwen3:8b`). The embedding model
@@ -488,8 +496,11 @@ but the gate cannot see what such a file does to a later command.
      import `workflows/pentest-copilot.json`, pick them in the nodes, and **Publish**.
 6. **Optional:** to keep PWK material out of retrieval, add the filter
    `{"must_not":[{"key":"metadata.source","match":{"value":"pwk"}}]}` under the Qdrant node's *Search Filter*.
-7. **Use it:** open http://localhost:5678/form/pentest-copilot, enter a task and one target from `LAB_ALLOWLIST`, and click
-   *Ask the copilot*. The result page appears when the judge is done.
+7. **Use it:** in the console at http://localhost:8080, step 4 **Pentest** (it appears once the console reaches n8n:
+   `N8N_URL` in the overlay): the engagement, the models (the operator list is what Ollama holds, so pick your run's
+   `<model>-abl`), your writeups, then a run whose every stage shows live. Or open
+   http://localhost:5678/form/pentest-copilot, enter a task and one target from `LAB_ALLOWLIST`, and click *Ask the
+   copilot*. The result page appears when the judge is done.
    - **No login:** the form has none of its own. n8n listens on localhost only, so that is fine on a single-user machine;
      otherwise set the Form Trigger's *Authentication* to Basic Auth.
 8. **Approval and execution.** Point the *Human approval* resume URL at Telegram, email or Slack. Only then enable *Execute*

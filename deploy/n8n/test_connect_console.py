@@ -15,8 +15,10 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -276,6 +278,57 @@ class Errors(unittest.TestCase):
         with self.assertRaises(RuntimeError) as e:
             CC.N8n("http://127.0.0.1:9").call("GET", "/rest/settings", auth="none")
         self.assertIn("GET /rest/settings: no answer from n8n at http://127.0.0.1:9 (ConnectionRefusedError", str(e.exception))
+
+
+class SecretsDir(unittest.TestCase):
+    """--secrets-dir: the Docker stack's console reads the webhook secret and its n8n key as files (COPILOT_SECRETS_DIR),
+    named as the Kubernetes Secret mounts them; they are the values the run gave n8n."""
+
+    def test_the_files(self):
+        d = os.path.join(tempfile.mkdtemp(), ".copilot")
+        self.addCleanup(shutil.rmtree, os.path.dirname(d), True)
+        CC.write_secrets_dir(d, "hook-1", "key-1")
+        CC.write_secrets_dir(d, "hook-2", "key-2")                 # a re-run replaces them
+        self.assertEqual(sorted(os.listdir(d)), ["n8n-api-key", "webhook-secret"])
+        self.assertEqual(open(os.path.join(d, "webhook-secret"), encoding="utf-8").read(), "hook-2")
+        self.assertEqual(open(os.path.join(d, "n8n-api-key"), encoding="utf-8").read(), "key-2")
+        if os.name == "posix":
+            self.assertEqual(os.stat(os.path.join(d, "n8n-api-key")).st_mode & 0o777, 0o600)
+
+    def test_a_run_writes_what_it_gave_n8n(self):
+        d = os.path.join(tempfile.mkdtemp(), ".copilot")
+        self.addCleanup(shutil.rmtree, os.path.dirname(d), True)
+        given = {}
+
+        def upsert_credential(n8n, name, ctype, values):
+            given[ctype] = values
+            return f"id-{ctype}", "created"
+
+        with mock.patch.object(CC.N8n, "wait_ready", lambda *a, **k: None), \
+                mock.patch.object(CC.N8n, "upsert_credential", upsert_credential), \
+                mock.patch.object(CC.N8n, "upsert_workflow", lambda n8n, wf: ("wf1", "created")), \
+                redirect_stdout(io.StringIO()) as out:
+            CC.main(["--n8n", "http://127.0.0.1:9", "--api-key", "console-key", "--secrets-dir", d])
+        self.assertEqual(open(os.path.join(d, "n8n-api-key"), encoding="utf-8").read(), "console-key")
+        self.assertEqual(open(os.path.join(d, "webhook-secret"), encoding="utf-8").read(), given["httpHeaderAuth"]["value"])
+        self.assertIn(f"console secrets written to {d}", out.getvalue())
+
+
+class ComposeOverlay(unittest.TestCase):
+    """The Docker stack's n8n overlay gives the console what step 4 needs, with the same defaults n8n gets."""
+
+    def test_the_console_and_n8n_agree(self):
+        import yaml                                           # PyYAML: in CI's system python and the console image
+        with open(os.path.join(HERE, "docker-compose.n8n.yml"), encoding="utf-8") as f:
+            services = yaml.safe_load(f)["services"]
+        app, n8n = services["app"]["environment"], services["n8n"]["environment"]
+        self.assertEqual(app["N8N_URL"], "http://n8n:5678")
+        self.assertEqual(app["COPILOT_SECRETS_DIR"], "/workspace/.copilot")
+        self.assertEqual(app["GLM_SERVE_URL"], "http://ollama:11434")      # the console appends /v1/... itself
+        self.assertEqual(app["RAG_OLLAMA_URL"], "http://ollama:11434")
+        for key in ("LAB_ALLOWLIST", "LAB_AUTORUN_READONLY", "LAB_AUTORUN_ACTIVE_RECON", "COPILOT_JUDGE_MODEL"):
+            self.assertEqual(app[key], n8n[key], key)
+        self.assertEqual(app["GLM_SERVE_MODEL"], n8n["COPILOT_OPERATOR_MODEL"])
 
 
 class CommandLine(unittest.TestCase):

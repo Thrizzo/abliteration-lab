@@ -5,8 +5,10 @@
   2. the copilot's credentials: the operator (OpenAI-compatible: glm-serve), Ollama (judge, embeddings), Qdrant, and
      the console's webhook secret (Header Auth, X-Lab-Secret);
   3. the workflow (deploy/n8n/workflows/pentest-copilot.json) with those credentials selected, published;
-  4. the console's Secret "copilot" (webhook-secret, n8n-api-key), applied with kubectl or written to a file.
-     The console reads it from a mounted file, so no restart is needed (it can take a minute to appear).
+  4. the console's Secret "copilot" (webhook-secret, n8n-api-key), applied with kubectl or written to a file; for the
+     Docker stack, the same two values as files in a folder (--secrets-dir workspace/.copilot), which its console reads
+     as COPILOT_SECRETS_DIR. The console reads them on every use, so no restart is needed (in Kubernetes the mounted
+     Secret can take a minute to appear).
 
 Reach n8n through a port-forward first:
     kubectl -n lab-copilot port-forward svc/n8n 5678:5678
@@ -265,6 +267,18 @@ def secret_manifest(namespace, webhook_secret, api_key):
                        "stringData": {"webhook-secret": webhook_secret, "n8n-api-key": api_key}}, indent=2)
 
 
+def write_secrets_dir(path, webhook_secret, api_key):
+    """The console's two secrets as files in path, named as the Kubernetes Secret mounts them (webhook-secret,
+    n8n-api-key): the Docker stack's console reads them there (COPILOT_SECRETS_DIR). Each file is replaced whole."""
+    os.makedirs(path, exist_ok=True)
+    for name, value in (("webhook-secret", webhook_secret), ("n8n-api-key", api_key)):
+        tmp = os.path.join(path, f".{name}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(value)
+        os.replace(tmp, os.path.join(path, name))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--n8n", default="http://127.0.0.1:5678", help="n8n's base URL (a port-forward)")
@@ -280,6 +294,8 @@ def main(argv=None):
     ap.add_argument("--namespace", default="lab", help="the console's namespace (for the Secret)")
     ap.add_argument("--apply-secret", action="store_true", help="apply the console's Secret with kubectl (Kubernetes)")
     ap.add_argument("--secret-file", help="write the console's Secret (JSON manifest) here instead")
+    ap.add_argument("--secrets-dir", help="the Docker stack: write the console's two secrets as files into this folder "
+                                          "(workspace/.copilot, which the console reads as COPILOT_SECRETS_DIR)")
     ap.add_argument("--wait", type=int, default=300, help="seconds to wait for n8n to finish starting (default 300)")
     a = ap.parse_args(argv)
 
@@ -338,8 +354,12 @@ def main(argv=None):
         if r.returncode:
             sys.exit(f"kubectl apply failed: {r.stderr.strip()}")
         print(f"console Secret applied: {a.namespace}/copilot")
-    if not (a.apply_secret or a.secret_file):
-        print("console Secret not written (no --apply-secret / --secret-file): fine for the compose stack, whose console does not start runs")
+    if a.secrets_dir:
+        write_secrets_dir(a.secrets_dir, webhook_secret, console_key)
+        print(f"console secrets written to {a.secrets_dir} (webhook-secret, n8n-api-key): step 4 of the console can start runs")
+    if not (a.apply_secret or a.secret_file or a.secrets_dir):
+        print("console secrets not written (no --apply-secret / --secret-file / --secrets-dir): the console cannot start copilot "
+              "runs, n8n's own form can (Docker stack: --secrets-dir workspace/.copilot)")
     return 0
 
 

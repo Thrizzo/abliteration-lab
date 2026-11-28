@@ -641,6 +641,15 @@ async function cpModelsLoad(fresh){
   $('#cpJudgeInfo').innerHTML = cpJudgeInfo(m.judge, cpFillSelect($('#cpJudgeModel'), 'judge', m.judge.models||[], m.judge.default));
   if(m.embeddings && m.embeddings.model)
     $('#cpEmbedInfo').innerHTML = `<span class="mono">${esc(m.embeddings.model)}</span> · turns your writeups into vectors for retrieval · writes no text, so it is not a choice here`;
+  if(S.env && S.env.runner!=='k8s'){
+    // the Docker stack or a plain console: no glm-serve and no Promote. Step 2's last stage imports each abliterated run
+    // into Ollama as <model>-abl, and the list above is what that Ollama holds
+    $('#cpOpRole').textContent = 'abliterated · proposes the command · served by Ollama';
+    $('#cpOpInfo').innerHTML = (m.operator.error ? `<span class="vuln">${esc(m.operator.error)}</span> · ` : '')
+      + 'the models Ollama holds: step 2 imports each abliterated run as <span class="mono">&lt;model&gt;-abl</span>';
+    for(const el of [$('label[for=cpLoadRun]'), $('.cp-loadrow'), $('#cpLoadInfo')]) if(el) el.style.display='none';
+    return;
+  }
   try{ CP.serving=await api('/serving'); }catch(e){ CP.serving=null; }
   const sv=CP.serving, cur = sv && sv.current;
   $('#cpOpInfo').innerHTML = (m.operator.error ? `<span class="vuln">${esc(m.operator.error)}</span> · ` : '')

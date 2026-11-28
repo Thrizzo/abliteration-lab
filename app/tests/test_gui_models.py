@@ -5,6 +5,9 @@
   missing and keeps it chosen; it never quietly takes the first chat model there. A choice the browser kept wins when
   that Ollama has it. The operator picker keeps its plain behaviour;
 - the judge's info line names a missing default judge with its "ollama pull", and only then;
+- the copilot-model card: in the Kubernetes console it names glm-serve and offers to load a run (Promote); in the Docker
+  stack or a plain console it names Ollama, which serves the runs step 2 imported, asks nothing of /api/serving and hides
+  the Load row;
 - the layer field reads "15 17", "15, 17" and "15 - 17" as the CLI's --layers does;
 - a scan again in the same run starts its live view without the earlier pass's combinations; new directions (a measure
   that ends) end the earlier scan and its pause, so the layer choice never offers a recommendation of other directions,
@@ -161,6 +164,74 @@ class ModelPickers(unittest.TestCase):
     def test_the_layer_field_reads_like_the_cli(self):
         self.assertEqual(self.got["layers"], {"15 17": [15, 17], "15, 17": [15, 17], "15 - 17 19": [15, 16, 17, 19], "17,15,17": [17, 15],
                                               "15,,17": [15, 17], "abc": None, "-1": None, "19-15": None, "5;6": None})
+
+
+# app.js's cpModelsLoad on a stand-in page: the copilot-model card in the Kubernetes console (glm-serve, Promote) and in
+# the Docker stack or a plain console (S.env.runner "local": Ollama serves the operator, there is no glm-serve to load a
+# run into)
+CARD = r"""
+const src = require('fs').readFileSync(__APP_JS__, 'utf8').replace(/\r/g, '');
+const grab = (start, end) => { const i = src.indexOf(start), j = src.indexOf(end, i); if (i < 0 || j < 0) throw new Error('app.js: ' + start); return src.slice(i, j + end.length); };
+const line = (start) => grab(start, '\n');
+const code = [line('const esc = '), line('const escA = '), line('const sameModel = '),
+  grab('function cpFillSelect(', '\n  return missing;\n}'), grab('function cpJudgeInfo(', "\n    + (ex ? `not usable as judge: ${ex}` : '');\n}"),
+  grab('async function cpModelsLoad(fresh){', "$('#serveToggle').click(); };\n}")].join('\n');
+const MODELS = { operator: { models: ['glm-edge-1.5b-chat-abl:latest', 'qwen3:8b'], default: 'glm-edge-1.5b-chat-abl:latest', error: null },
+                 judge: { models: ['qwen3:8b'], excluded: [], default: 'qwen3:8b', error: null }, embeddings: { model: 'nomic-embed-text' } };
+const SERVING = { current: { run_id: 'r1' }, candidates: [{ run_id: 'r1', model: 'glm', promotable: true, verdict: 'pass' }] };
+const card = async (runner, models) => {
+  const els = {}, calls = [];
+  const $ = (s) => (els[s] = els[s] || { innerHTML: '', textContent: '', style: {}, disabled: false });
+  const api = async (path) => { calls.push(path); if (path.startsWith('/copilot/models')) return models; if (path === '/serving') return SERVING; throw new Error(path); };
+  const S = { env: { runner }, stage: 'model' }, CP = {}, cpStore = { get: (k, d) => d };
+  const f = new Function('$', 'api', 'S', 'CP', 'cpStore', 'layerText', code + '; return cpModelsLoad;')($, api, S, CP, cpStore, (r) => String(r.layer));
+  await f(false);
+  const hidden = ['label[for=cpLoadRun]', '.cp-loadrow', '#cpLoadInfo'].filter((s) => els[s] && els[s].style.display === 'none');
+  return { calls, role: els['#cpOpRole'] ? els['#cpOpRole'].textContent : null, info: els['#cpOpInfo'].innerHTML, hidden,
+           options: (els['#cpOpModel'].innerHTML.match(/<option /g) || []).length, load: els['#cpLoadRun'] ? els['#cpLoadRun'].innerHTML : null };
+};
+(async () => {
+  const out = {
+    local: await card('local', MODELS),
+    localDown: await card('local', { ...MODELS, operator: { models: [], default: 'glm-edge-1.5b-chat-abl:latest', error: 'glm-serve did not list its models: <refused>' } }),
+    k8s: await card('k8s', MODELS),
+  };
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+@unittest.skipUnless(NODE, "node not installed")
+class OperatorCard(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        js = CARD.replace("__APP_JS__", json.dumps(APP_JS))
+        p = subprocess.run([NODE, "-e", js], capture_output=True, text=True, timeout=60)
+        if p.returncode:
+            raise AssertionError(p.stderr)
+        cls.got = json.loads(p.stdout)
+
+    def test_the_docker_console_names_ollama_and_offers_no_load(self):
+        g = self.got["local"]
+        self.assertEqual(g["calls"], ["/copilot/models"])           # no glm-serve to ask what it serves
+        self.assertIn("served by Ollama", g["role"])
+        self.assertIn("step 2 imports each abliterated run", g["info"])
+        self.assertNotIn("glm-serve", g["info"])
+        self.assertEqual(g["hidden"], ["label[for=cpLoadRun]", ".cp-loadrow", "#cpLoadInfo"])
+        self.assertEqual(g["options"], 2)                             # the picker lists what that Ollama holds
+
+    def test_the_docker_console_shows_why_the_list_is_empty(self):
+        g = self.got["localDown"]
+        self.assertIn("did not list its models: &lt;refused&gt;", g["info"])   # the server's error, as text
+        self.assertNotIn("<refused>", g["info"])
+
+    def test_the_kubernetes_console_keeps_glm_serve_and_load(self):
+        g = self.got["k8s"]
+        self.assertEqual(g["calls"], ["/copilot/models", "/serving"])
+        self.assertIsNone(g["role"])                                  # the page's own text: "served by glm-serve"
+        self.assertIn("glm-serve serves run", g["info"])
+        self.assertEqual(g["hidden"], [])
+        self.assertIn('value="r1"', g["load"])
 
 
 if __name__ == "__main__":

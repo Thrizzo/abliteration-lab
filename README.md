@@ -162,6 +162,36 @@ override: `ABL_PROJECT` (workspace), `OLLAMA_HOST`, `ABL_HOST` / `ABL_PORT`, `AB
 ghcr.io/thrizzo/redteam-llm-lab:latest ollama/ollama:latest caddy:2 -o redteam-llm-lab-image.tar`, then
 `docker load -i redteam-llm-lab-image.tar` on the target and run the compose commands without `pull`.
 
+### Step 4: the pentest copilot
+
+The stack above runs steps 1 to 3. Step 4 **Pentest** needs n8n and Qdrant, which the overlay
+`deploy/n8n/docker-compose.n8n.yml` adds; the console shows the step once it reaches n8n.
+
+1. Set `N8N_ENCRYPTION_KEY` in `deploy/.env` (any long random string; `.env.example` shows how to make one). Without it
+   compose stops with *required variable N8N_ENCRYPTION_KEY is missing a value*.
+2. Start the stack with the overlay, and keep it in every compose command from then on:
+   ```bash
+   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env up -d
+   ```
+   n8n listens on `127.0.0.1:5678`. If that port is taken (*Bind for 127.0.0.1:5678 failed: port is already allocated*),
+   stop what holds it or set `N8N_PORT=5679` in `deploy/.env` and use that port below.
+3. Pull the judge and the embedding model into the stack's Ollama:
+   ```bash
+   docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec ollama ollama pull qwen3:8b
+   ```
+   ```bash
+   docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec ollama ollama pull nomic-embed-text
+   ```
+4. Set up n8n and connect the console, in one line (also in PowerShell; Python 3 on this machine):
+   ```bash
+   python deploy/n8n/connect_console.py --n8n http://localhost:5678 --email <your n8n login> --setup-owner --secrets-dir workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
+   ```
+   It creates n8n's owner account (the password 8 to 64 characters with a digit and a capital letter), the credentials and
+   the workflow, and writes the console's webhook secret and n8n key to `workspace/.copilot`.
+5. Reload http://localhost:8080: the header shows step 4 **Pentest**. The copilot model is one that Ollama holds: step 2
+   imports every abliterated run as `<model>-abl`; `COPILOT_OPERATOR_MODEL` in `deploy/.env` makes one the default.
+   Details, writeups for retrieval, and the n8n form: [deploy/n8n/README.md](deploy/n8n/README.md#setup).
+
 ### Rancher Desktop
 
 The image is a plain OCI image.
