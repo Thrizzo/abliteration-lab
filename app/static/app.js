@@ -739,7 +739,7 @@ async function cpEngLoad(saved){
     + (kept ? ' · the form below has unsaved changes' : '');
   $('#cpEngCeiling').innerHTML = c.known
     ? `Ceiling (n8n enforces it, the engagement can only narrow it): LAB_ALLOWLIST <span class="mono">${esc(c.allowlist)}</span>`
-    : `The console does not know LAB_ALLOWLIST; n8n enforces it (${S.env && S.env.runner==='k8s' ? 'ConfigMap copilot-scope' : 'deploy/.env'}).`;
+    : `The console does not know LAB_ALLOWLIST; n8n enforces it (${(typeof S!=='undefined' && S.env && S.env.runner==='k8s') ? 'ConfigMap copilot-scope' : 'deploy/.env'}).`;
   // a host the rules put off-limits belongs in Out of scope, a name they protect in Protected data: both are code; the judge
   // alone missed such rules when measured. The buttons only fill the form: nothing applies until it is saved.
   const hints=s.hints||[];
@@ -754,7 +754,7 @@ async function cpEngLoad(saved){
     t.value=t.value.split(/[\n,]/).map(v=>v.trim()).filter(v=>v && v.replace(/\s+/g,' ').toLowerCase()!==x.toLowerCase()).join('\n');
     CP.moved.push(x); b.disabled=true; b.textContent='moved: save to apply'; });
   const cap=[]; if(c.autorun_passive===false) cap.push('passive'); if(c.autorun_active===false) cap.push('active');
-  $('#engAutoCap').textContent = cap.length ? `capped: the ${cap.join(' and ')} tier is off in LAB_AUTORUN_* (${S.env && S.env.runner==='k8s' ? 'copilot.env' : 'deploy/.env'})` : '';
+  $('#engAutoCap').textContent = cap.length ? `capped: the ${cap.join(' and ')} tier is off in LAB_AUTORUN_* (${(typeof S!=='undefined' && S.env && S.env.runner==='k8s') ? 'copilot.env' : 'deploy/.env'})` : '';
   const off=-new Date().getTimezoneOffset(), a=Math.abs(off);
   $('#engTz').textContent = `your browser's time, UTC${off>=0?'+':'-'}${String(Math.floor(a/60)).padStart(2,'0')}:${String(a%60).padStart(2,'0')}`;
   const vs=s.versions||[];
@@ -952,7 +952,7 @@ async function cpLoad(){
   CP.conn=s; cpGate(); cpTabInfo();
   $('#cpConn').innerHTML = s.configured
     ? `<span class="badge pass">connected</span> n8n at <span class="mono">${esc(s.n8n)}</span>`
-    : `<span class="badge warn">not connected</span> missing: <span class="mono">${esc((s.missing||[]).join(', '))}</span>. Run <span class="mono">deploy/n8n/connect_console.py</span> once (${S.env && S.env.runner==='k8s' ? 'deploy/k8s/README.md, section Copilot' : 'README.md, Step 4: the pentest copilot'}).`;
+    : `<span class="badge warn">not connected</span> missing: <span class="mono">${esc((s.missing||[]).join(', '))}</span>. Run <span class="mono">deploy/n8n/connect_console.py</span> once (${(typeof S!=='undefined' && S.env && S.env.runner==='k8s') ? 'deploy/k8s/README.md, section Copilot' : 'README.md, Step 4: the pentest copilot'}).`;
   $('#cpRun').disabled = $('#cpCheck').disabled = !s.configured;
   $('#cpSend').disabled = !(s.model && s.model.configured);
   const runs=s.runs||[];
