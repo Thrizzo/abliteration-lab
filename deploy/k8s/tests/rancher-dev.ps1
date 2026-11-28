@@ -486,8 +486,10 @@ function Get-ModelContainers {   # the runtime's view, with Rancher Desktop's do
     return @(($ids -split "`n") | Where-Object { $_.Trim() }).Count
 }
 # exit code of curl in a probe pod: 0 = an HTTP answer came back (any status); 7 or 28 = refused or timed out
-function Get-Reach([string]$Pod, [string]$Url) {
-    $null = kc @('-n', 'lab', 'exec', $Pod, '--', 'curl', '-s', '-o', '/dev/null', '-m', '5', $Url)
+function Get-Reach([string]$Pod, [string]$Url, [switch]$Insecure) {
+    $a = @('-n', 'lab', 'exec', $Pod, '--', 'curl', '-s', '-o', '/dev/null', '-m', '5')
+    if ($Insecure) { $a += '-k' }                    # any TLS answer counts as reached, whoever's certificate it is
+    $null = kc ($a + @($Url))
     return $LASTEXITCODE
 }
 function Start-Probes {
@@ -892,6 +894,18 @@ function Invoke-Policies {
             else { Bad "stranger -/-> the host's Ollama: curl exit $c (0: it got through)" }
         } else { Skip 'stranger -/-> the host''s Ollama (the console does not reach it either: is Ollama running on Windows?)' }
     }
+    # Rancher Desktop NATs 192.168.127.254 to this machine's 127.0.0.1. The dev overlay leaves that address out of the
+    # console's opening to the internet, so the console must not reach the Kubernetes API's port on this machine through
+    # it. That port is kubectl's own server, so something answers there: a block proves the policy, not an empty port.
+    $server = (kcOut @('config', 'view', '--minify', '-o', 'jsonpath={.clusters[0].cluster.server}')).Trim()
+    $apiPort = 0
+    try { $u = [Uri]$server; if (@('127.0.0.1', 'localhost') -contains $u.Host) { $apiPort = $u.Port } } catch { }
+    if ($apiPort) {
+        $c = Get-Reach 'probe-console' "https://192.168.127.254:$apiPort/" -Insecure
+        if ($c -eq 7 -or $c -eq 28) { Ok "console -/-> this machine's 127.0.0.1:$apiPort through Rancher Desktop's NAT (curl exit $c)" }
+        else { Bad ("console -/-> this machine's 127.0.0.1:${apiPort} through Rancher Desktop's NAT: curl exit $c " +
+                    '(0: it got through; the dev overlay leaves 192.168.127.254 out of the console''s opening)') }
+    } else { Skip "console -/-> this machine's 127.0.0.1 through Rancher Desktop's NAT (the context's API server is not on 127.0.0.1: $server)" }
     $null = kc @('-n', 'lab', 'exec', 'deploy/glm-serve', '--', 'timeout', '5', 'bash', '-c', 'true')
     if ($LASTEXITCODE -ne 0) { Skip 'model server -/-> internet (no bash and timeout in its image)'; return }
     $null = kc @('-n', 'lab', 'exec', 'deploy/glm-serve', '--', 'timeout', '5', 'bash', '-c', '</dev/tcp/1.1.1.1/443')

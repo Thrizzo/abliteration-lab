@@ -188,9 +188,10 @@ serve them instead: it runs on Windows itself and uses the GPU.
     Jobs and every other pod there may not.
   - The NAT itself has no filter: pods in other namespaces (they have no network policies) and containers started
     outside Kubernetes reach every port on Windows' `127.0.0.1` this way, Ollama included.
-  - The base policies' openings to `0.0.0.0/0` reach Windows through the same NAT, with or without this overlay: the
-    console on 443 and 6443, download Jobs and the in-cluster Ollama on 443, each to whatever listens on that port of
-    Windows' `127.0.0.1`.
+  - The base policies' openings to `0.0.0.0/0` (the console on 443 and 6443, download Jobs and the in-cluster Ollama
+    on 443) leave `192.168.127.254` out in `dev` and every overlay built on it, so these pods do not reach Windows'
+    `127.0.0.1` through the NAT. `-Check` tries it from a console-labelled probe against the Kubernetes API's port on
+    Windows (kubectl's own server), which answers, so the block is the policy's.
 - **Is the GPU used?** On Windows, `ollama ps` shows `GPU` in the PROCESSOR column (`100% GPU`) for a model loaded
   on the GPU. `-Check` and `-EvalJudge` print the same after they have used it.
 - **Back to the in-cluster Ollama:** run the script without `-HostOllama`. It applies `dev`, which scales the in-cluster
