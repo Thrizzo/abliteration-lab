@@ -171,3 +171,4 @@ Expect $k (-not ($script:Log | Where-Object { $_ -like 'ask *' })) 'a prompt'
 Remove-Item -Recurse -Force $script:Tmp -ErrorAction SilentlyContinue
 if ($script:Failed) { Write-Output "$($script:Failed) failed"; exit 1 }
 Write-Output ('rancher-dev.ps1 n8n login: {0} password and {1} e-mail cases as n8n answers them, 9 prompt runs as expected' -f @($cases.password).Count, @($cases.email).Count)
+exit 0                                                   # not the last stub's exit code: CI's pwsh step ends with exit $LASTEXITCODE

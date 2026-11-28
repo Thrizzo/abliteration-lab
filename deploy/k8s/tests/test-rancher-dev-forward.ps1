@@ -148,3 +148,4 @@ Expect $k (($script:Stopped -join ',') -eq '900') 'the end of a run stops the fo
 
 if ($script:Failed) { Write-Output "$($script:Failed) failed"; exit 1 }
 Write-Output 'rancher-dev.ps1 port-forwards: 7 cases as expected'
+exit 0                                                   # not the last stub's exit code: CI's pwsh step ends with exit $LASTEXITCODE

@@ -130,3 +130,4 @@ Expect $k (Has 'ok the console runs stages as Kubernetes Jobs (runner k8s)') 'th
 
 if ($script:Failed) { Write-Output "$($script:Failed) failed"; exit 1 }
 Write-Output 'rancher-dev.ps1 console password: 7 cases as expected'
+exit 0                                                   # not the last stub's exit code: CI's pwsh step ends with exit $LASTEXITCODE
