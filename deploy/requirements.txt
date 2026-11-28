@@ -15,5 +15,8 @@ numpy==2.5.5
 fastapi==0.163.1
 uvicorn[standard]==0.54.0
 pydantic==2.14.3
+# FP8 checkpoints (the GLM-5.3 family) stay FP8 on GPUs of compute capability 8.9+, and transformers runs them through the
+# finegrained-fp8 Triton kernel that this package fetches (transformers asks for >=0.18.2,<0.19)
+kernels==0.18.3
 # PDF text for knowledge uploads; parsed in a separate, memory- and CPU-limited process (copilot/pdftext.py)
 pypdf==6.21.4

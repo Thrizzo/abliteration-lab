@@ -225,11 +225,62 @@ def cpu_bf16_fast():
         return False
 
 
+def _arch_covers(arch_list, major, minor):
+    """Whether a torch build with these kernels (torch.cuda.get_arch_list(): 'sm_86', 'compute_90', ...) runs on a GPU of
+    compute capability major.minor: machine code for the same major and a minor up to the GPU's, or PTX for a capability
+    up to the GPU's (the driver compiles it)."""
+    for arch in arch_list:
+        kind, _, num = str(arch).partition("_")
+        digits = "".join(ch for ch in num if ch.isdigit())
+        if not digits:
+            continue
+        a_major, a_minor = divmod(int(digits), 10)
+        if kind == "sm" and a_major == major and a_minor <= minor:
+            return True
+        if kind == "compute" and (a_major, a_minor) <= (major, minor):
+            return True
+    return False
+
+
+def gpu_problem():
+    """Why the visible GPUs cannot run this torch build, '' when they can (or no GPU is visible). The cu128 wheels carry
+    kernels for Turing (sm_75) and newer only; for an older GPU torch.cuda.is_available() is still True and only warns,
+    and the first kernel then fails ("no kernel image is available"). Builds with TORCH_FLAVOR=cu126 cover Maxwell,
+    Pascal and Volta."""
+    try:
+        if not torch.cuda.is_available() or not getattr(torch.version, "cuda", None):
+            return ""
+        archs = torch.cuda.get_arch_list()
+        if not archs:
+            return ""
+        bad = []
+        for i in range(torch.cuda.device_count()):
+            major, minor = torch.cuda.get_device_capability(i)
+            if not _arch_covers(archs, major, minor):
+                bad.append(f"{torch.cuda.get_device_name(i)} (compute capability {major}.{minor})")
+    except Exception:                                          # a mocked or unusual torch.cuda: no verdict
+        return ""
+    if not bad:
+        return ""
+    return (f"this image's PyTorch ({torch.__version__}) has no kernels for {', '.join(bad)}: it covers "
+            f"{', '.join(archs)}. Build the image with TORCH_FLAVOR=cu126 (deploy/.env) for Maxwell, Pascal and Volta GPUs")
+
+
+def cuda_usable():
+    """A CUDA GPU is visible and this torch build can run on it."""
+    return torch.cuda.is_available() and not gpu_problem()
+
+
 def resolve_device(device_map="cuda", dtype="auto", log=print):
     """What the model is really loaded on: (device_map, dtype name).
-    'cuda' without a visible CUDA GPU becomes 'cpu'. dtype 'auto' is bfloat16 on a GPU; on the CPU it is float32 unless the
-    processor has a fast bf16 path. An explicit dtype is kept as given."""
+    'cuda' without a CUDA GPU this torch build can use becomes 'cpu', and so does 'auto' when the visible GPU is too old
+    for the build (accelerate would place weights on it). dtype 'auto' is bfloat16 on a GPU; on the CPU it is float32
+    unless the processor has a fast bf16 path. An explicit dtype is kept as given."""
     has_cuda = torch.cuda.is_available()
+    problem = gpu_problem() if has_cuda else ""
+    if problem and device_map in ("cuda", "auto"):
+        log(f"{problem}. Running on the CPU instead (works, but measure and scan take much longer)")
+        device_map, has_cuda = "cpu", False
     if device_map == "cuda" and not has_cuda:
         log("no CUDA GPU is visible to this process: running on the CPU instead (works, but measure and scan take much longer)")
         device_map = "cpu"
@@ -241,9 +292,11 @@ def resolve_device(device_map="cuda", dtype="auto", log=print):
 
 def _ram_check(model_dir, dtype, log):
     """CPU runs die without a message when the model does not fit (the kernel kills the process, exit code 137): say so first."""
+    from .pipeline import free_ram_gb                            # MemAvailable, capped by the container's memory limit
     try:
-        with open("/proc/meminfo", encoding="ascii") as f:
-            avail = next(int(line.split()[1]) for line in f if line.startswith("MemAvailable:")) / 1e6      # kB -> GB
+        avail = free_ram_gb()
+        if avail is None:
+            return
         cfg = json.load(open(os.path.join(model_dir, "config.json"), encoding="utf-8"))
         src = getattr(torch, str(cfg.get("dtype") or cfg.get("torch_dtype") or "bfloat16"), torch.bfloat16).itemsize
         on_disk = sum(os.path.getsize(p) for p in glob.glob(os.path.join(model_dir, "*.safetensors"))) / 1e9
@@ -252,7 +305,7 @@ def _ram_check(model_dir, dtype, log):
     need = on_disk * getattr(torch, dtype).itemsize / src
     if need > 0.9 * avail:
         log(f"WARNING: the model needs about {need:.0f} GB of RAM in {dtype} but only {avail:.0f} GB are free. If the run stops without "
-            f"an error (exit code 137) it ran out of memory: give the container / WSL VM more RAM or use a smaller model")
+            f"an error (exit code 137) it ran out of memory: give the container (its memory limit) / WSL VM more RAM or use a smaller model")
 
 
 def auto_class(model_dir, trust_remote_code=False):

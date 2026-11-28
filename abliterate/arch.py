@@ -116,6 +116,11 @@ def inspect(model_dir):
                 level = "requantized"
         if needs_remote:
             notes.append("legacy remote-code checkpoint: loading needs --trust-remote-code (the .py files in the folder run)")
+        if fam is FAMILY["chatglm"]:
+            level = "unsupported"
+            notes.append("legacy ChatGLM code (ChatGLM2/3, glm-4-9b-chat) does not load with transformers 5: its model class "
+                         "reads config.max_length, which transformers 5 no longer keeps in the config. The -hf checkpoint of "
+                         "the same model (THUDM/glm-4-9b-chat-hf, family glm4) works")
     params_b = round(size_bytes / (1 if q else 2) / 1e9, 1) if size_bytes else None
     return {
         "model_type": mt, "architectures": cfg.get("architectures"), "family": fam["name"] if fam else None,

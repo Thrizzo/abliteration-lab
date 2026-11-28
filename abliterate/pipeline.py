@@ -98,13 +98,44 @@ def copy_problem(dst):
     return ", ".join(missing)
 
 
-def free_ram_gb():
-    """RAM this process can still get (MemAvailable; in a container the VM's), or None where /proc/meminfo is missing."""
+def cgroup_room_gb(root="/sys/fs/cgroup"):
+    """What this container may still allocate under its memory limit, None without one. /proc/meminfo shows the node's or
+    the VM's memory, not the limit a Kubernetes Job or `docker run -m` sets, and the kernel kills the process at that
+    limit. cgroup v2 (memory.max, memory.current) or v1 (memory.limit_in_bytes, memory.usage_in_bytes); the page cache
+    the kernel can drop (inactive_file in memory.stat) does not count as used, as for the kubelet."""
+    for limit_f, usage_f, stat_f, inactive in (("memory.max", "memory.current", "memory.stat", "inactive_file"),
+                                               ("memory/memory.limit_in_bytes", "memory/memory.usage_in_bytes",
+                                                "memory/memory.stat", "total_inactive_file")):
+        try:
+            with open(os.path.join(root, limit_f), encoding="ascii") as f:
+                limit = f.read().strip()
+            with open(os.path.join(root, usage_f), encoding="ascii") as f:
+                used = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        if not limit.isdigit() or int(limit) >= 1 << 60:             # "max" (v2) or the v1 "no limit" value
+            return None
+        try:
+            with open(os.path.join(root, stat_f), encoding="ascii") as f:
+                used -= next(int(line.split()[1]) for line in f if line.split()[0] == inactive)
+        except (OSError, StopIteration, ValueError, IndexError):
+            pass
+        return max(int(limit) - max(used, 0), 0) / 1e9
+    return None
+
+
+def free_ram_gb(meminfo="/proc/meminfo", cgroup="/sys/fs/cgroup"):
+    """RAM this process can still get: MemAvailable (in a container the VM's or the node's), capped by the container's
+    memory limit (cgroup_room_gb). None where neither can be read (Windows, macOS)."""
     try:
-        with open("/proc/meminfo", encoding="ascii") as f:
-            return next(int(line.split()[1]) for line in f if line.startswith("MemAvailable:")) / 1e6
+        with open(meminfo, encoding="ascii") as f:
+            avail = next(int(line.split()[1]) for line in f if line.startswith("MemAvailable:")) / 1e6
     except (OSError, StopIteration, ValueError, IndexError):
-        return None
+        avail = None
+    room = cgroup_room_gb(cgroup)
+    if avail is None or room is None:
+        return room if avail is None else avail
+    return min(avail, room)
 
 
 def fit_problem(weights_gb, device_map="cuda", dtype="auto"):
@@ -131,6 +162,46 @@ def fit_problem(weights_gb, device_map="cuda", dtype="auto"):
     if weights_gb <= room:
         return ""
     return f"its weights alone are {weights_gb:.0f} GB, and this machine has {where} for measure and scan"
+
+
+def fp8_kernel(model_dir, log):
+    """FP8 block-scaled checkpoints stay FP8 on GPUs of compute capability 8.9 and newer, and transformers then runs their
+    linears through the finegrained-fp8 Triton kernel, which the `kernels` package fetches from the Hub at the first
+    forward. It is fetched with the model, so the stages without internet (Kubernetes measure and scan Jobs, which run
+    with HF_HUB_OFFLINE) find it in the cache. Offline, a GPU that needs it and a cache without it stop the run here,
+    before a load of hundreds of GB."""
+    try:
+        with open(os.path.join(model_dir, "config.json"), encoding="utf-8") as f:
+            q = json.load(f).get("quantization_config") or {}
+    except (OSError, ValueError, AttributeError):
+        return
+    if not isinstance(q, dict) or str(q.get("quant_method", "")).lower() != "fp8":
+        return
+    import torch
+    if not getattr(torch.version, "cuda", None):
+        return                                  # a CPU build: transformers dequantizes FP8, no kernel is needed
+    from huggingface_hub import constants
+    offline = bool(constants.HF_HUB_OFFLINE)
+    try:
+        from kernels import install_kernel
+        from transformers.integrations.hub_kernels import _HUB_KERNEL_MAPPING
+        spec = _HUB_KERNEL_MAPPING["finegrained-fp8"]
+        install_kernel(spec["repo_id"], revision=spec.get("revision"), version=spec.get("version"), local_files_only=offline)
+    except Exception as e:                      # noqa: BLE001 - ImportError, offline cache miss, Hub errors
+        why = f"{type(e).__name__}: {str(e)[:240]}"
+        try:
+            needs = torch.cuda.is_available() and any(torch.cuda.get_device_capability(i) >= (8, 9)
+                                                      for i in range(torch.cuda.device_count()))
+        except Exception:                       # noqa: BLE001
+            needs = False
+        if offline and needs:
+            raise UsageError("this FP8 checkpoint runs through the finegrained-fp8 kernel on this GPU (compute capability "
+                             f"8.9 or newer), and the kernel is not in the cache ({why}). Run the download stage again "
+                             "where it has internet: it fetches the kernel with the model") from None
+        log(f"WARNING: FP8 checkpoint, but its kernel could not be fetched ({why}). Measure and scan fail on a GPU of "
+            "compute capability 8.9 or newer until it is in the cache: run the download stage again")
+        return
+    log(f"model: FP8 checkpoint, its kernel {spec['repo_id']} (version {spec.get('version')}) is in the cache")
 
 
 def check_fit(repo, weights_gb, args):
@@ -208,6 +279,7 @@ def step_download(run, repo, models_dir, token=None, args=None):
     problem = copy_problem(dst)
     if not problem:
         run.log(f"model: local copy present {dst}")
+        fp8_kernel(dst, run.log)
         run.event("download", "done", path=dst, cached=True)
         return dst
     if os.path.isdir(repo):
@@ -216,6 +288,7 @@ def step_download(run, repo, models_dir, token=None, args=None):
         problem = copy_problem(dst)
         if problem:
             raise UsageError(f"the model folder {repo} lacks {problem}")
+        fp8_kernel(dst, run.log)
         run.event("download", "done", path=dst)
         return dst
     if os.path.isfile(os.path.join(dst, "config.json")):
@@ -257,6 +330,7 @@ def step_download(run, repo, models_dir, token=None, args=None):
     hashes = {f: sha256_of(os.path.join(dst, f)) for f in sorted(os.listdir(dst)) if f.endswith(".safetensors") and os.path.getsize(os.path.join(dst, f)) < 3e9}
     with open(os.path.join(dst, "local_copy.json"), "w", encoding="utf-8") as f:        # written last: the copy is complete
         json.dump({"repo": repo, "revision": info.sha, "downloaded": datetime.now().isoformat(timespec="seconds"), "sha256": hashes}, f, indent=2)
+    fp8_kernel(dst, run.log)
     run.event("download", "done", path=dst, revision=info.sha)
     return dst
 
