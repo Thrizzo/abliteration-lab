@@ -680,14 +680,60 @@ function Invoke-HostPreflight {
 }
 
 # ------------------------------------------------------------------------------------------------ setup
+# Kubernetes runs on Rancher Desktop's dockerd, so the image must be built into that engine. With Docker Desktop also
+# installed, the docker CLI's current context is often Docker Desktop's (npipe:////./pipe/dockerDesktopLinuxEngine):
+# stopped, the build cannot connect; running, the image lands in an engine Kubernetes does not see. An engine is known
+# by its host name: k3s names the node after the host it runs on, which is dockerd's host (compared without case).
+function Get-DockerEngine([string[]]$Pre) {
+    $out = (Exe 'docker' ($Pre + @('info', '--format', '{{.Name}}/{{.ServerVersion}}')) -Out).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $out) { return $null }
+    $parts = $out -split '/', 2
+    $ver = ''
+    if ($parts.Count -gt 1) { $ver = $parts[1] }
+    return @{ Name = $parts[0]; Version = $ver }
+}
+# '' builds through the CLI's current context, 'default' through that context, $null when neither reaches the engine
+# Kubernetes uses (the reason and the fix are printed).
+function Resolve-BuildContext {
+    $node = (kcOut @('get', 'nodes', '-o', 'jsonpath={.items[0].metadata.name}')).Trim()
+    $runtime = "$($script:Runtime)" -replace '^docker://', ''
+    $cur = Get-DockerEngine @()
+    if ($cur -and $cur.Name -eq $node) { return '' }
+    $ctx = (Exe 'docker' @('context', 'show') -Out).Trim()
+    if ($ctx -ne 'default') {
+        $alt = Get-DockerEngine @('--context', 'default')
+        if ($alt -and $alt.Name -eq $node) {
+            Note "the docker CLI's context '$ctx' does not reach the engine Kubernetes uses; building through context 'default' ($($alt.Name), Docker $($alt.Version))"
+            return 'default'
+        }
+    }
+    $endpoint = (Exe 'docker' @('context', 'inspect', '--format', '{{.Endpoints.docker.Host}}', $ctx) -Out).Trim()
+    if ($cur) {
+        Bad ("the docker CLI builds into another engine ($($cur.Name), Docker $($cur.Version)) than the one Kubernetes uses " +
+             "(node $node, $runtime): the image would land where Kubernetes cannot see it")
+    } else {
+        Bad "the docker CLI reaches no engine through its context '$ctx' ($endpoint); Kubernetes runs on node $node ($runtime)"
+    }
+    if ($env:DOCKER_HOST) { Note "DOCKER_HOST is set ($env:DOCKER_HOST) and overrides every context: remove it (Remove-Item Env:DOCKER_HOST)" }
+    Note 'Rancher Desktop''s dockerd listens on npipe:////./pipe/docker_engine, usually the context "default": docker context use default'
+    Note 'then "docker info --format {{.Name}}" shows the node''s name, and -Setup builds into the engine Kubernetes uses'
+    return $null
+}
+
 function Invoke-Build {
     $engine = Get-BuildEngine
     if (-not (Get-Command $engine.Exe -ErrorAction SilentlyContinue)) {
         Bad "$($engine.Exe) on PATH (the CLI of the container engine Kubernetes uses: $($script:Runtime))"
         return $false
     }
+    $pre = @($engine.Pre)
+    if ($engine.Exe -eq 'docker') {
+        $buildContext = Resolve-BuildContext
+        if ($null -eq $buildContext) { return $false }
+        if ($buildContext) { $pre = @('--context', $buildContext) + $pre }
+    }
     $log = Join-Path $script:Tmp 'build'
-    $a = @($engine.Pre) + @('build', '-f', 'deploy/Dockerfile', '--build-arg', 'TORCH_FLAVOR=cpu', '-t', $Image, '.')
+    $a = $pre + @('build', '-f', 'deploy/Dockerfile', '--build-arg', 'TORCH_FLAVOR=cpu', '-t', $Image, '.')
     Note "building $Image with $($engine.Exe) (CPU torch; the first build takes 5 to 15 minutes, later ones use the cache)"
     $t0 = Get-Date
     $p = Start-Process -FilePath $engine.Exe -ArgumentList $a -NoNewWindow -PassThru -RedirectStandardOutput "$log.out" -RedirectStandardError "$log.err"

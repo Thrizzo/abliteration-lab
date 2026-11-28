@@ -115,6 +115,10 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
 
   The judge (~5 GB) downloads in the background. Checks that need it are skipped until it is there. With
   `-HostOllama` the judge runs on Windows instead ([below](#gpu-ollama-for-windows)).
+- **Docker Desktop installed as well:** the `docker` CLI's current context is then often Docker Desktop's
+  (`npipe:////./pipe/dockerDesktopLinuxEngine`), not Rancher Desktop's dockerd. Before it builds, the script checks that
+  the CLI reaches the engine Kubernetes runs on (the node's host name): if the context `default` does, it builds through
+  that; otherwise it stops with the fix, `docker context use default`.
 - **Before anything else** (not for `-Teardown`) it checks the default StorageClass and that k3s's own pods in
   `kube-system` run. Without CoreDNS and the volume provisioner (`local-path-provisioner`) every pod of the stack would
   wait 10 to 15 minutes for nothing, so the script gives them up to 90 s, then stops and prints each broken pod with its
