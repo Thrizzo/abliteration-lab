@@ -213,7 +213,7 @@ function Read-Secret([string]$Prompt, [string]$EnvName, [switch]$Confirm, [scrip
         if ($Check) { $why = "$(& $Check $p1)"; if ($why) { Write-Host "$why; again." -ForegroundColor Yellow; continue } }
         if (-not $Confirm) { return $p1 }
         $p2 = (New-Object System.Net.NetworkCredential('', (Read-Host -AsSecureString 'Again, to confirm'))).Password
-        if ($p1 -eq $p2) { return $p1 }
+        if ([string]::Equals($p1, $p2, [StringComparison]::Ordinal)) { return $p1 }   # exact: -eq would take Passwort1 and passwort1 as one
         Write-Host 'They differ; again.'
     }
 }
