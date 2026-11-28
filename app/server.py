@@ -37,6 +37,7 @@ from datasets import Datasets, FILES as DATA_FILES  # noqa: E402
 from sbom import SbomJob  # noqa: E402
 from abliterate import arch as ARCH  # noqa: E402
 from abliterate import platform as PL  # noqa: E402
+from abliterate.pipeline import copy_problem  # noqa: E402
 
 CODE = os.path.dirname(HERE)                                    # where abliterate/, run_pipeline.py live
 PROJECT = os.path.abspath(os.environ.get("ABL_PROJECT") or CODE)   # where models/, runs/, data/ live
@@ -323,8 +324,8 @@ def models():
             d = os.path.join(mdir, slug)
             if not os.path.isdir(d):
                 continue
-            complete = os.path.isfile(os.path.join(d, "config.json")) and (os.path.isfile(os.path.join(d, "model.safetensors")) or os.path.isfile(os.path.join(d, "model.safetensors.index.json")))
-            entry = {"slug": slug, "path": d, "size_gb": round(folder_size(d) / 1e9, 1), "complete": complete,
+            missing = copy_problem(d)          # an interrupted download is not on disk yet: the next run goes on with it
+            entry = {"slug": slug, "path": d, "size_gb": round(folder_size(d) / 1e9, 1), "complete": not missing, "missing": missing,
                      "copy_info": rundata.load(os.path.join(d, "local_copy.json"), {}),
                      "abliterated": os.path.isfile(os.path.join(PROJECT, "out", f"{slug}-abliterated", "config.json"))}
             if os.path.isfile(os.path.join(d, "config.json")):

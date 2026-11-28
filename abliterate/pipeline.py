@@ -69,6 +69,88 @@ class UsageError(Exception):
     """A choice that does not fit the run (a layer the model does not have): reported without a traceback."""
 
 
+def copy_problem(dst):
+    """What a local copy of a model lacks for loading, '' when nothing. A download that finished writes local_copy.json
+    last, so that settles it; a folder copied by hand needs config.json, a tokenizer and every weight shard its index
+    names. config.json alone used to count as a complete copy, and it is among the first files of a download: a
+    GLM-5.3-Flash run whose download had stopped then failed at the tokenizer ("Couldn't instantiate the backend
+    tokenizer")."""
+    if os.path.isfile(os.path.join(dst, "local_copy.json")):
+        return ""
+    if not os.path.isfile(os.path.join(dst, "config.json")):
+        return "config.json"
+    missing = []
+    index = os.path.join(dst, "model.safetensors.index.json")
+    if os.path.isfile(index):
+        try:
+            with open(index, encoding="utf-8") as f:
+                shards = sorted(set(json.load(f)["weight_map"].values()))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return "a readable model.safetensors.index.json"
+        missing += [s for s in shards if not os.path.isfile(os.path.join(dst, s))]
+    elif not glob.glob(os.path.join(dst, "*.safetensors")):
+        missing.append("the weights (*.safetensors)")
+    if not (any(os.path.isfile(os.path.join(dst, t)) for t in ("tokenizer.json", "tokenizer.model"))
+            or glob.glob(os.path.join(dst, "*.tiktoken")) or glob.glob(os.path.join(dst, "tokenization_*.py"))):
+        missing.append("the tokenizer (tokenizer.json)")
+    if len(missing) > 3:
+        return ", ".join(missing[:3]) + f" and {len(missing) - 3} more"
+    return ", ".join(missing)
+
+
+def free_ram_gb():
+    """RAM this process can still get (MemAvailable; in a container the VM's), or None where /proc/meminfo is missing."""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as f:
+            return next(int(line.split()[1]) for line in f if line.startswith("MemAvailable:")) / 1e6
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+
+
+def fit_problem(weights_gb, device_map="cuda", dtype="auto"):
+    """Why weights of this size can never be loaded here for measure and scan, '' when they can (or when it cannot tell).
+    A lower bound: the weights alone as stored, without activations or a wider dtype. device_map as the run gives it:
+    cuda is one GPU, auto all GPUs plus RAM (accelerate offloads there), cpu RAM only."""
+    import torch
+    from .hooks import resolve_device
+    device_map, _ = resolve_device(device_map, dtype, lambda *a: None)
+    ram = free_ram_gb()
+    if device_map != "cpu" and torch.cuda.is_available():
+        gpus = [torch.cuda.get_device_properties(i).total_memory / 1e9 for i in range(torch.cuda.device_count())]
+        if device_map == "auto":
+            if ram is None:
+                return ""                                     # the RAM it may offload to is unknown (no /proc): cannot tell
+            room = sum(gpus) + ram
+            where = f"{sum(gpus):.0f} GB on {len(gpus)} GPU{'s' if len(gpus) > 1 else ''} plus {ram:.0f} GB of free RAM"
+        else:
+            room, where = gpus[0], f"{gpus[0]:.0f} GB on its GPU (device auto adds the RAM, slowly)"
+    elif ram is None:
+        return ""
+    else:
+        room, where = ram, f"{ram:.0f} GB of free RAM and no GPU this process can use"
+    if weights_gb <= room:
+        return ""
+    return f"its weights alone are {weights_gb:.0f} GB, and this machine has {where} for measure and scan"
+
+
+def check_fit(repo, weights_gb, args):
+    """UsageError when the run's measure and scan could never load the model here (before a download of that size)."""
+    if getattr(args, "no_fit_check", False) or args.stage not in ("all", "measure", "scan"):
+        return
+    problem = fit_problem(weights_gb, args.device_map, args.dtype)
+    if problem:
+        raise UsageError(f"{repo} does not fit this machine: {problem}. A model this size needs a node with enough GPUs "
+                         f"(deploy/k8s, overlays onprem or cloud); here, pick a smaller one. --no-fit-check skips this check")
+
+
+def disk_problem(path, need_bytes):
+    """Why the files will not fit the disk at path, '' when they will."""
+    free = shutil.disk_usage(path).free
+    if need_bytes <= free:
+        return ""
+    return f"it needs {need_bytes / 1e9:.0f} GB on the disk of {path}, which has {free / 1e9:.0f} GB free"
+
+
 def parse_layers(text):
     """--layers: "15,17,19" (commas or spaces between the numbers, as in the console), ranges such as "15-19", or both
     ("12,15-17") -> the layers in the order given, each once. "15 17" is two layers, never layer 1517."""
@@ -111,8 +193,10 @@ def drop_scan(run, step):
 
 
 # ----------------------------------------------------------------------------- steps
-def step_download(run, repo, models_dir, token=None):
-    """Local copy under models/<slug>: safe file types only, revision + SHA-256 recorded (like notebook 4.0b)."""
+def step_download(run, repo, models_dir, token=None, args=None):
+    """Local copy under models/<slug>: safe file types only, revision + SHA-256 recorded (like notebook 4.0b). A copy that
+    lacks something (copy_problem) is downloaded on (finished files are kept), and before a download the disk, and for a
+    run that loads the model this machine's memory, must be able to hold it."""
     import hashlib
     slug = slug_of(repo)
     dst = os.path.join(models_dir, slug)
@@ -121,26 +205,58 @@ def step_download(run, repo, models_dir, token=None):
             if d.lower() == slug and os.path.isfile(os.path.join(models_dir, d, "config.json")):
                 dst = os.path.join(models_dir, d)
                 break
-    if os.path.isfile(os.path.join(dst, "config.json")):
+    problem = copy_problem(dst)
+    if not problem:
         run.log(f"model: local copy present {dst}")
         run.event("download", "done", path=dst, cached=True)
         return dst
     if os.path.isdir(repo):
         run.event("download", "start", repo=repo, path=dst, note="copying local folder")
         shutil.copytree(repo, dst, dirs_exist_ok=True)
+        problem = copy_problem(dst)
+        if problem:
+            raise UsageError(f"the model folder {repo} lacks {problem}")
         run.event("download", "done", path=dst)
         return dst
+    if os.path.isfile(os.path.join(dst, "config.json")):
+        run.log(f"model: the copy in {dst} is incomplete (it lacks {problem}): the download goes on, finished files are kept")
     from huggingface_hub import HfApi, snapshot_download
     run.event("download", "start", repo=repo, path=dst)
-    info = HfApi(token=token).model_info(repo, files_metadata=True)
-    total = sum((s.size or 0) for s in info.siblings if s.rfilename.endswith((".safetensors", ".json", ".jinja", ".txt", ".model", ".tiktoken", ".py")))
-    run.log(f"model: downloading {repo}@{info.sha[:8]} (~{total / 1e9:.1f} GB) -> {dst}")
+    try:
+        info = HfApi(token=token).model_info(repo, files_metadata=True)
+    except Exception as e:
+        if os.path.isfile(os.path.join(dst, "config.json")):
+            raise UsageError(f"the copy in {dst} is incomplete (it lacks {problem}) and Hugging Face cannot be asked from here "
+                             f"({type(e).__name__}): run the download again where it can") from None
+        raise
+    kinds = (".safetensors", ".json", ".jinja", ".txt", ".model", ".tiktoken", ".py")
+    files = [s for s in info.siblings if s.rfilename.endswith(kinds)]
+    total = sum((s.size or 0) for s in files)
+    weights = sum((s.size or 0) for s in files if s.rfilename.endswith(".safetensors"))
+    if args is not None:
+        check_fit(repo, weights / 1e9, args)
+    have = sum((s.size or 0) for s in files if os.path.isfile(os.path.join(dst, s.rfilename))
+               and os.path.getsize(os.path.join(dst, s.rfilename)) == (s.size or 0))
+    edited_copy = weights if args is not None and args.stage in ("all", "continue", "apply") else 0
+    os.makedirs(models_dir, exist_ok=True)
+    room = disk_problem(models_dir, total - have + edited_copy)
+    if room:
+        raise UsageError(f"{repo} does not fit the disk: {room} ({(total - have) / 1e9:.0f} GB still to download"
+                         + (f", {edited_copy / 1e9:.0f} GB for the edited copy" if edited_copy else "") + ")")
+    run.log(f"model: downloading {repo}@{info.sha[:8]} (~{total / 1e9:.1f} GB" + (f", {have / 1e9:.1f} GB already here" if have else "")
+            + f") -> {dst}")
     run.event("download", "progress", total_gb=round(total / 1e9, 1))
     snapshot_download(repo, revision=info.sha, local_dir=dst, token=token,
                       allow_patterns=["*.json", "*.safetensors", "*.jinja", "*.txt", "*.model", "*.tiktoken", "*.py", "*.md"])
-    hashes = {f: hashlib.sha256(open(os.path.join(dst, f), "rb").read()).hexdigest() for f in sorted(os.listdir(dst)) if f.endswith(".safetensors") and os.path.getsize(os.path.join(dst, f)) < 3e9}
-    json.dump({"repo": repo, "revision": info.sha, "downloaded": datetime.now().isoformat(timespec="seconds"), "sha256": hashes},
-              open(os.path.join(dst, "local_copy.json"), "w", encoding="utf-8"), indent=2)
+    def sha256_of(path):                                                    # in blocks: shards are up to 3 GB
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+    hashes = {f: sha256_of(os.path.join(dst, f)) for f in sorted(os.listdir(dst)) if f.endswith(".safetensors") and os.path.getsize(os.path.join(dst, f)) < 3e9}
+    with open(os.path.join(dst, "local_copy.json"), "w", encoding="utf-8") as f:        # written last: the copy is complete
+        json.dump({"repo": repo, "revision": info.sha, "downloaded": datetime.now().isoformat(timespec="seconds"), "sha256": hashes}, f, indent=2)
     run.event("download", "done", path=dst, revision=info.sha)
     return dst
 
@@ -411,6 +527,8 @@ def main(argv=None):
     ap.add_argument("--device-map", default="cuda", help="cuda (falls back to cpu when no GPU is visible) | cpu | auto (multi-GPU / offload)")
     ap.add_argument("--trust-remote-code", action="store_true"); ap.add_argument("--hf-token")
     ap.add_argument("--skip-verify", action="store_true", help="no reload/generation after the edit (huge models)")
+    ap.add_argument("--no-fit-check", action="store_true", help="load the model for measure and scan even when its weights "
+                                                                "exceed this machine's GPU memory and RAM")
     ap.add_argument("--no-ollama", action="store_true"); ap.add_argument("--quantize", default="q8_0")
     ap.add_argument("--out-dir", help="where the edited model goes (default: out/<slug>-abliterated; a resumed run keeps its own). "
                                         "The Kubernetes console passes <run>/model, so every run keeps its own copy for Promote / Rollback")
@@ -442,8 +560,10 @@ def main(argv=None):
     run.update_meta(model_repo=model_repo, slug=slug, status="running", stage=args.stage, args=safe_args, started=run.meta.get("started") or datetime.now().isoformat(timespec="seconds"))
     run.log(f"run {run.run_dir}: model {model_repo} stage {args.stage}")
     try:
-        model_dir = step_download(run, model_repo, os.path.join(project, "models"), args.hf_token)
+        model_dir = step_download(run, model_repo, os.path.join(project, "models"), args.hf_token, args)
         info = step_inspect(run, model_dir)
+        on_disk = sum(os.path.getsize(p) for p in glob.glob(os.path.join(model_dir, "*.safetensors")))
+        check_fit(model_repo, on_disk / 1e9, args)          # a local copy: before minutes of loading end in an out-of-memory
         if picked and info.get("n_layers"):
             check_layers(picked, info["n_layers"])          # now, not after hours of measuring and scanning
         out_dir = os.path.abspath(args.out_dir) if args.out_dir else (run.meta.get("out_dir") or os.path.join(project, "out", f"{slug}-abliterated"))
