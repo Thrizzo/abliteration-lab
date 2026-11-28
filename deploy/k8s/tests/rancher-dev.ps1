@@ -13,7 +13,7 @@ rancher-dev-<time>.log in the current folder, without passwords or keys: paste t
   -Setup     builds the console image into Rancher Desktop's container engine; creates the namespaces and Secrets
              (asks for a console password the first time); applies the overlay and waits for every pod; connects
              n8n (asks for an n8n login; a fresh n8n gets it as its owner account, so it is checked against n8n's
-             rules first: the password 8 to 64 characters with a number and a capital letter, typed twice)
+             rules first: the password 8 to 64 characters with a digit 0-9 and a capital letter A-Z, typed twice)
   -Check     the login, the Ingress (http://lab.localhost), the network policies, the console's Kubernetes API access,
              the kill switch, the copilot's models, a knowledge upload that a copilot run retrieves, a free prompt
   -Pipeline  a tiny random GLM through every stage as Kubernetes Jobs, then Promote (a few minutes on a laptop)
@@ -894,23 +894,33 @@ function Invoke-Apply {
     return $allUp
 }
 
-# What n8n refuses in a new owner account (n8n 2.48.7: @n8n/api-types OwnerSetupRequestDto, zod 3), so a fresh n8n's
-# login is checked before the owner setup and asked again, not refused by n8n at the end of the setup. The same rules as
-# connect_console.py; CI runs both through deploy/n8n/owner_rule_cases.json, whose answers came from n8n's own schema.
+# What n8n refuses for its owner account (n8n 2.48.7): the owner setup's schema (@n8n/api-types OwnerSetupRequestDto,
+# zod 3) and, for the e-mail, the login that follows it (class-validator isEmail). So a fresh n8n's login is checked
+# before the owner setup and asked again, not refused by n8n at the end of the setup. The same rules as
+# connect_console.py; CI runs both through deploy/n8n/owner_rule_cases.json, whose answers came from n8n's own code.
 # The password: MinLength (8, or N8N_PASSWORD_MIN_LENGTH) to 64 characters (UTF-16 units, as .NET and JavaScript count)
-# with a digit and a capital letter (JavaScript's /\d/ and /[A-Z]/: 0-9 and A-Z only). '' when it fits, else what it lacks.
+# with a digit and a capital letter (JavaScript's /\d/ and /[A-Z]/: 0-9 and A-Z only, so an umlaut is no capital
+# here). '' when it fits, else what it lacks.
 function Get-N8nPasswordProblem([string]$Password, [int]$MinLength = 8) {
     $missing = @()
     if ($Password.Length -lt $MinLength -or $Password.Length -gt 64) { $missing += ('{0} to 64 characters (it has {1})' -f $MinLength, $Password.Length) }
-    if ($Password -cnotmatch '[0-9]') { $missing += 'a number' }
-    if ($Password -cnotmatch '[A-Z]') { $missing += 'a capital letter' }
+    if ($Password -cnotmatch '[0-9]') { $missing += 'a digit 0-9' }
+    if ($Password -cnotmatch '[A-Z]') { $missing += 'a capital letter A-Z' }
     return ($missing -join ', ')
 }
-# The e-mail: zod's rule, case-insensitive there, so A-Z and a-z here (written out: -match would follow the culture)
+# The e-mail: zod's rule (case-insensitive there, so A-Z and a-z here, written out: -match would follow the culture),
+# then what the login adds: at most 254 characters, 64 before the @, domain labels of at most 63 that do not end in '-'.
+# An owner created with an address only the owner setup takes could never log in.
 function Test-N8nEmail([string]$Email) {
-    return ($Email -cmatch '^(?!\.)(?!.*\.\.)[A-Za-z0-9_''+\-.]*[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}\z')
+    if ($Email -cnotmatch '^(?!\.)(?!.*\.\.)[A-Za-z0-9_''+\-.]*[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}\z') { return $false }
+    if ($Email.Length -gt 254 -or $Email.LastIndexOf('@') -gt 64) { return $false }
+    foreach ($label in $Email.Substring($Email.LastIndexOf('@') + 1).Split('.')) {
+        if ($label.Length -gt 63 -or $label -cmatch '-\z') { return $false }    # a regex: String.EndsWith follows the culture on 5.1
+    }
+    return $true
 }
-# n8n's public settings say whether it still has to get its owner account, and the shortest password it takes
+# n8n's public settings say whether it still has to get its owner account, and the minimum password length they report
+# (the one n8n's own setup page uses)
 function Get-N8nOwnerRule {
     $rule = @{ Known = $false; Fresh = $false; MinLength = 8 }
     $r = Http -Url "http://127.0.0.1:$N8nPort/rest/settings" -NoAuth
@@ -938,7 +948,7 @@ function Invoke-N8n {
     $rule = Get-N8nOwnerRule
     $check = $null
     if ($rule.Fresh) {
-        Note ('n8n has no owner account yet: the login you give now becomes it (password: {0} to 64 characters with a number and a capital letter)' -f $rule.MinLength)
+        Note ('n8n has no owner account yet: the login you give now becomes it (password: {0} to 64 characters with a digit 0-9 and a capital letter A-Z)' -f $rule.MinLength)
         $askEmail = "E-mail for n8n's new owner account"
         $askPw = "Password for n8n's new owner account"
         $n8nMinLength = $rule.MinLength                  # read by $check, which Read-Secret runs
@@ -948,7 +958,7 @@ function Invoke-N8n {
         $askPw = 'n8n password'
     } else {
         $askEmail = 'n8n login e-mail (a fresh n8n: the owner account to create)'
-        $askPw = 'n8n password (a fresh n8n: 8+ characters with a number and a capital letter)'
+        $askPw = 'n8n password (a fresh n8n: 8+ characters with a digit 0-9 and a capital letter A-Z)'
     }
     $email = $N8nEmail
     while ($true) {

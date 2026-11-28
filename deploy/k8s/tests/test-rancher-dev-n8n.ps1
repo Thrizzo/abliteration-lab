@@ -66,6 +66,7 @@ $fresh = Settings '{"data":{"settingsMode":"public","userManagement":{"showSetup
 $fresh12 = Settings '{"data":{"settingsMode":"public","userManagement":{"showSetupOnFirstLoad":true,"passwordMinLength":12}}}'
 $owned = Settings '{"data":{"settingsMode":"public","userManagement":{"showSetupOnFirstLoad":false,"passwordMinLength":8}}}'
 $unsaid = Settings ''
+$stringy = Settings '{"data":{"settingsMode":"public","userManagement":{"showSetupOnFirstLoad":"true","passwordMinLength":8}}}'
 
 $script:Tmp = Join-Path ([IO.Path]::GetTempPath()) ('rancher-dev-n8n-' + [guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $script:Tmp
@@ -105,7 +106,9 @@ function Posted([string]$Case, [string]$Email, [string]$Password) {
 }
 
 # ------------------------------------------------------------------------------------------------ the rules
-$cases = Get-Content -Raw -Encoding UTF8 (Join-Path $here '../../n8n/owner_rule_cases.json') | ConvertFrom-Json
+$casesPath = Join-Path $here '../../n8n/owner_rule_cases.json'
+try { $cases = Get-Content -Raw -Encoding UTF8 -ErrorAction Stop $casesPath | ConvertFrom-Json -ErrorAction Stop }
+catch { Write-Output ('cannot read ' + $casesPath + ': ' + $_.Exception.Message); exit 1 }
 if (@($cases.password).Count -lt 20 -or @($cases.email).Count -lt 20) { Write-Output 'deploy/n8n/owner_rule_cases.json: too few cases read'; exit 1 }
 foreach ($c in $cases.password) {
     $got = Get-N8nPasswordProblem $c.password $c.min
@@ -122,10 +125,15 @@ Run $fresh @('owner@lab', 'owner@lab.test', 'abcdefgh', 'Abcdefg1', 'Abcdefg1')
 Posted $k 'owner@lab.test' 'Abcdefg1'
 Expect $k (Has "ask E-mail for n8n's new owner account") 'the owner-account prompt'
 Expect $k (Has 'say n8n would refuse that e-mail address for its owner account (name@domain.tld); again.') 'the e-mail asked again'
-Expect $k (Has 'say n8n would refuse it for its owner account: it needs a number, a capital letter; again.') 'the password asked again'
+Expect $k (Has 'say n8n would refuse it for its owner account: it needs a digit 0-9, a capital letter A-Z; again.') 'the password asked again'
 Expect $k (Has "ask Password for n8n's new owner account") 'the password prompt'
 Expect $k (Has 'ask Again, to confirm') 'the password confirmed'
-Expect $k (Has 'note n8n has no owner account yet: the login you give now becomes it (password: 8 to 64 characters with a number and a capital letter)') 'the note'
+Expect $k (Has 'note n8n has no owner account yet: the login you give now becomes it (password: 8 to 64 characters with a digit 0-9 and a capital letter A-Z)') 'the note'
+
+$k = "fresh n8n: an address the owner setup takes but n8n's login refuses is asked again"
+Run $fresh @('owner@lab-.test', 'owner@lab.test', 'Abcdefg1', 'Abcdefg1')
+Posted $k 'owner@lab.test' 'Abcdefg1'
+Expect $k (Has 'say n8n would refuse that e-mail address for its owner account (name@domain.tld); again.') 'the e-mail asked again'
 
 $k = 'fresh n8n: two different passwords are asked again'
 Run $fresh @('owner@lab.test', 'Abcdefg1', 'Abcdefg2', 'Abcdefg9', 'Abcdefg9')
@@ -155,12 +163,17 @@ Expect $k (-not (Has 'ask Again, to confirm')) 'no confirmation'
 $k = 'settings that do not say: the hints, n8n decides'
 Run $unsaid @('someone@lab.test', 'x')
 Posted $k 'someone@lab.test' 'x'
-Expect $k (Has 'ask n8n password (a fresh n8n: 8+ characters with a number and a capital letter)') 'the hint prompt'
+Expect $k (Has 'ask n8n password (a fresh n8n: 8+ characters with a digit 0-9 and a capital letter A-Z)') 'the hint prompt'
+
+$k = 'settings in a form n8n does not send ("true" as a string): the hints, n8n decides'
+Run $stringy @('someone@lab.test', 'x')
+Posted $k 'someone@lab.test' 'x'
+Expect $k (Has 'ask n8n password (a fresh n8n: 8+ characters with a digit 0-9 and a capital letter A-Z)') 'the hint prompt'
 
 $k = 'unattended, fresh n8n: N8N_PASSWORD that n8n would refuse'
 Run $fresh -EnvEmail 'ci@example.com' -EnvPassword 'ci-only-pass'
 Expect $k ($script:Calls.Count -eq 0) 'connect_console.py ran'
-Expect $k (Has 'FAIL N8N_PASSWORD: n8n would refuse it for its owner account: it needs a number, a capital letter') 'the FAIL'
+Expect $k (Has 'FAIL N8N_PASSWORD: n8n would refuse it for its owner account: it needs a digit 0-9, a capital letter A-Z') 'the FAIL'
 Expect $k (-not ($script:Log | Where-Object { $_ -like 'ask *' })) 'a prompt'
 
 $k = 'unattended, fresh n8n: N8N_EMAIL that n8n would refuse'
@@ -175,5 +188,5 @@ Expect $k (-not ($script:Log | Where-Object { $_ -like 'ask *' })) 'a prompt'
 
 Remove-Item -Recurse -Force $script:Tmp -ErrorAction SilentlyContinue
 if ($script:Failed) { Write-Output "$($script:Failed) failed"; exit 1 }
-Write-Output ('rancher-dev.ps1 n8n login: {0} password and {1} e-mail cases as n8n answers them, 10 prompt runs as expected' -f @($cases.password).Count, @($cases.email).Count)
+Write-Output ('rancher-dev.ps1 n8n login: {0} password and {1} e-mail cases as n8n answers them, 12 prompt runs as expected' -f @($cases.password).Count, @($cases.email).Count)
 exit 0                                                   # not the last stub's exit code: CI's pwsh step ends with exit $LASTEXITCODE

@@ -103,8 +103,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
   - a console password the first time (only its bcrypt hash is stored, in Secret `lab/basic-auth`). Forgotten: delete
     that Secret and run `-Setup` again; it asks for a new one and restarts the console, which reads it at its start;
   - an n8n login (a fresh n8n gets it as its owner account). For a fresh n8n the script checks it against n8n's rules
-    first and asks again if n8n would refuse it: the password 8 to 64 characters with a number and a capital letter,
-    typed twice.
+    first and asks again if n8n would refuse it: the password 8 to 64 characters with a digit 0-9 and a capital letter
+    A-Z (an umlaut does not count), typed twice; an e-mail address that both n8n's owner setup and its login take.
 
   Re-running is safe: the build uses its cache, existing Secrets are kept, and n8n is updated in place. A
   port-forward that an earlier run left on the script's ports is stopped and started afresh.
@@ -375,8 +375,9 @@ python deploy/n8n/connect_console.py --email <your n8n login> --apply-secret
 - **No restart:** the console reads the Secret from a mounted file, so it is connected within a minute or two.
 - **Re-running** updates everything in place and rotates the key and the secret.
 - **Fresh n8n:** add `--setup-owner --password ...` to create the owner account. n8n wants 8 to 64 characters with a
-  number and a capital letter; the script checks that first and stops before it creates anything. An n8n that has its
-  owner gets the login only.
+  digit 0-9 and a capital letter A-Z, and an e-mail address its login takes too (its owner setup takes some its login
+  refuses, such as a domain part ending in `-`); the script checks both first and stops before it creates anything. An
+  n8n that has its owner gets the login only.
 
 **Which model the copilot uses.** The copilot is the n8n flow, and it uses three models: the *copilot model* (operator),
 the *judge*, and the *embedding model* for retrieval. The **Models** card names all three. The *operator* is the

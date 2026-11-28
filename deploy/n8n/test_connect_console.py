@@ -48,12 +48,14 @@ class StartingN8n:
     """Readiness polls move it on: `migrating` polls in the migration phase, then `unrouted` polls without routes, then
     ready. readiness=False: an n8n without /healthz/readiness (404 there), which moves on by /rest/settings polls.
     user_management: what its public settings say about accounts once it is ready (n8n 2.48.7 says
-    showSetupOnFirstLoad and passwordMinLength there); None leaves it out, as the fake always did."""
+    showSetupOnFirstLoad and passwordMinLength there); None leaves it out, as the fake always did. settings_body: the
+    settings' whole answer instead (bytes, 200). owner_answer: "drop" closes the connection on the owner setup without
+    an answer, "html" answers it 200 with a page that is not JSON."""
 
-    def __init__(self, migrating=3, unrouted=3, readiness=True, user_management=None):
+    def __init__(self, migrating=3, unrouted=3, readiness=True, user_management=None, settings_body=None, owner_answer=None):
         self.polls, self.requests = 0, []
         self.migrating, self.unrouted, self.readiness = migrating, unrouted, readiness
-        self.user_management = user_management
+        self.user_management, self.settings_body, self.owner_answer = user_management, settings_body, owner_answer
         srv = self
 
         class H(BaseHTTPRequestHandler):
@@ -82,6 +84,8 @@ class StartingN8n:
                         return self._send(200, STARTING, "text/html")
                     if phase == "unrouted":
                         return self._send(404, b"Cannot GET /rest/settings", "text/html")
+                    if srv.settings_body is not None:
+                        return self._send(200, srv.settings_body)
                     data = {"settingsMode": "public"}
                     if srv.user_management is not None:
                         data["userManagement"] = srv.user_management
@@ -96,6 +100,11 @@ class StartingN8n:
                     return self._send(200, STARTING, "text/html")
                 if phase == "unrouted":
                     return self._send(404, NO_ROUTE, "text/html")
+                if self.path == "/rest/owner/setup" and srv.owner_answer == "drop":
+                    self.close_connection = True
+                    return
+                if self.path == "/rest/owner/setup" and srv.owner_answer == "html":
+                    return self._send(200, b"<!DOCTYPE html><html>n8n</html>", "text/html")
                 self._send(400, b'{"message":"stop here: the test ends at the first real answer"}')
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
@@ -178,18 +187,23 @@ class OwnerRule(unittest.TestCase):
 
     def test_the_cases_cover_each_rule_both_ways(self):
         problems = " | ".join(c["problem"] for c in self.cases["password"])
-        for part in ("8 to 64 characters (it has 3)", "(it has 65)", "10 to 64", "a number", "a capital letter"):
+        for part in ("8 to 64 characters (it has 3)", "(it has 65)", "10 to 64", "a digit 0-9", "a capital letter A-Z"):
             self.assertIn(part, problems)
         self.assertIn("", [c["problem"] for c in self.cases["password"]])
         self.assertEqual({c["ok"] for c in self.cases["email"]}, {True, False})
+        # the login's limits on top of the owner setup's rule: both sides of each
+        ok = {c["email"]: c["ok"] for c in self.cases["email"]}
+        self.assertFalse(ok["x@y-.com"])                                # a label ending in '-'
+        self.assertEqual(sorted({len(e) for e in ok if len(e) > 250 and e.count("@") == 1}), [254, 255])
+        self.assertEqual([ok[e] for e in sorted((e for e in ok if len(e) in (254, 255)), key=len)], [True, False])
 
 
 class OwnerSetup(unittest.TestCase):
     """--setup-owner on a fresh n8n refuses a login n8n would refuse before it posts anything; an n8n that has its
     owner gets no owner setup and no check (the login is then just a login)."""
 
-    def run_main(self, password, email="owner@lab.test", **user_management):
-        f = StartingN8n(migrating=0, unrouted=0, user_management=user_management or None)
+    def run_main(self, password, email="owner@lab.test", settings_body=None, **user_management):
+        f = StartingN8n(migrating=0, unrouted=0, user_management=user_management or None, settings_body=settings_body)
         self.addCleanup(f.close)
         with mock.patch.object(CC, "time", FastTime), redirect_stdout(io.StringIO()):
             try:
@@ -205,7 +219,7 @@ class OwnerSetup(unittest.TestCase):
     def test_a_password_without_a_number_is_refused_before_anything_is_posted(self):
         f, e = self.run_main("Abcdefgh", showSetupOnFirstLoad=True, passwordMinLength=8)
         self.assertIsInstance(e, SystemExit)
-        self.assertIn("the password needs a number", str(e.code))
+        self.assertIn("the password needs a digit 0-9", str(e.code))
         self.assertIn("Nothing was created", str(e.code))
         self.assertEqual(self.posts(f), [])
 
@@ -219,6 +233,22 @@ class OwnerSetup(unittest.TestCase):
         self.assertIn("the e-mail is not an address n8n takes", str(e.code))
         self.assertNotIn("password", str(e.code))
         self.assertEqual(self.posts(f), [])
+
+    def test_an_e_mail_the_owner_setup_takes_but_the_login_refuses(self):
+        # n8n 2.48.7 creates this owner, then answers every login with 400 "Invalid email address"
+        f, e = self.run_main("Abcdefg1", email="owner@lab-.test", showSetupOnFirstLoad=True)
+        self.assertIn("the e-mail is not an address n8n takes", str(e.code))
+        self.assertEqual(self.posts(f), [])
+
+    def test_settings_n8n_never_sends_leave_it_to_n8n(self):
+        # whatever the settings say in a form n8n 2.48.7 does not use: no verdict of ours, the owner setup decides
+        for body in (b"<!DOCTYPE html>", b"[1, 2]", b'{"data": null}', b'{"data": {"userManagement": "x"}}',
+                     b'{"data": {"userManagement": {"showSetupOnFirstLoad": "true"}}}',
+                     b'{"data": {"userManagement": {"showSetupOnFirstLoad": true, "passwordMinLength": "abc"}}}'):
+            with self.subTest(body=body):
+                f, e = self.run_main("x", settings_body=body)
+                self.assertIsInstance(e, RuntimeError)        # the fake's 400 on the owner setup, not our refusal
+                self.assertEqual(self.posts(f), ["/rest/owner/setup"])
 
     def test_a_login_n8n_takes_goes_on_to_the_owner_setup(self):
         f, e = self.run_main("Abcdefg1", showSetupOnFirstLoad=True, passwordMinLength=8)
@@ -238,11 +268,21 @@ class OwnerSetup(unittest.TestCase):
         self.assertEqual(self.posts(f), ["/rest/owner/setup"])
 
 
+class Errors(unittest.TestCase):
+    """call() turns every way of not getting n8n's answer into one RuntimeError line, which the command prints without a
+    traceback: here a refused connection (an n8n or a port-forward that is gone)."""
+
+    def test_a_refused_connection(self):
+        with self.assertRaises(RuntimeError) as e:
+            CC.N8n("http://127.0.0.1:9").call("GET", "/rest/settings", auth="none")
+        self.assertIn("GET /rest/settings: no answer from n8n at http://127.0.0.1:9 (ConnectionRefusedError", str(e.exception))
+
+
 class CommandLine(unittest.TestCase):
     """What the command prints: n8n's answer, or what to fix, never a traceback (rancher-dev.ps1 shows it as is)."""
 
-    def run_script(self, password, **user_management):
-        f = StartingN8n(migrating=0, unrouted=0, user_management=user_management or None)
+    def run_script(self, password, owner_answer=None, **user_management):
+        f = StartingN8n(migrating=0, unrouted=0, user_management=user_management or None, owner_answer=owner_answer)
         self.addCleanup(f.close)
         return subprocess.run([sys.executable, SCRIPT, "--n8n", f.url, "--email", "owner@lab.test", "--setup-owner",
                                "--wait", "10", "--secret-file", os.devnull], capture_output=True, text=True, timeout=60,
@@ -257,7 +297,19 @@ class CommandLine(unittest.TestCase):
     def test_a_password_n8n_would_refuse(self):
         r = self.run_script("abcdefgh", showSetupOnFirstLoad=True, passwordMinLength=8)
         self.assertEqual(r.returncode, 1)
-        self.assertIn("the password needs a number, a capital letter", r.stderr)
+        self.assertIn("the password needs a digit 0-9, a capital letter A-Z", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_a_dropped_connection_in_one_line(self):
+        r = self.run_script("x", owner_answer="drop")
+        self.assertEqual(r.returncode, 1)
+        self.assertTrue(r.stderr.startswith("connect_console.py: POST /rest/owner/setup: no answer from n8n at"), r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_an_answer_that_is_not_json_in_one_line(self):
+        r = self.run_script("x", owner_answer="html")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("POST /rest/owner/setup: n8n answered something other than JSON", r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
 

@@ -13,11 +13,12 @@ Reach n8n through a port-forward first:
     python deploy/n8n/connect_console.py --email you@example.com --apply-secret
 The password is asked for (or N8N_PASSWORD). Standard library only; works on Windows, macOS and Linux.
 With --setup-owner on a fresh n8n, the login is checked against n8n's rules for its owner account first (8 to 64
-characters with a number and a capital letter; an e-mail address it takes), so nothing is created with a login n8n
-would refuse.
+characters with a digit 0-9 and a capital letter A-Z; an e-mail address both its owner setup and its login take), so
+nothing is created with a login n8n would refuse.
 """
 import argparse
 import getpass
+import http.client
 import json
 import os
 import re
@@ -53,30 +54,38 @@ NODE_CREDS = {
 # what the public API accepts when it creates or updates a workflow
 WORKFLOW_FIELDS = ("name", "nodes", "connections", "settings")
 
-# What n8n refuses in a new owner account (2.48.7: @n8n/api-types OwnerSetupRequestDto, zod 3). owner_rule_cases.json
-# holds answers taken from n8n's own schema; rancher-dev.ps1 checks the same.
+# What n8n refuses for its owner account (2.48.7): the owner setup's schema (@n8n/api-types OwnerSetupRequestDto, zod 3)
+# and, for the e-mail, the login that follows it (class-validator isEmail). owner_rule_cases.json holds answers taken
+# from n8n's own code; rancher-dev.ps1 checks the same.
 PASSWORD_MAX = 64
 EMAIL_RULE = re.compile(r"(?!\.)(?!.*\.\.)[A-Za-z0-9_'+\-.]*[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}")
 
 
 def password_problem(password, min_length=8):
     """What a new account's password lacks for n8n, '' if nothing: min_length (8, or N8N_PASSWORD_MIN_LENGTH) to 64
-    characters, a digit and a capital letter, as JavaScript reads them (/\\d/ is 0-9, /[A-Z]/ is A-Z, the length is in
-    UTF-16 units)."""
-    n = len(password.encode("utf-16-le")) // 2
+    characters, a digit and a capital letter, as JavaScript reads them (/\\d/ is 0-9 only, /[A-Z]/ is A-Z only, so an
+    umlaut is no capital here; the length is in UTF-16 units, a lone surrogate counting as one)."""
+    n = len(password.encode("utf-16-le", "surrogatepass")) // 2
     missing = []
     if not min_length <= n <= PASSWORD_MAX:
         missing.append(f"{min_length} to {PASSWORD_MAX} characters (it has {n})")
     if not re.search("[0-9]", password):
-        missing.append("a number")
+        missing.append("a digit 0-9")
     if not re.search("[A-Z]", password):
-        missing.append("a capital letter")
+        missing.append("a capital letter A-Z")
     return ", ".join(missing)
 
 
 def email_ok(email):
-    """zod's e-mail rule, which n8n's owner setup applies (its /.../i: A-Z there means A-Z and a-z, nothing else)."""
-    return EMAIL_RULE.fullmatch(email or "") is not None
+    """An address n8n takes for its owner: zod's rule, which the owner setup applies (its /.../i: A-Z there means A-Z and
+    a-z, nothing else), and what the login after it adds (class-validator isEmail): at most 254 characters, at most 64
+    before the @, and domain labels of at most 63 that do not end in '-'. An owner created with an address only the
+    owner setup takes could never log in."""
+    email = email or ""
+    if EMAIL_RULE.fullmatch(email) is None or len(email) > 254:
+        return False
+    local, _, domain = email.rpartition("@")
+    return len(local) <= 64 and all(len(label) <= 63 and not label.endswith("-") for label in domain.split("."))
 
 
 def owner_problem(email, password, min_length=8):
@@ -106,6 +115,7 @@ class N8n:
         elif auth == "session" and self.cookie:
             headers["Cookie"] = self.cookie
         req = urllib.request.Request(self.base + path, data=data, method=method, headers=headers)
+        raw = b""
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
                 raw = r.read()
@@ -116,6 +126,11 @@ class N8n:
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
             raise RuntimeError(f"{method} {path}: HTTP {e.code} {detail}") from None
+        except (OSError, http.client.HTTPException) as e:      # refused, reset, timed out, a dropped port-forward
+            why = e.reason if isinstance(getattr(e, "reason", None), BaseException) else e   # urllib wraps the socket's error
+            raise RuntimeError(f"{method} {path}: no answer from n8n at {self.base} ({type(why).__name__}: {why})") from None
+        except ValueError:
+            raise RuntimeError(f"{method} {path}: n8n answered something other than JSON: {raw[:200]!r}") from None
 
     def wait_ready(self, timeout=300, every=2.0, log=print):
         """Until n8n can serve its REST API, which GET /healthz/readiness answers with 200. /healthz and even /rest/settings
@@ -151,7 +166,7 @@ class N8n:
     # ---------------------------------------------------------------- API key (internal REST API, your login)
     def owner_rule(self):
         """From n8n's public settings: (True while it has no owner account yet, False once it has one, None when they
-        do not say; the shortest password it takes)."""
+        do not say; the minimum password length they report, the one n8n's own setup page uses)."""
         try:
             um = self.call("GET", "/rest/settings", auth="none")["data"]["userManagement"]
             fresh, min_length = um.get("showSetupOnFirstLoad"), max(8, int(um.get("passwordMinLength") or 8))
