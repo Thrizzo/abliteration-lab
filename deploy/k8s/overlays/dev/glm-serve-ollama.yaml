@@ -1,0 +1,31 @@
+# glm-serve as Ollama on CPU: runs by default (replicas 1), keeps its model store on the workspace (/workspace/ollama,
+# read-write here), no GPU. Its port is named "http" like vLLM's, so the Service (:8000) and the policies stay the same.
+- op: replace
+  path: /spec/replicas
+  value: 1
+- op: replace
+  path: /spec/template/spec/containers/0
+  value:
+    name: server
+    image: ollama/ollama:0.40.18
+    command: [/bin/ollama]
+    args: [serve]
+    env:
+      - { name: OLLAMA_HOST, value: "0.0.0.0:11434" }
+      - { name: OLLAMA_MODELS, value: /workspace/ollama }
+      - { name: OLLAMA_KEEP_ALIVE, value: "30m" }
+    ports: [{ containerPort: 11434, name: http }]
+    volumeMounts:
+      - { name: workspace, mountPath: /workspace }
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits: { memory: 8Gi }
+    securityContext:
+      allowPrivilegeEscalation: false
+    startupProbe: { httpGet: { path: /, port: http }, periodSeconds: 5, failureThreshold: 60 }
+    readinessProbe: { httpGet: { path: /, port: http }, periodSeconds: 10 }
+    livenessProbe: { httpGet: { path: /, port: http }, periodSeconds: 30, failureThreshold: 6 }
+- op: replace
+  path: /spec/template/spec/volumes
+  value:
+    - { name: workspace, persistentVolumeClaim: { claimName: workspace } }

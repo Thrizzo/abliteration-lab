@@ -88,8 +88,14 @@ class Datasets:
                     for b in iter(lambda: f.read(1 << 20), b""):
                         h.update(b)
                 edited = h.hexdigest() != m["sha256"]
-            out.append({"file": fname, **info, "present": present, "rows_original": m.get("rows"), "rows_now": n_now, "removed": n_removed,
-                        "revision": m.get("revision"), "exported": m.get("exported"), "edited": edited, "size_mb": round(os.path.getsize(p) / 1e6, 1) if present else None})
+            # the source the copy was exported from (ABL_HARMFUL_DATASET / ABL_HARMLESS_DATASET), not only the default
+            if present and edited is None and m.get("absent"):
+                edited = True                        # the source has no such split: every row was added here
+            out.append({"file": fname, **info, "repo": m.get("repo") or info["repo"], "present": present,
+                        "rows_original": m.get("rows"), "rows_now": n_now, "removed": n_removed,
+                        "revision": m.get("revision"), "requested": m.get("requested"), "column": m.get("column"),
+                        "absent": bool(m.get("absent")) and not present,     # e.g. a dataset without a test split
+                        "exported": m.get("exported"), "edited": edited, "size_mb": round(os.path.getsize(p) / 1e6, 1) if present else None})
         return out
 
     # ------------------------------------------------------------ query

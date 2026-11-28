@@ -1,0 +1,23 @@
+# EDIT: your provider's fast shared (RWX) file storage class, so the weights survive the GPU node being replaced and
+# the console and CPU stages can run on cheaper nodes. Ask the provider which class is NVMe/flash-backed: GLM-5.3 loads
+# ~750 GB on every start.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: workspace, namespace: lab }
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: rwx-fast
+---
+# EDIT: host name, and the ingress class your cluster has (`kubectl get ingressclass`).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: console, namespace: lab }
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: lab.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: console, port: { name: http } } }

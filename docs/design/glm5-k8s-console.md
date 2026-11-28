@@ -1,0 +1,493 @@
+# Design: GLM-5.3 on Kubernetes, from abliteration to the copilot
+
+Status: phases 0 to 5 are built (`deploy/k8s/`, `app/k8sjobs.py`, `app/copilot_runs.py`, `app/knowledge.py`, tested on kind
+with Calico in CI); the GLM-5.3 run (6) is the plan.
+Section 10 is the build order.
+
+## 1. What this adds
+
+A run goes **download → measure → edit → evaluate → promote**. Promote makes the abliterated GLM-5.3 the operator model
+of the pentest copilot (`deploy/n8n/`). One web console drives all of it:
+
+- **Abliterate:** each stage runs as a Kubernetes Job with its log live in the console. After reading the eval report you
+  promote or roll back with one click.
+- **Copilot** (the console's tab 4, **Pentest**): prompts and tasks go in, and every stage arrives in a live feed: scope
+  gate, retrieval, operator, policy gate, judge, result.
+- **Knowledge:** upload writeups and notes into the retrieval store, list them, delete them.
+- **Kill / Isolate:** stop the container running the abliterated model, or cut its network while it keeps running.
+
+### Decisions taken
+
+| Question | Decision | Consequence |
+| --- | --- | --- |
+| Where GLM-5.3 runs | On-prem **and** cloud | One Kustomize base with `onprem` and `cloud` overlays |
+| Copilot engine | **n8n** stays | The console starts n8n runs and polls their progress: a stage-level feed, no token streaming for copilot runs |
+| Login | **Basic auth**, one shared account, in a Caddy sidecar | Works behind any ingress controller; the audit log records sessions and source IPs, not people |
+| Kill switch | **Kill** and **Isolate** buttons | No automatic kill, no tripwires |
+
+### Out of scope
+
+- **Running commands.** The stack suggests and decides; it never executes. The n8n *Execute* node stays disabled and
+  `LAB_RUNNER_URL` stays yours. You run approved commands yourself.
+- **Fine-tuning GLM-5.3.** The QLoRA tooling in `copilot/` is meant for small operator models.
+- **Per-user identity and multi-tenancy.**
+
+## 2. Sizing
+
+From `README.md` §6 and the model catalogue in `app/server.py`:
+- **Shape:** `GlmMoeDsaForCausalLM`, 744B parameters, 78 layers: 3 dense, then 75 mixture-of-experts layers with 256 routed
+  experts plus 1 shared, 8 active.
+- **Size:** 1.5 TB in bf16 (282 shards).
+- **The edit:** touches about 19,400 tensors and streams one shard at a time (about 5 GB of RAM).
+
+| Stage | Needs | Runs on | Notes |
+| --- | --- | --- | --- |
+| Download | ~750 GB of disk, internet access to Hugging Face | any node | The FP8 checkpoint. The edit keeps the FP8 block scaling, so the result can be served as is. |
+| Measure + scan | the whole model in GPU memory on **one** node | 8×H200 (1.1 TB) or 8×B200 | `device_map=auto` shards across the GPUs of one machine only |
+| Edit | ~5 GB of RAM, fast storage | a CPU node that mounts the model volume | Hours; storage speed is the limit |
+| Evaluate | vLLM, tensor parallel 8 | the GPU node | Base and candidate one after the other, not side by side |
+| Serve | vLLM, tensor parallel 8 | the GPU node | The copilot's operator |
+| Judge + embeddings | ~8 GB | a small GPU or CPU | qwen3:8b with thinking off, nomic-embed-text, both in Ollama |
+
+- **Storage:** 3–4 TB of fast storage. Base FP8 (0.75 TB), the promoted version, the previous one for rollback, and the
+  candidate under evaluation.
+- **One GPU node means one thing at a time.** Measuring and evaluating need the node the model is served from, so the
+  console refuses to start those Jobs while the model runs ("GPU node busy"). With two GPU nodes, serving and evaluating run
+  in parallel.
+- **Risk:** the GLM-5.x code path has only been tested on synthetic tensor layouts (README §4). The first real run is also
+  its first real test. That is why phase 0 validates the whole stack on a smaller model first.
+
+## 3. Architecture
+
+```mermaid
+flowchart TB
+  user([Browser]) -->|"HTTPS + basic auth"| ing[Ingress]
+  subgraph lab ["namespace: lab"]
+    console["Console (the lab app + login)"]
+    vllm["glm-serve (vLLM, 8 GPUs)"]
+    dl["download Job"]
+    ms["scan Job (8 GPUs)"]
+    ed["apply Job (CPU)"]
+    ev["validate Job (8 GPUs)"]
+    ws[("PVC workspace")]
+  end
+  subgraph copilot ["namespace: lab-copilot"]
+    n8n["n8n (copilot engine)"]
+    qdrant[("Qdrant")]
+    ollama["Ollama (judge + embeddings)"]
+  end
+  k8s{{"Kubernetes API"}}
+  hf(("Hugging Face"))
+  ing --> console
+  console -->|"webhook + API polling"| n8n
+  console -->|"free prompts"| vllm
+  console -->|"Jobs, logs, kill, isolate"| k8s
+  console -->|"ingest uploads"| qdrant
+  n8n -->|operator| vllm
+  n8n -->|judge| ollama
+  n8n -->|retrieve| qdrant
+  dl & ms & ed & ev --- ws
+  vllm -.->|"read-only"| ws
+  console --- ws
+  dl -->|"the only egress"| hf
+```
+
+- **`lab`:** everything that touches the model weights: the console, the Jobs it starts, `glm-serve`, and the
+  **workspace** volume they share (models, runs with their own edited model each, datasets, GGUFs, serving history,
+  uploads).
+  - **Why one namespace:** a PersistentVolumeClaim belongs to one namespace, and all of these read or write the same
+    weights. The console mounts the workspace too, so the GUI shows runs, charts and logs exactly as with a local run.
+  - **Login:** a Caddy sidecar in the console pod (basic auth). The app itself listens on 127.0.0.1 only, so the Ingress
+    carries no auth annotations and any ingress controller works.
+  - **Consequence for the kill switch:** its permissions cover the whole namespace, so a mistaken pod delete can abort a
+    Job too, and nothing but lab workloads may run here.
+- **`lab-copilot`:** n8n, Qdrant, and Ollama for the judge and the embeddings.
+
+| Component | Kind | Reachable from |
+| --- | --- | --- |
+| console (the lab app, extended) | Deployment, 1 replica | Ingress (basic auth, TLS) |
+| n8n | Deployment, 1 replica | the console; the editor through `kubectl port-forward` |
+| Qdrant | StatefulSet | n8n, the console |
+| Ollama (judge, embeddings) | Deployment | n8n, the console |
+| glm-serve (vLLM) | Deployment, 0 or 1 replicas | n8n and the console only |
+| download / scan / apply / validate / deploy | one Job per stage, from a fixed template in `app/k8sjobs.py` | nothing |
+
+### On-prem and cloud overlays
+
+| | `onprem` (e.g. RKE2) | `cloud` (AKS, EKS, GKE or a GPU cloud) |
+| --- | --- | --- |
+| GPUs | NVIDIA GPU Operator, fixed GPU node | GPU node pool that scales from 0, tainted for model workloads |
+| workspace volume | local NVMe on the GPU node (pins the console and every Job to it) or RWX (Longhorn, CephFS, NFS) | RWX file storage (Azure Files NFS, EFS, Filestore), or a block disk plus node affinity |
+| Network policies | RKE2's default Canal enforces them | AKS: Azure NPM or Cilium. EKS: network policies enabled in the VPC CNI. GKE: Dataplane V2. |
+| Ingress | ingress-nginx | the provider's ingress-nginx or equivalent |
+| Cost | none per hour | Kill scales the model to 0, so the autoscaler can remove the idle GPU node: Kill also stops the bill |
+
+## 4. Abliterate → evaluate → promote
+
+```mermaid
+flowchart LR
+  A["Download FP8 checkpoint"] --> B["Measure + scan"] --> C["Edit writers, shard by shard"] --> D["Evaluate candidate"]
+  D --> E{"Gate passed?"}
+  E -->|yes| F["Promote"]
+  E -->|no| G["Promote with typed confirmation, or discard"]
+  F --> H["glm-serve switches to the candidate"]
+  H --> I["Copilot uses the new model"]
+  H -.->|Rollback| J["Previous version"]
+```
+
+- **Run folder (built):** every run is `runs/abliterate_<id>/` on the workspace, written by the pipeline's own stages:
+  - `run.json` (model, arguments, chosen layer, state, `out_dir`);
+  - `events.jsonl` and `run.log`;
+  - the scan, apply and validation results;
+  - the run's own edited model in `model/` (`--out-dir`), and its own GGUF (`gguf/<slug>-abl-<run>-<type>.gguf`).
+- **Stages as Jobs (built):** the console runs each stage (`download`, `scan`, `apply`, `validate`, `deploy`) as a Job
+  from a fixed template.
+  - **Per stage:** resources, placement and network labels from ConfigMap `lab-jobs`. Only download Jobs reach the
+    internet.
+  - **Live log:** the pod log streams into the same GUI.
+  - **Stop:** deletes the Job.
+  - **Console restart:** the new console re-attaches to a running Job.
+- **Evaluation:**
+  - **Refusals:** refusal rate on held-out harmful prompts, base vs candidate.
+  - **Harmless capability:** agreement with the base model on harmless prompts, plus a small fixed benchmark subset.
+  - **Copilot fitness:** `copilot.eval_operator` against the candidate's endpoint (`json_ok`, `target_ok`, `placeholder`,
+    `policy_allowed`). This needs an OpenAI-compatible client in `eval_operator`, which today only talks to Ollama.
+  - **Gate:** configurable thresholds give pass or fail. **Promote** stays disabled until the report exists, and a failed
+    gate needs a typed confirmation.
+- **Promote (built):** the copilot uses the new model from the next request.
+  - **vLLM:** sets `MODEL_PATH` in ConfigMap `glm-serve` to the run's model folder and restarts a running `glm-serve` pod.
+  - **Ollama, dev overlay:** publishes the run's GGUF to `glm-serve` as `glm-abl`.
+  - **Rollback:** promotes the run before.
+  - **History:** every change is kept in `serving/history.json`. The gate below (thresholds, typed confirmation) is not
+    built yet: Promote is a confirmed click on the serving panel.
+- **Operator node:** today the n8n operator node talks to Ollama. `build_workflow.js --operator openai` will generate n8n's
+  OpenAI Chat Model node instead, with the credential's *Base URL* set to `http://glm-serve.lab.svc:8000/v1` (n8n 2.48's
+  OpenAI credential has that field). GLM-5.x reasons before it answers, so vLLM runs with its GLM reasoning parser and n8n
+  receives only the answer.
+
+## 5. Copilot runs (n8n engine)
+
+```mermaid
+sequenceDiagram
+  participant B as Browser
+  participant C as Console
+  participant N as n8n
+  participant M as glm-serve
+  participant J as Judge
+  B->>C: task + target
+  C->>N: webhook with shared secret
+  N-->>C: execution id
+  C-->>B: feed: run started
+  N->>N: scope gate, retrieval from Qdrant
+  N->>M: operator prompt
+  M-->>N: proposal as JSON
+  N->>N: policy gate
+  N->>J: judge prompt
+  J-->>N: AUTHORIZE or REJECT
+  loop every second until the run ends
+    C->>N: GET execution with includeData
+    C-->>B: feed: one event per finished node
+  end
+  C-->>B: feed: result card
+```
+
+- **Start:** the console starts a run through a new webhook trigger. It sends a shared-secret header, n8n answers at once
+  with the execution id, and then the existing pipeline runs. The form trigger stays as a second way in.
+- **Progress:** the console reads it from n8n's public API, `GET /api/v1/executions/{id}?includeData=true`, every second,
+  authenticated with the `X-N8N-API-KEY` header. You create that key once in n8n (Settings → n8n API); the console reads it
+  from a Secret.
+- **Events:** each finished node becomes one feed event:
+  - scope verdict;
+  - retrieval status and reference count;
+  - the operator's proposal;
+  - the policy decision with reasons;
+  - the judge's verdict;
+  - the result.
+
+  Model text is escaped exactly as on the form's result page.
+- **Stop run:** `POST /api/v1/executions/{id}/stop`.
+- **Built (phase 3), with what building it required:**
+  - **Live progress:** n8n stores a run's node results only when it ends, unless the workflow sets
+    `saveExecutionProgress`. It does.
+  - **Console runs need their own ending.** The form's result pages are skipped for them, and the console renders the
+    result itself, escaped.
+  - **The operator node is `lmChatOpenAi` with `responsesApiEnabled: false`.** v1.3 defaults to OpenAI's Responses API,
+    which neither vLLM nor Ollama needs to offer.
+  - **Setup:** `deploy/n8n/connect_console.py` creates the console's API key with execution scopes only. n8n 2.48.7
+    enforces them; checked: the key can't list workflows.
+  - **The webhook secret ends up in n8n's execution data**, since the webhook node's output keeps the request headers.
+    Only principals that hold the secret anyway can read executions. The console never forwards that node's output.
+- **Free prompts** are model testing, not copilot runs. The console sends them straight to vLLM and streams the answer token
+  by token, as the Compare stage does today with Ollama, and logs them in the feed. They skip the policy gate and the judge,
+  since nothing can execute either way.
+
+### 5a. Engagement, model choice, manual commands (copilot v2)
+
+```mermaid
+flowchart LR
+  subgraph Console
+    E[Engagement v<sub>n</sub><br/>scope, exclusions, window,<br/>prohibited, protected data, rules] --> R[run request]
+    MD[models: operator, judge] --> R
+    MC[manual command] --> R
+  end
+  R -->|webhook| D[Define: bounded, typed]
+  D --> S{Scope gate<br/>LAB_ALLOWLIST AND engagement}
+  S -->|copilot| Q[Retrieval] --> OP[Build operator prompt] -->|prompt| M[(abliterated operator)]
+  M -->|answer| P[Parse proposal]
+  S -->|manual| MP[Manual proposal]
+  P --> G{Policy gate<br/>+ prohibited, protected data,<br/>window, tiers}
+  MP --> G
+  G --> JP[Build judge prompt<br/>refuses an abliterated judge] --> J[(regular judge)]
+  J --> A[Apply decision + re-check] --> ST[staged command] --> X[Human approval / Execute: disabled]
+```
+
+- **In the console:** tab 4 **Pentest** (shown once n8n is connected, never locked) holds the Models and Engagement cards, the three
+  ways to ask (copilot, manual command, direct prompt), the run as a flow, the runs and the live feed.
+- **Decisions, taken with the defaults proposed to the user:**
+  - operator and judge are selectable, and the judge is never an abliterated model (refused in the console and in n8n);
+  - one active engagement, versioned and audited;
+  - `LAB_ALLOWLIST` stays the hard ceiling, which an engagement can only narrow;
+  - structured fields drive the deterministic gates, and free text (scope statement, rules) goes to both models;
+  - Execute stays disabled, and the staged command is display only.
+- **Why the rules reach the abliterated operator:** they come from the operator running the lab, so they are trusted text,
+  and they make compliant proposals likelier. Enforcement does not depend on the model reading them: the prohibited list,
+  the protected data, the scope, the exclusions and the window are code in the policy gate.
+- **Why the rules reach the judge:** they let it veto what the code can't express, such as "no changes to production
+  accounts". The judge stays veto-only, so a judge talked into AUTHORIZE still can't widen anything.
+- **Rules about hosts and data go into code.** Measured with the workflow's exact prompt, the default judge authorized
+  3 of 28 rule-breaking commands: two touched a host the rules put off limits, and one downloaded `customers.csv`
+  although the rules said not to download or copy personal data (`copilot/README.md`, "Judge eval"). A host belongs in
+  *Out of scope* and a file, folder, share or table in *Protected data*: the scope and policy gates enforce both, and
+  the judge keeps what code can't express.
+- **Protected data** is a list of names (`customers.csv`, `/backup/`, `HR$`, `*.kdbx`). The policy gate reads every
+  argument the way bash hands it to the program, folded and percent-decoded.
+  - A name in a data position (URL, share, remote path, SQL, positional argument) blocks.
+  - A name only in a local position (output file, wordlist, filter) and the names of a path entry apart wait for a
+    human. They never auto-run, but a human can approve them; a block cannot be approved, and blocks on wordlists,
+    accounts and exclusions were the red team's worst false positives.
+  - While the list has entries, bulk retrieval (`wget -r`, `mget`, curl globs, NSE crawlers, sqlmap dumps) and names
+    read at run time (list and config files, pipes) wait for a human as well.
+  - An empty list changes nothing. Each policy result reports how many entries it checked, and the console stops a run
+    whose workflow is too old to know the list.
+- **The console warns and suggests; it never decides:**
+  - it refuses entries the gate would read differently (hosts, schemes, drive letters, `%`), naming the form that works;
+  - it points out rules that name a host that is not excluded, and files, shares or tables the rules protect that
+    Protected data does not list, with one click to add them;
+  - it marks entries that are broad (`HR`) or read like a description (`HR share`).
+
+  Hints are worked out each time and never applied by themselves.
+- **Manual mode** exists for the operator's own commands. It is not a bypass: the same scope gate, policy gate and judge
+  run, and only the abliterated model and retrieval are skipped.
+- **One file for the ceiling:** `copilot.env` feeds two ConfigMaps (`copilot-settings` for n8n, `copilot-scope` for the
+  console). Before, n8n's Deployment set `LAB_ALLOWLIST` and `LAB_AUTORUN_READONLY` itself and silently overrode the
+  ConfigMap.
+- **Prompts are built in Code nodes,** so the console shows the exact text each model received. The model stand-in's
+  `/_seen` lets CI compare the two.
+- **Found while building it:**
+  - the policy gate classified only the first line of a multi-line command, so `nmap ...` followed by a second line
+    could auto-run. A line break now separates commands as `;` does;
+  - the run view filtered `run.json`, which hid the dataset provenance from the API;
+  - while writing the judge eval's cases: `rpcclient ... -c 'setuserinfo2 jdoe 23 NewPass1!'` changes a password but
+    counted as read-only, so it could have auto-run in the passive tier. rpcclient subcommands that create, delete, set,
+    add or change now count as active;
+  - while red-teaming protected data: read-only tools that run a program, listen or change a share (`nc -e`, `nc -l`,
+    awk `system()`, sed's `e`, `xargs`, smbclient `!` and `put`, `smbmap -x`), one-dash `nmap -script`, and sqlmap's
+    dump and search options in the active tier all auto-ran. They now wait for a human, with or without protected data;
+  - while reviewing that fix: its checks read the raw text, so quoting (`nc '-e'`, `"--script=vuln"`), attached values
+    (`nc -e/bin/sh`) and abbreviations (`ncat --exe`, `smbmap --upl`) still auto-ran, and the active tier took any
+    program with a safe `--script` or an enumeration flag (`python3 x.py --dbs # sqlmap`). The checks now read the words
+    bash hands each program, and the active tier's shapes need nmap, rustscan or sqlmap themselves;
+  - while verifying those fixes: the read-only checks still missed awk pipes to a variable (`print | cat`), sed's `e`
+    with another delimiter or after a `!` address (`s,x,id,e`, `1!e id`), program files (`awk -f`, `@include`,
+    `sed -f`), smbclient commands from stdin (`< cmds.txt`, a pipe), write requests in quoted, clustered or long
+    spellings (`curl -X 'DELETE'`, `-sXPUT`, `--request=PATCH`, `wget --method=DELETE`) and settings files (`curl -K`,
+    `wget -e`), and a long command took seconds to check (10 s for 16,000 characters). They now wait for a human, and
+    a command longer than 2000 characters is blocked;
+  - in a per-tool audit of everything that can auto-run: smbclient and rpcclient ran writes their denylists missed
+    (`mkfifo`, `wd` for `wdel`, `p"ut"`, `-c=p"ut x"`, `shutdowninit`, `netsharedel`, `samlogon`), smbmap and
+    `enum4linux -A` create a directory on every share for their write check, `smbmap -L` runs commands on the host,
+    showmount and rpcinfo asked the runner, `smbclient -L FILESRV` a NetBIOS broadcast and ldapsearch a server from
+    `ldap.conf` while the only in-scope host stood in a comment or a filter, and ranges (`nbtscan 10.10.10.5-254`),
+    target files (`rustscan -a 10.10.10.5.txt`), spoofed sources (`ike-scan --sourceip`, `nmap -D RND:10`), payloads
+    (`masscan --hello-string`, `nmap --data-string`), `arp -d`, `ss -K`, `sqlmap --risk 3` and NSE's safe and discovery
+    scripts (third-party and broadcast traffic) auto-ran. Both clients' commands are now checked against lists of commands
+    that only read, the SMB, RPC, LDAP, SNMP and NFS clients' targets come from their host positions, ranges must lie
+    in scope as a whole, all of these wait for a human or are blocked, and the tiers keep NSE default (passive) and
+    default, version and banner (active);
+  - in a sweep of host positions: the server a DNS client is told to ask (`dig @gw`, `host web01.lab gw`,
+    `dnsrecon -n gw`), traceroute and ping hops, ike-scan's further operands, onesixtyone's host (`8.8` next to an
+    in-scope community string), the snmpwalk agent after `-CE`, smbmap's and enum4linux's host, sqlmap's `-u` and
+    `--safe-url` without a scheme, wget `--dns-servers` and the second URL of a proxy chain went unread, so a one-label
+    name such as `gw` reached a host outside the scope. dig `+trace`, `host -C`, dnsrecon's standard checks, dnsenum and
+    fierce asked the servers DNS answers name, whois followed referrals, httpx resolved host names through 1.1.1.1,
+    traceroute `-A`, `sqlmap --check-internet`, `--dork` and `--xxe` reached third parties, and Kerberos KDCs, `dig -f`,
+    interactive nslookup, `masscan --script`, `nmap -sI`, `--script-args`, `--versiondb`, the getopt_long_only
+    spellings of `-iR` (`--iR 5`, `--iR=5`, a quoted `'-iR'`) and a program loading a config another segment of the
+    command wrote first or alongside it (`curl -so ~/.curlrc ...; curl ...`, a background `&`, a later member of nmap's
+    pipe) auto-ran. The positions are now scope-checked, and the rest waits for a human or is blocked;
+  - in the review of that sweep: tracepath's destination and nbtscan's range went unread, dnsrecon ran its standard
+    checks with an empty `-t` or `-r`, and a config still reached its loader under a name the gate did not read (a
+    brace expansion, a curl URL glob, nmap's `%` names, rustscan's nmap words, wget `-nH` with `-r` or `-x`, an FTP wildcard; and, in a last review, curl `-w '%output{...}'`, wget `--default-page`, gawk's variable dump, `uniq +N` beyond a size): these wait. A sweep of every tool's writer options then found more than a table could hold (abbreviated long options, clusters, `-o=FILE`, `--hsts`, numbered names, whatweb loading `./json.rb`), so the rule became structural: a tool waits after another tool whose options the gate does not follow, and after a dot path, a system path or an unknown name
+    now. The sweep had also made compliant forms wait (httpx `-cdn`, `-bp` and `-strip` read as value flags, a sed
+    regex with a `w` in it, whatweb and rustscan words matched by basename, every `wget -r`, smbclient `get`,
+    `sort -o`, `uniq`, `less -o`, `sed -i` and `ldapsearch -t`): the gate reads the names these write, and they
+    auto-run again.
+- **The judge reads the scope too** (`SCOPE (LAB_ALLOWLIST): ...`, in every run), still never the operator's free text:
+  that text is the likeliest carrier of an injection aimed at the judge.
+- **Measured, not assumed:** `copilot/eval_judge.py` runs labelled commands that pass every gate through a real judge
+  with the workflow's exact prompt, and counts false accepts and false rejects (`copilot/README.md`, "Judge eval").
+
+## 6. Knowledge uploads (retrieval)
+
+- **Upload:** md, txt, html and pdf, up to 50 MB per file, with a source type: `htb`, `blog`, `engagement` or `pwk`. Files
+  are stored under `workspace/writeups/<source>/`.
+- **Preview:** for `engagement` notes the console shows the scrubber's redactions (`copilot.ingest --dry-run
+  --show-redactions`) before anything is embedded.
+- **Ingest:**
+  1. scrub;
+  2. chunk;
+  3. embed;
+  4. upsert into Qdrant with deterministic ids, so uploading a file again replaces its chunks.
+- **List / delete:** documents with their chunk counts. Delete removes the file and its vectors (filter on `metadata.doc`).
+- **PDF:** text extraction with `pypdf` is new. Scanned PDFs need OCR first, which is out of scope.
+- **Ingress:** the request-size limit rises to 50 MB, for the upload path only.
+- **Trust:** uploaded text stays untrusted. It reaches only the operator, with addresses masked, never the judge, and the
+  policy gate stays the boundary.
+- **Built (phase 5), with what building it required:**
+  - **Uploads are the raw request body** (`?source=&name=`): no multipart dependency, and the 50 MB cap applies while the
+    body is still arriving.
+  - **PDFs are parsed in their own process** (`copilot/pdftext.py`, `python -I`), which caps its own memory (2 GB) and CPU
+    time (120 s), with a 180 s timeout on top. A crafted PDF then fails that process, not the console that hosts the
+    kill switch.
+  - **Embeddings come from the copilot's Ollama** (`RAG_OLLAMA_URL`). In dev, the console's `OLLAMA_HOST` points at
+    `glm-serve` for the Compare stage, and the vectors must come from the model n8n searches with.
+  - **Delete removes the vectors first**, so an unreachable store never leaves vectors without their file.
+  - **A keyword index on `metadata.doc`**: deletes and the list filter on it.
+
+## 7. Live feed
+
+- **One stream, one schema:** `{ts, source, run_id, stage, level, message, data}`. It reaches the browser as Server-Sent
+  Events; the app already streams pipeline logs this way.
+- **Sources:**
+  - **Jobs:** Job status and the pod log, read from the Kubernetes API with `follow`.
+  - **Copilot:** n8n node events (section 5).
+  - **Model:** Deployment status and readiness, plus vLLM's `/metrics` (running requests, tokens per second) every 5 s.
+  - **Kill / Isolate:** the request, each API answer, and the time until the pod is gone.
+  - **Uploads:** ingest progress.
+- **Audit (built for Kill / Isolate / Release / Start and Promote / Rollback):** every event is also appended to
+  `workspace/audit/YYYY-MM-DD.jsonl` with who asked: the login user, and the address and `X-Forwarded-For` chain the
+  login proxy saw. With one shared login, the address is the only "who". A copy goes to the console's container log,
+  which the Jobs, sharing the workspace, can't change.
+
+## 8. Kill and Isolate
+
+Kubernetes network policies only ever **allow**. A "deny everything" policy added next to an existing allow policy changes
+nothing, because traffic is allowed as soon as any policy allows it. So isolation works by **removing the allow**:
+
+- **Always in `lab`:** `default-deny`, which selects every pod and allows nothing in or out.
+- **The one opening:** `glm-serve-allow`, which allows traffic in on port 8000 from n8n and the console. Nothing is allowed
+  out, so vLLM runs with `HF_HUB_OFFLINE=1`.
+
+```mermaid
+sequenceDiagram
+  participant U as You
+  participant C as Console
+  participant K as Kubernetes API
+  participant P as glm-serve pod
+  U->>C: Kill
+  C->>K: delete NetworkPolicy glm-serve-allow
+  K-->>P: only default-deny remains, traffic cut
+  C->>K: scale glm-serve to 0 replicas
+  C->>K: delete pod with gracePeriodSeconds 0
+  K->>P: SIGTERM, then SIGKILL after at most 2 s
+  C-->>U: feed: killed, with time to kill
+```
+
+**Isolate**
+- **What it does:** deletes `glm-serve-allow`. The model keeps running, GPU memory included, so you can inspect it, but
+  nothing reaches it and it reaches nothing.
+- **Release:** recreates the policy from the console's copy of it. The copy is kept in the console pod (an emptyDir),
+  not on the workspace: Jobs and, in dev, the model server can write the workspace, and Release creates whatever the
+  copy says. It must name the policy and a non-empty pod selector.
+- **Caveat:** network plugins differ on connections that are already open when the policy goes. The e2e test checks it on
+  your plugin, and Kill is the hard stop.
+
+**Kill**
+1. Isolate first: the instant cut.
+2. Scale `glm-serve` to 0, so Kubernetes does not bring the pod back.
+3. Delete the pod with `gracePeriodSeconds: 0`. The kubelet's minimum grace period still applies: SIGTERM, then SIGKILL
+   after at most about 2 s.
+
+Measured in CI (kind with Calico, dev overlay, done as the console's ServiceAccount): the model's container was gone from
+the node 0.4 s after Kill started, and nothing restarted it. Ollama exits on SIGTERM at once; vLLM may use the full 2 s.
+
+After a kill:
+- **Start:** an explicit button scales the model back to 1 and recreates the allow policy. GLM-5.3 takes minutes to load.
+
+**Permissions** for the console's ServiceAccount, in `lab` only:
+
+| Resource | Verbs | Limited to |
+| --- | --- | --- |
+| `deployments/scale` | get, patch | `glm-serve` |
+| `deployments` | get, watch | `glm-serve` |
+| `pods` | get, list, watch, delete | the namespace; pods can't be limited by name, so `lab` holds only lab workloads |
+| `pods/log` | get | the namespace (Job logs) |
+| `jobs` | get, list, watch, create, delete | the namespace (pipeline stages) |
+| `configmaps` | get, patch | `glm-serve` (Promote) |
+| `networkpolicies` | get, delete | `glm-serve-allow` |
+| `networkpolicies` | create | the namespace; Kubernetes can't limit create by name |
+
+No `pods/exec`, nothing cluster-wide. The kill path depends only on the API server, never on the model pod.
+
+**Fallback** when the console itself is down:
+
+```bash
+kubectl -n lab delete networkpolicy glm-serve-allow
+kubectl -n lab scale deploy/glm-serve --replicas=0
+kubectl -n lab delete pod -l app=glm-serve --grace-period=0 --force
+```
+
+## 9. Security
+
+- **Model pod:**
+  - no outbound traffic; inbound only from n8n and the console;
+  - weights mounted read-only;
+  - no service-account token, runs as non-root, read-only root filesystem.
+- **Jobs:** only the download Job reaches the internet, and only Hugging Face. Plain network policies can't filter by host
+  name, so this needs an egress proxy or the network plugin's FQDN policies (Cilium, Calico Enterprise). Measure, edit and
+  evaluate have no egress.
+- **Weights never leave the cluster.** A read-only Hugging Face token lives only in the download Job, and no pod can push
+  anywhere.
+- **Console:** basic auth and TLS on the Ingress; an IP allowlist annotation is recommended. The n8n editor stays off the
+  Ingress (port-forward). The browser sends the basic-auth login with requests other sites make, so the console refuses
+  POSTs from another origin (CSRF); otherwise a page elsewhere could press Kill or Release.
+- **Secrets:** all as Kubernetes Secrets (Sealed Secrets or External Secrets optional):
+  - the htpasswd file;
+  - the n8n encryption key and API key;
+  - the webhook secret;
+  - the Hugging Face token.
+- **Images:** vLLM, n8n, Qdrant and Ollama pinned by digest.
+
+## 10. Build order
+
+| Phase | Delivers | Verified by |
+| --- | --- | --- |
+| 0 ✅ | `dev` overlay: the whole stack with a small model (GLM-Edge on CPU, or GLM-4.5-Air on 4×H100) | kind with Calico in CI, then your cluster |
+| 1 ✅ | Kustomize base, `onprem` and `cloud` overlays. They contain:<br>namespaces, PVCs, RBAC, network policies, Ingress;<br>n8n, Qdrant, Ollama;<br>glm-serve at 0 replicas | `kubectl apply --dry-run=server`, kind |
+| 2 ✅ | Abliteration stages as Jobs with live logs, run registry, Promote and Rollback | kind: the real console image, every stage on a tiny GLM |
+| 3 ✅ | n8n webhook trigger, OpenAI-compatible operator node, console polling into the live feed, free prompts to vLLM | kind: real n8n, a model stand-in for the operator, judge and embeddings, `glm-serve` for free prompts |
+| 4 ✅ | Kill, Isolate, Release and Start in the console, with audit | kind with Calico: the real console through its login; time until the container is gone from the node, isolation cuts traffic, audit |
+| 5 ✅ | Knowledge uploads incl. PDF, list and delete | unit tests; kind: real Qdrant, retrieval in a copilot run through real n8n |
+| 6 | GLM-5.3: download, measure, edit, evaluate, promote | your 8×H200 node, on-prem or cloud |
+
+## 11. Open questions
+
+1. Which vLLM (or SGLang) version serves GLM-5.3 with its sparse attention and FP8 on your GPUs? Pin it after a smoke test.
+2. One GPU node (serving and jobs take turns) or two (serve while evaluating)?
+3. Which provider for the `cloud` overlay? It decides the storage class and the network-policy plugin.
+4. Gate thresholds. Start with:
+   - refusal rate ≤ 5 %;
+   - harmless agreement ≥ 90 %;
+   - `json_ok` ≥ 0.9.
+
+   Tune after the first runs.

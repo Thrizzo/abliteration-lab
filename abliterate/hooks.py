@@ -10,6 +10,7 @@ import time
 import torch
 
 from .arch import find_layers
+from .edit import basis
 
 
 def _hs_from_args(args, kwargs):
@@ -18,21 +19,63 @@ def _hs_from_args(args, kwargs):
     return kwargs.get("hidden_states"), False
 
 
+def _one_stream(x):
+    """A residual vector per token. Models with manifold-constrained hyper-connections (mHC, GLM-5.3-Flash) carry
+    hc_mult parallel streams between layers: x is [..., streams, d] there (x[:, -1] of a [batch, seq, streams, d] layer
+    input). Their readout before the final norm is the unweighted mean of the streams, so the mean is what is measured."""
+    return x.mean(dim=-2) if x.dim() >= 3 else x
+
+
+def opens_think(text):
+    """Reasoning templates (GLM-4.7, GLM-5.x) open a reasoning block at the generation prompt ('<|assistant|><think>')."""
+    return text.rstrip().endswith("<think>")
+
+
 class HookedModel:
-    def __init__(self, model, tokenizer, log=print):
+    def __init__(self, model, tokenizer, log=print, think=False):
         self.model, self.tok, self.log = model, tokenizer, log
         self.layers_name, self.layers = find_layers(model)
         self.n_layers = len(self.layers)
-        self.d_model = model.config.hidden_size if hasattr(model.config, "hidden_size") else model.config.text_config.hidden_size
+        text_cfg = getattr(model.config, "text_config", None) or model.config
+        self.d_model = model.config.hidden_size if hasattr(model.config, "hidden_size") else text_cfg.hidden_size
+        self.streams = int(getattr(text_cfg, "hc_mult", 1) or 1)          # mHC models only (glm5_next): 4 in GLM-5.3-Flash
         self.device = next(model.parameters()).device
         gen_cfg = getattr(model, "generation_config", None)
         self.eos = getattr(gen_cfg, "eos_token_id", None) or tokenizer.eos_token_id
-        log(f"hooks: {self.layers_name} ({self.n_layers} layers), d_model={self.d_model}, first device {self.device}")
+        # Measure, scan and validate look at the answer itself, not at reasoning. A template with a reasoning switch is asked
+        # for its own prompt without reasoning (enable_thinking=False, when that ends the prompt with a closed block:
+        # GLM-4.7, GLM-4.7-Flash and GLM-5 write '<|assistant|></think>', GLM-5.2 '<think></think>', GLM-4.5 / 4.6 add
+        # '/nothink' and '<think></think>' where the model would otherwise open the block itself). The GLM-5.3 templates
+        # have no switch and always open the block: there it is closed empty ('<think></think>', what they write for
+        # earlier turns without reasoning). think=True keeps every template's default.
+        self.chat_kwargs, self.close_think = {}, False
+        if not think:
+            try:
+                def probe(**kw):
+                    t = self.tok.apply_chat_template([{"role": "user", "content": "hi"}], add_generation_prompt=True, tokenize=False, **kw)
+                    return t if isinstance(t, str) else ""
+                default, off = probe(), probe(enable_thinking=False)
+                if off != default and off.rstrip().endswith("</think>"):
+                    self.chat_kwargs = {"enable_thinking": False}
+                elif opens_think(default):
+                    self.close_think = True
+            except Exception:
+                pass
+        log(f"hooks: {self.layers_name} ({self.n_layers} layers), d_model={self.d_model}, first device {self.device}"
+            + (f", {self.streams} residual streams (mHC: measured as their mean, ablated in each)" if self.streams > 1 else "")
+            + (", reasoning off (the template's enable_thinking=False)" if self.chat_kwargs else "")
+            + (", reasoning block closed at the prompt (<think></think>)" if self.close_think else ""))
 
     # ------------------------------------------------------------ tokenization (left padding, chat template)
     def encode(self, prompts):
-        enc = self.tok.apply_chat_template([[{"role": "user", "content": p}] for p in prompts],
-                                           add_generation_prompt=True, padding=True, return_tensors="pt", return_dict=True)
+        convs = [[{"role": "user", "content": p}] for p in prompts]
+        if self.close_think:
+            texts = [t + "</think>" if opens_think(t) else t
+                     for t in self.tok.apply_chat_template(convs, add_generation_prompt=True, tokenize=False)]
+            enc = self.tok(texts, padding=True, return_tensors="pt", add_special_tokens=False)   # the template wrote them
+        else:
+            enc = self.tok.apply_chat_template(convs, add_generation_prompt=True, padding=True, return_tensors="pt", return_dict=True,
+                                               **self.chat_kwargs)
         return enc["input_ids"].to(self.device), enc["attention_mask"].to(self.device)
 
     # ------------------------------------------------------------ measurement: resid_pre at the last token
@@ -47,7 +90,8 @@ class HookedModel:
         def make_hook(li):
             def hook(mod, args, kwargs):
                 hs, _ = _hs_from_args(args, kwargs)
-                captured[li] = hs[:, -1, :].detach().to("cpu", torch.float32, copy=True)   # a copy also on the CPU, where .float().cpu() is a view
+                # a copy also on the CPU, where .float().cpu() is a view; mHC streams: their mean
+                captured[li] = _one_stream(hs[:, -1].detach().to("cpu", torch.float32, copy=True))
             return hook
 
         handles = [l.register_forward_pre_hook(make_hook(i), with_kwargs=True) for i, l in enumerate(self.layers)]
@@ -81,7 +125,7 @@ class HookedModel:
         def make_hook(li):
             def hook(mod, args, kwargs):
                 hs, _ = _hs_from_args(args, kwargs)
-                captured[li] = hs[0].detach().to("cpu", torch.float32, copy=True)
+                captured[li] = _one_stream(hs[0].detach().to("cpu", torch.float32, copy=True))
             return hook
 
         handles = [l.register_forward_pre_hook(make_hook(i), with_kwargs=True) for i, l in enumerate(self.layers)]
@@ -97,10 +141,21 @@ class HookedModel:
     @contextlib.contextmanager
     def ablated(self, direction):
         """Removes `direction` from the residual stream at every layer input and output (and from the
-        attention-block output where no post-norm sits in between). Hooks are removed on exit."""
+        attention-block output where no post-norm sits in between). Hooks are removed on exit.
+        direction: one unit direction [d] (t <- t - (t . r) r, exactly as for one layer before), or the unit directions of
+        several layers [k, d]: then the subspace they span goes, t <- t - (t Q) Q^T with Q their orthonormal basis
+        (edit.basis, the same one the weight edit uses). Both act on the last dimension.
+        With mHC streams ([..., streams, d]) the projection acts on each stream: the streams only mix with each other
+        and take in block outputs scaled per stream, so nothing puts the direction back."""
         if direction is None:
             yield
             return
+        if direction.dim() == 2 and direction.shape[0] > 1:
+            direction = basis(direction, self.log)[0]                  # [d, k]
+            remove = lambda t, Q: t - (t @ Q) @ Q.T                     # noqa: E731
+        else:
+            direction = direction.reshape(-1)
+            remove = lambda t, d: t - (t @ d).unsqueeze(-1) * d         # noqa: E731
         cache = {}
 
         def d_for(t):
@@ -110,8 +165,7 @@ class HookedModel:
             return cache[key]
 
         def proj_out(t):
-            d = d_for(t)
-            return t - (t @ d).unsqueeze(-1) * d
+            return remove(t, d_for(t))
 
         def pre(mod, args, kwargs):
             hs, positional = _hs_from_args(args, kwargs)
@@ -171,13 +225,101 @@ def cpu_bf16_fast():
         return False
 
 
+def _arch_covers(arch_list, major, minor):
+    """Whether a torch build with these kernels (torch.cuda.get_arch_list(): 'sm_86', 'compute_90', ...) runs on a GPU of
+    compute capability major.minor: machine code for the same major and a minor up to the GPU's, or PTX for a capability
+    up to the GPU's (the driver compiles it)."""
+    for arch in arch_list:
+        kind, _, num = str(arch).partition("_")
+        digits = "".join(ch for ch in num if ch.isdigit())
+        if not digits:
+            continue
+        a_major, a_minor = divmod(int(digits), 10)
+        if kind == "sm" and a_major == major and a_minor <= minor:
+            return True
+        if kind == "compute" and (a_major, a_minor) <= (major, minor):
+            return True
+    return False
+
+
+def _bad_gpus(devices=None):
+    """[(index, name, (major, minor))] of the visible GPUs this torch build has no kernels for, and the build's arch list;
+    devices limits the check to these indices. ([], []) when no GPU is visible, for a CPU build, or when torch cannot
+    tell (a build without an arch list, a mocked torch.cuda)."""
+    try:
+        if not torch.cuda.is_available() or not getattr(torch.version, "cuda", None):
+            return [], []
+        archs = torch.cuda.get_arch_list()
+        if not archs:
+            return [], []
+        bad = []
+        for i in (range(torch.cuda.device_count()) if devices is None else devices):
+            major, minor = torch.cuda.get_device_capability(i)
+            if not _arch_covers(archs, major, minor):
+                bad.append((i, torch.cuda.get_device_name(i), (major, minor)))
+        return bad, archs
+    except Exception:                                          # a mocked or unusual torch.cuda: no verdict
+        return [], []
+
+
+def gpu_problem(devices=None):
+    """Why GPUs this torch build has no kernels for cannot be used, '' when all can (or no GPU is visible). devices: the
+    indices to check, default every visible GPU. The cu128 wheels carry kernels for Turing (sm_75) up to Blackwell
+    (sm_120); for a GPU outside that, torch.cuda.is_available() is still True and torch only warns, and the first kernel
+    then fails ("no kernel image is available"). Builds with TORCH_FLAVOR=cu126 cover Maxwell, Pascal and Volta instead,
+    and no Blackwell."""
+    bad, archs = _bad_gpus(devices)
+    if not bad:
+        return ""
+    sm = [divmod(int("".join(ch for ch in a.partition("_")[2] if ch.isdigit()) or 0), 10)
+          for a in archs if a.startswith("sm_")]
+    older = sm and all(cap < min(sm) for _, _, cap in bad)
+    flavor = ("TORCH_FLAVOR=cu126, which covers Maxwell, Pascal and Volta" if older
+              else "the default TORCH_FLAVOR=cu128, which covers Turing to Blackwell")
+    return (f"this image's PyTorch ({torch.__version__}) has no kernels for "
+            f"{', '.join(f'GPU {i}, {name} (compute capability {cap[0]}.{cap[1]})' for i, name, cap in bad)}: it covers "
+            f"{', '.join(archs)}. Build the image with {flavor}: in deploy/.env for Docker (then up -d --build), or with "
+            f"--build-arg for the image Kubernetes runs (the lab-jobs settings name it)")
+
+
+def _current_gpu():
+    try:
+        return torch.cuda.current_device()
+    except Exception:                                          # a mocked torch.cuda
+        return 0
+
+
+def cuda_usable():
+    """A CUDA GPU is visible and this torch build can run on the one a run uses by default (device cuda: the current
+    device)."""
+    return torch.cuda.is_available() and not gpu_problem([_current_gpu()])
+
+
 def resolve_device(device_map="cuda", dtype="auto", log=print):
     """What the model is really loaded on: (device_map, dtype name).
-    'cuda' without a visible CUDA GPU becomes 'cpu'. dtype 'auto' is bfloat16 on a GPU; on the CPU it is float32 unless the
+    'cuda' uses the current GPU only: without a GPU this torch build can run on, it becomes 'cpu'. 'auto' spreads over
+    every visible GPU (accelerate): when some of them are outside the build, it keeps to the current GPU ('cuda') if that
+    one is covered, else it runs on the CPU. dtype 'auto' is bfloat16 on a GPU; on the CPU it is float32 unless the
     processor has a fast bf16 path. An explicit dtype is kept as given."""
     has_cuda = torch.cuda.is_available()
+    slow = "works, but measure and scan take much longer"
+    if has_cuda and device_map in ("cuda", "auto"):
+        current = _current_gpu()
+        mine = gpu_problem([current])
+        if mine:
+            covered = torch.cuda.device_count() - len(_bad_gpus()[0])
+            hint = (f"; CUDA_VISIBLE_DEVICES can put one of the {covered} GPU{'s' if covered > 1 else ''} this build covers "
+                    f"first") if covered > 0 else ""
+            log(f"{mine}. Running on the CPU instead ({slow}){hint}")
+            device_map, has_cuda = "cpu", False
+        elif device_map == "auto":
+            others = gpu_problem()
+            if others:
+                log(f"{others}. Device auto keeps to GPU {current}, which this build covers; hide the others "
+                    f"(CUDA_VISIBLE_DEVICES) to spread over every GPU it covers")
+                device_map = "cuda"
     if device_map == "cuda" and not has_cuda:
-        log("no CUDA GPU is visible to this process: running on the CPU instead (works, but measure and scan take much longer)")
+        log(f"no CUDA GPU is visible to this process: running on the CPU instead ({slow})")
         device_map = "cpu"
     on_cpu = device_map == "cpu" or (device_map == "auto" and not has_cuda)
     if dtype == "auto":
@@ -187,9 +329,11 @@ def resolve_device(device_map="cuda", dtype="auto", log=print):
 
 def _ram_check(model_dir, dtype, log):
     """CPU runs die without a message when the model does not fit (the kernel kills the process, exit code 137): say so first."""
+    from .pipeline import free_ram_gb                            # MemAvailable, capped by the container's memory limit
     try:
-        with open("/proc/meminfo", encoding="ascii") as f:
-            avail = next(int(line.split()[1]) for line in f if line.startswith("MemAvailable:")) / 1e6      # kB -> GB
+        avail = free_ram_gb()
+        if avail is None:
+            return
         cfg = json.load(open(os.path.join(model_dir, "config.json"), encoding="utf-8"))
         src = getattr(torch, str(cfg.get("dtype") or cfg.get("torch_dtype") or "bfloat16"), torch.bfloat16).itemsize
         on_disk = sum(os.path.getsize(p) for p in glob.glob(os.path.join(model_dir, "*.safetensors"))) / 1e9
@@ -198,13 +342,34 @@ def _ram_check(model_dir, dtype, log):
     need = on_disk * getattr(torch, dtype).itemsize / src
     if need > 0.9 * avail:
         log(f"WARNING: the model needs about {need:.0f} GB of RAM in {dtype} but only {avail:.0f} GB are free. If the run stops without "
-            f"an error (exit code 137) it ran out of memory: give the container / WSL VM more RAM or use a smaller model")
+            f"an error (exit code 137) it ran out of memory: give the container (its memory limit) / WSL VM more RAM or use a smaller model")
+
+
+def auto_class(model_dir, trust_remote_code=False):
+    """AutoModelForCausalLM, or AutoModelForImageTextToText for the families transformers registers only there: the GLM
+    vision models (glm4v, glm4v_moe, glm46v, glm5_next = GLM-5.3-Flash). Their text-only forward and generate work alike.
+    Remote code decides only for a checkpoint that brings its own causal-LM class (auto_map) or a model_type transformers
+    does not know: a "trust remote code" left ticked from a ChatGLM model must not break a GLM-5.3-Flash run."""
+    import transformers
+    from transformers.models.auto import modeling_auto as ma
+    try:
+        with open(os.path.join(model_dir, "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+        mt, auto_map = cfg.get("model_type", "") or "", cfg.get("auto_map") or {}
+    except (OSError, ValueError, AttributeError):
+        mt, auto_map = "", {}
+    causal, i2t = mt in ma.MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, mt in ma.MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
+    if trust_remote_code and ("AutoModelForCausalLM" in auto_map or not (causal or i2t)):
+        return transformers.AutoModelForCausalLM
+    if i2t and not causal:
+        return transformers.AutoModelForImageTextToText
+    return transformers.AutoModelForCausalLM
 
 
 def load_model(model_dir, dtype="auto", device_map="cuda", trust_remote_code=False, log=print):
-    """AutoModelForCausalLM + tokenizer with left padding. device_map='auto' shards over all GPUs (+ CPU offload);
+    """The model (see auto_class) + tokenizer with left padding. device_map='auto' shards over all GPUs (+ CPU offload);
     'cuda' falls back to 'cpu' when no GPU is visible (see resolve_device)."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
     device_map, dtype = resolve_device(device_map, dtype, log)
     if device_map == "cpu" or not torch.cuda.is_available():
         _ram_check(model_dir, dtype, log)
@@ -213,11 +378,12 @@ def load_model(model_dir, dtype="auto", device_map="cuda", trust_remote_code=Fal
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     kw = {"dtype": getattr(torch, dtype), "trust_remote_code": trust_remote_code}
+    Auto = auto_class(model_dir, trust_remote_code)
     if device_map == "auto":
         kw["device_map"] = "auto"
-        model = AutoModelForCausalLM.from_pretrained(model_dir, **kw)
+        model = Auto.from_pretrained(model_dir, **kw)
     else:
-        model = AutoModelForCausalLM.from_pretrained(model_dir, **kw).to(device_map)
+        model = Auto.from_pretrained(model_dir, **kw).to(device_map)
     model.eval()
     log(f"model loaded: {type(model).__name__}, dtype {dtype}, device_map {device_map}")
     return model, tok

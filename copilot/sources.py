@@ -9,17 +9,26 @@ document may be used for training):
       engagement/   your own client notes                (scrubbed hard; used for RAG and training after scrubbing)
       pwk/          PWK / OSCP course material           (RAG only - excluded from training data by default)
       redact_terms.txt   optional: one client name / domain / project per line, removed from every source
+
+Markdown, text, HTML and PDF. A PDF's text layer is extracted in a separate process with memory, CPU and time limits
+(copilot/pdftext.py), since PDFs from the internet are untrusted input.
 """
 import html
 import html.parser
+import json
 import os
 import re
+import subprocess
+import sys
 from dataclasses import dataclass
 
 SOURCES = ("htb", "blog", "engagement", "pwk")
 TEXT_EXT = {".md", ".markdown", ".txt", ".rst"}
 HTML_EXT = {".html", ".htm"}
-MAX_BYTES = 5 * 1024 * 1024
+PDF_EXT = {".pdf"}
+MAX_BYTES = 5 * 1024 * 1024                 # text and HTML
+PDF_MAX_BYTES = 50 * 1024 * 1024
+PDF_LIMITS = {"memory": 2 * 1024 ** 3, "cpu_s": 120, "timeout_s": 180}
 # sources whose content must not end up in model weights unless explicitly allowed (course material licence terms)
 NO_TRAIN_SOURCES = {"pwk"}
 
@@ -68,8 +77,33 @@ class _HTMLToMarkdown(html.parser.HTMLParser):
         return re.sub(r"\n{3,}", "\n\n", "".join(self.out)).strip()
 
 
+def read_pdf(path, limits=None):
+    """The PDF's text, from copilot/pdftext.py in its own isolated process (python -I) that caps its memory and CPU time
+    before it parses anything; a parse that hangs is killed after timeout_s. ValueError with the reason otherwise."""
+    lim = {**PDF_LIMITS, **(limits or {})}
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdftext.py")
+    try:
+        r = subprocess.run([sys.executable, "-I", script, os.path.abspath(path), str(lim["memory"]), str(lim["cpu_s"])],
+                           capture_output=True, timeout=lim["timeout_s"])
+    except subprocess.TimeoutExpired:
+        raise ValueError(f"reading the PDF took longer than {lim['timeout_s']} s") from None
+    try:
+        out = json.loads(r.stdout or b"{}")
+    except ValueError:
+        out = {}
+    if out.get("error"):
+        raise ValueError(out["error"])
+    if r.returncode != 0 or "text" not in out:
+        killed = r.returncode < 0 or b"MemoryError" in (r.stderr or b"")
+        raise ValueError("reading the PDF ran out of memory or CPU time" if killed else
+                         "reading the PDF failed: " + (r.stderr or b"").decode("utf-8", "replace").strip()[-200:])
+    return out["text"]
+
+
 def read_text(path):
     ext = os.path.splitext(path)[1].lower()
+    if ext in PDF_EXT:
+        return read_pdf(path)
     with open(path, encoding="utf-8", errors="replace") as f:
         raw = f.read()
     if ext in HTML_EXT:
@@ -105,18 +139,23 @@ def iter_documents(root, include=None, exclude=()):
             ext = os.path.splitext(fn)[1].lower()
             if fn == "redact_terms.txt" or fn.startswith("."):
                 continue
-            if ext not in TEXT_EXT | HTML_EXT:
-                skipped.append((rel, f"unsupported type {ext or '(none)'} (convert PDFs to markdown first)"))
+            if ext not in TEXT_EXT | HTML_EXT | PDF_EXT:
+                skipped.append((rel, f"unsupported type {ext or '(none)'}"))
                 continue
-            if os.path.getsize(path) > MAX_BYTES:
-                skipped.append((rel, "larger than 5 MB"))
+            limit = PDF_MAX_BYTES if ext in PDF_EXT else MAX_BYTES
+            if os.path.getsize(path) > limit:
+                skipped.append((rel, f"larger than {limit // (1024 * 1024)} MB"))
                 continue
             src = source_of(rel)
             if include and src not in include:
                 continue
             if src in exclude:
                 continue
-            text = read_text(path)
+            try:
+                text = read_text(path)
+            except ValueError as e:                   # a PDF without a text layer, encrypted, too big to parse
+                skipped.append((rel, str(e)))
+                continue
             if not text.strip():
                 skipped.append((rel, "empty"))
                 continue

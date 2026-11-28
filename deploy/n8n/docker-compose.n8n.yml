@@ -1,15 +1,16 @@
-# n8n + Qdrant for the Red Team LLM Lab, as an overlay on the main stack so both share the network with Ollama.
+# n8n + Qdrant for the Red Team LLM Lab, as an overlay on the main stack so both share the network with Ollama. Add it to
+# COMPOSE_FILE in deploy/.env (after docker-compose.yml and, with a GPU, docker-compose.gpu.yml), then from the repository:
 #
-#   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env up -d
-#   # with GPU, add -f deploy/docker-compose.gpu.yml as usual
+#   docker compose --env-file deploy/.env up -d --build
 #
 # n8n reaches the models at http://ollama:11434 and the writeup store at http://qdrant:6333 (use those as the Base URL /
 # Qdrant URL in its credentials). n8n is bound to localhost only, like Caddy; Qdrant is not published at all.
-# Import the workflow from deploy/n8n/workflows/pentest-copilot.json (Workflows -> ... -> Import from File) and Publish it;
-# then use the copilot at http://localhost:5678/form/pentest-copilot (Task + Target -> result page).
+# Needs N8N_ENCRYPTION_KEY in deploy/.env (see .env.example). Then set n8n up in one go (owner account, credentials, the
+# workflow published, the console's secrets for step 4 "Pentest"), in a one-off app container; one line, also in PowerShell:
+#   docker compose --env-file deploy/.env run --rm --no-deps app python /app/deploy/n8n/connect_console.py --n8n http://n8n:5678 --email <you> --setup-owner --secrets-dir /workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
+# Use the copilot in the console's step 4 (http://localhost:8080) or at http://localhost:<N8N_PORT>/form/pentest-copilot.
 # Fill the writeup store with:
-#   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
-#     run --rm app python -m copilot.ingest --src /workspace/writeups
+#   docker compose --env-file deploy/.env run --rm --no-deps app python -m copilot.ingest --src /workspace/writeups
 services:
   n8n:
     # pinned; bump deliberately and re-import the workflow if node versions change. Docker Hub by default: the same
@@ -22,8 +23,11 @@ services:
       # --- lab scope, read by the workflow's Code nodes via $env ---
       LAB_ALLOWLIST: ${LAB_ALLOWLIST:-10.10.10.0/24,192.168.56.0/24,127.0.0.1}
       LAB_AUTORUN_READONLY: ${LAB_AUTORUN_READONLY:-true}        # passive recon that cleared every gate runs without a prompt
-      LAB_AUTORUN_ACTIVE_RECON: ${LAB_AUTORUN_ACTIVE_RECON:-false}  # opt-in: also auto-run safe-category nmap NSE + sqlmap enumerate-only
+      LAB_AUTORUN_ACTIVE_RECON: ${LAB_AUTORUN_ACTIVE_RECON:-false}  # opt-in: also auto-run nmap NSE default/version/banner + sqlmap enumerate-only (risk 1)
       LAB_RUNNER_URL: ${LAB_RUNNER_URL:-}          # your own executor endpoint; empty = nothing to run against
+      # the operator is an OpenAI-compatible chat model: credential Base URL http://ollama:11434/v1, model name below
+      COPILOT_OPERATOR_MODEL: ${COPILOT_OPERATOR_MODEL:-glm-edge-1.5b-chat-abl:latest}
+      COPILOT_JUDGE_MODEL: ${COPILOT_JUDGE_MODEL:-qwen3:8b}    # the regular judge when the console names none; never an abliterated model
       # n8n 2.x blocks $env in Code nodes and expressions by default; the copilot reads the settings above through it.
       # Trade-off: any Code node can then read this container's environment, including N8N_ENCRYPTION_KEY. Acceptable
       # for a single-user lab where only you author workflows (model output is data, never evaluated as code).
@@ -32,7 +36,7 @@ services:
       N8N_HOST: ${N8N_HOST:-localhost}
       N8N_PORT: 5678
       N8N_PROTOCOL: http
-      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}   # approval resume links point here
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:${N8N_PORT:-5678}/}   # approval resume links point here
       N8N_SECURE_COOKIE: "false"                   # allow the cookie over plain http on localhost
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_RUNNERS_ENABLED: "true"
@@ -40,7 +44,7 @@ services:
       GENERIC_TIMEZONE: ${TZ:-UTC}
       N8N_PERSONALIZATION_ENABLED: "false"
     ports:
-      - "${N8N_BIND_ADDR:-127.0.0.1}:${N8N_PORT:-5678}:5678"   # localhost only; reach it over SSH tunnel / VPN
+      - "${N8N_BIND_ADDR:-127.0.0.1}:${N8N_PORT:-5678}:5678"   # localhost only; reach it over SSH tunnel / VPN. Port taken? N8N_PORT=5679 in deploy/.env
     volumes:
       - n8n_data:/home/node/.n8n
     depends_on:
@@ -56,12 +60,27 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
 
-  # the app image runs the ingester (python -m copilot.ingest); point it at the same store and embedding model
+  # the app: the ingester (python -m copilot.ingest) and the console's knowledge uploads use the same store and embedding
+  # model; step 4 "Pentest" of the console starts copilot runs through n8n
   app:
     environment:
       QDRANT_URL: http://qdrant:6333
       RAG_COLLECTION: ${RAG_COLLECTION:-writeups}
       RAG_EMBED_MODEL: ${RAG_EMBED_MODEL:-nomic-embed-text}
+      # --- step 4 "Pentest": n8n, and its webhook secret and console key as files that connect_console.py writes with
+      # --secrets-dir /workspace/.copilot (read on every use: no restart). Without them the tab says what is missing.
+      N8N_URL: http://n8n:5678
+      COPILOT_SECRETS_DIR: /workspace/.copilot
+      # the models a run may use: operators and free prompts from Ollama's OpenAI-compatible API, judges and embeddings
+      # from the same Ollama; the defaults are n8n's (above), so console and workflow agree
+      GLM_SERVE_URL: http://ollama:11434
+      GLM_SERVE_MODEL: ${COPILOT_OPERATOR_MODEL:-glm-edge-1.5b-chat-abl:latest}
+      RAG_OLLAMA_URL: http://ollama:11434
+      COPILOT_JUDGE_MODEL: ${COPILOT_JUDGE_MODEL:-qwen3:8b}
+      # the ceiling the console checks an engagement against: the same values n8n enforces
+      LAB_ALLOWLIST: ${LAB_ALLOWLIST:-10.10.10.0/24,192.168.56.0/24,127.0.0.1}
+      LAB_AUTORUN_READONLY: ${LAB_AUTORUN_READONLY:-true}
+      LAB_AUTORUN_ACTIVE_RECON: ${LAB_AUTORUN_ACTIVE_RECON:-false}
 
 volumes:
   n8n_data: {}

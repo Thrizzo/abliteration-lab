@@ -1,0 +1,3 @@
+# Shell scripts run in Linux containers: a Windows checkout with Git's default core.autocrlf=true would give them CRLF line
+# ends, and "#!/bin/sh\r" cannot start (the image strips them as well, deploy/Dockerfile).
+*.sh text eol=lf

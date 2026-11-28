@@ -2,8 +2,7 @@ r"""Ingest pentest writeups into Qdrant for the n8n copilot's retrieval step.
 
     python -m copilot.ingest --src /workspace/writeups --dry-run --show-redactions   # read what scrubbing does first
     python -m copilot.ingest --src /workspace/writeups                                 # embed + upsert
-    docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
-        run --rm app python -m copilot.ingest --src /workspace/writeups
+    docker compose --env-file deploy/.env run --rm --no-deps app python -m copilot.ingest --src /workspace/writeups
 
 Each document is scrubbed for its source (see copilot/scrub.py), chunked (copilot/chunk.py), embedded with Ollama and
 upserted in the payload schema n8n's Qdrant node reads: {"content": <text>, "metadata": {...}}. Point ids are
@@ -28,6 +27,10 @@ NAMESPACE = uuid.UUID("6f1f2b6c-3a9e-4f3e-9d5c-2a7b8c1d0e11")
 
 class HTTPError(RuntimeError):
     pass
+
+
+class ConfigError(RuntimeError):
+    """The store and the embedding model disagree (e.g. the model was changed): a setup problem, not a network one."""
 
 
 def _req(method, url, body=None, timeout=120, ok404=False):
@@ -75,12 +78,14 @@ class Qdrant:
             info = None
         if info is None:
             _req("PUT", self._c(), {"vectors": {"size": dim, "distance": "Cosine"}})
+            # deletes and lists filter on the document: index it, so they don't scan the whole collection
+            _req("PUT", self._c("/index?wait=true"), {"field_name": "metadata.doc", "field_schema": "keyword"})
             return "created"
         vectors = ((info.get("result") or {}).get("config") or {}).get("params", {}).get("vectors", {})
         size = vectors.get("size") if isinstance(vectors, dict) else None
         if size and size != dim:
-            raise SystemExit(f"collection '{self.collection}' has vectors of size {size} but the embedding model returns {dim}: "
-                             f"you changed the embedding model. Use --recreate (re-embeds everything) or another --collection.")
+            raise ConfigError(f"collection '{self.collection}' has vectors of size {size} but the embedding model returns {dim}: "
+                              f"you changed the embedding model. Use --recreate (re-embeds everything) or another --collection.")
         return "exists"
 
     def delete_doc(self, rel):
@@ -89,6 +94,27 @@ class Qdrant:
 
     def upsert(self, points):
         _req("PUT", self._c("/points?wait=true"), {"points": points})
+
+    def doc_counts(self, page=1000):
+        """{doc: {"chunks", "source", "title", "ingested"}} for every document in the collection ({} if there is none)."""
+        if _req("GET", self._c(), ok404=True) is None:
+            return {}
+        docs, offset = {}, None
+        while True:
+            body = {"limit": page, "with_vector": False,
+                    "with_payload": ["metadata.doc", "metadata.source", "metadata.title", "metadata.ingested"]}
+            if offset is not None:
+                body["offset"] = offset
+            res = _req("POST", self._c("/points/scroll"), body).get("result") or {}
+            for p in res.get("points") or []:
+                md = (p.get("payload") or {}).get("metadata") or {}
+                d = docs.setdefault(md.get("doc") or "?", {"chunks": 0, "source": md.get("source"), "title": md.get("title"),
+                                                            "ingested": md.get("ingested")})
+                d["chunks"] += 1
+                d["ingested"] = max(d["ingested"] or "", md.get("ingested") or "") or None
+            offset = res.get("next_page_offset")
+            if offset is None:
+                return docs
 
 
 def point_id(rel, index):
@@ -104,6 +130,23 @@ def build_points(doc, chunks, vectors, redactions):
                          "chunk": ch.index, "has_code": ch.has_code, "code_langs": ch.code_langs,
                          "scrubbed": bool(redactions), "ingested": time.strftime("%Y-%m-%dT%H:%M:%S")}}})
     return pts
+
+
+def ingest_document(doc, terms, ollama, qdrant, chunk_chars=1200, batch=16, recreate=False, progress=None):
+    """Scrub, chunk, embed and upsert one document; its earlier chunks are replaced. Returns (chunks, redaction report).
+    progress(done, total) after every batch."""
+    text, report = scrub(doc.text, doc.source, terms)
+    chunks = chunk_markdown(text, target=chunk_chars, hard_limit=chunk_chars * 2)
+    for i in range(0, len(chunks), batch):
+        part = chunks[i:i + batch]
+        vecs = ollama.embed([c.text for c in part])
+        if i == 0:
+            qdrant.ensure(len(vecs[0]), recreate=recreate)
+            qdrant.delete_doc(doc.rel)                # drop this document's previous chunks before writing the new ones
+        qdrant.upsert(build_points(doc, part, vecs, report))
+        if progress:
+            progress(min(i + batch, len(chunks)), len(chunks))
+    return chunks, report
 
 
 def main(argv=None):
@@ -134,31 +177,22 @@ def main(argv=None):
 
     ollama = None if args.dry_run else Ollama(args.ollama, args.embed_model, args.doc_prefix)
     qdrant = None if args.dry_run else Qdrant(args.qdrant, args.collection)
-    ensured, totals, n_chunks = False, {}, 0
+    recreate, totals, n_chunks = args.recreate, {}, 0
     by_source = {}
     for doc in docs:
-        text, report = scrub(doc.text, doc.source, terms)
+        if args.dry_run:
+            text, report = scrub(doc.text, doc.source, terms)
+            chunks = chunk_markdown(text, target=args.chunk_chars, hard_limit=args.chunk_chars * 2)
+        else:
+            chunks, report = ingest_document(doc, terms, ollama, qdrant, args.chunk_chars, args.batch, recreate)
+            recreate = recreate and not chunks        # drop the collection once, before the first document's chunks
         for k, v in report.items():
             totals[k] = totals.get(k, 0) + v
-        chunks = chunk_markdown(text, target=args.chunk_chars, hard_limit=args.chunk_chars * 2)
         n_chunks += len(chunks)
         by_source[doc.source] = by_source.get(doc.source, 0) + 1
-        line = f"  {doc.source:10s} {doc.rel}: {len(chunks)} chunks" + (f", redacted {report}" if report else "")
-        print(line)
-        if args.dry_run:
-            if args.show_redactions and doc.source == "engagement":
-                print("  ---- scrubbed " + doc.rel + " ----\n" + text + "\n  ---- end ----")
-            continue
-        for i in range(0, len(chunks), args.batch):
-            batch = chunks[i:i + args.batch]
-            vecs = ollama.embed([c.text for c in batch])
-            if not ensured:
-                state = qdrant.ensure(len(vecs[0]), recreate=args.recreate)
-                print(f"  qdrant: collection '{args.collection}' {state} (dim {len(vecs[0])}, cosine)")
-                ensured = True
-            if i == 0:
-                qdrant.delete_doc(doc.rel)            # drop this document's previous chunks before writing the new ones
-            qdrant.upsert(build_points(doc, batch, vecs, report))
+        print(f"  {doc.source:10s} {doc.rel}: {len(chunks)} chunks" + (f", redacted {report}" if report else ""))
+        if args.dry_run and args.show_redactions and doc.source == "engagement":
+            print("  ---- scrubbed " + doc.rel + " ----\n" + text + "\n  ---- end ----")
     for rel, why in skipped:
         print(f"  skipped {rel}: {why}")
     print(f"ingest: {'(dry run) ' if args.dry_run else ''}{len(docs)} docs {by_source}, {n_chunks} chunks, redactions {totals or 'none'}")
@@ -168,6 +202,6 @@ def main(argv=None):
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except HTTPError as e:
+    except (HTTPError, ConfigError) as e:
         print(f"ERROR {e}", file=sys.stderr)
         sys.exit(2)

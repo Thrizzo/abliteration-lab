@@ -1,0 +1,23 @@
+# Routes the console's host name to the login proxy. No auth annotations on purpose: the login is in the console pod
+# (Caddy), so this works with any ingress controller (Traefik, nginx, a cloud load balancer) and keeps working if you
+# swap controllers. Set the host and class in your overlay; add a tls: section (cert-manager or a Secret) for HTTPS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: console
+  namespace: lab
+  annotations:
+    # long-lived streams (live log, SSE) and uploads; ignored by controllers that do not know these annotations
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: lab.example.internal
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: console, port: { name: http } } }

@@ -1,0 +1,72 @@
+# lab-copilot: deny everything, then open exactly what the copilot uses. Policies select pods by the "lab-role" label.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: lab-copilot }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: allow-dns, namespace: lab-copilot }
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } }
+          podSelector: { matchLabels: { k8s-app: kube-dns } }
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+# n8n: started by the console; reaches Qdrant, Ollama (judge, embeddings) and the model server in lab
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: n8n, namespace: lab-copilot }
+spec:
+  podSelector: { matchLabels: { lab-role: n8n } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: lab } }
+          podSelector: { matchLabels: { lab-role: console } }
+      ports: [{ port: 5678, protocol: TCP }]
+  egress:
+    - to: [{ podSelector: { matchLabels: { lab-role: qdrant } } }]
+      ports: [{ port: 6333, protocol: TCP }]
+    - to: [{ podSelector: { matchLabels: { lab-role: ollama } } }]
+      ports: [{ port: 11434, protocol: TCP }]
+    - to:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: lab } }
+          podSelector: { matchLabels: { lab-role: glm-serve } }
+      ports: [{ port: 8000, protocol: TCP }, { port: 11434, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: qdrant, namespace: lab-copilot }
+spec:
+  podSelector: { matchLabels: { lab-role: qdrant } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: lab } }
+          podSelector: { matchLabels: { lab-role: console } }
+        - podSelector: { matchLabels: { lab-role: n8n } }
+      ports: [{ port: 6333, protocol: TCP }]
+---
+# Ollama (judge, embeddings) pulls its models from the internet on start: the only open egress in this namespace.
+# Plain NetworkPolicy cannot filter by host name; use an egress proxy or FQDN policies to narrow it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: ollama, namespace: lab-copilot }
+spec:
+  podSelector: { matchLabels: { lab-role: ollama } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: lab } }
+          podSelector: { matchLabels: { lab-role: console } }
+        - podSelector: { matchLabels: { lab-role: n8n } }
+      ports: [{ port: 11434, protocol: TCP }]
+  egress:
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0 } }]
+      ports: [{ port: 443, protocol: TCP }]

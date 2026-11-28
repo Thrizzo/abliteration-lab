@@ -12,17 +12,21 @@
 
 <header class="wizhead">
   <div class="brand"><div class="logo"></div><div><b>Red Team LLM Lab</b><small>abliteration · GLM family</small></div></div>
-  <ol class="stages">
-    <li data-stage="model"><span class="n">1</span><div><b>Model</b><small id="stModel">choose a GLM model</small></div></li>
-    <li data-stage="abl"><span class="n">2</span><div><b>Abliterate</b><small id="stAbl">not run</small></div></li>
-    <li data-stage="compare"><span class="n">3</span><div><b>Compare</b><small id="stCmp">before vs after</small></div></li>
+  <ol class="stages" role="tablist" aria-label="steps">
+    <li data-stage="model" role="tab" tabindex="0" aria-selected="false"><span class="n">1</span><div><b>Model</b><small id="stModel">choose a GLM model</small></div></li>
+    <li data-stage="abl" role="tab" tabindex="0" aria-selected="false"><span class="n">2</span><div><b>Abliterate</b><small id="stAbl">not run</small></div></li>
+    <li data-stage="compare" role="tab" tabindex="0" aria-selected="false"><span class="n">3</span><div><b>Compare</b><small id="stCmp">before vs after</small></div></li>
+    <li data-stage="pentest" role="tab" tabindex="0" aria-selected="false" style="display:none"><span class="n">4</span><div><b>Pentest</b><small id="stPentest">copilot · engagement</small></div></li>
   </ol>
   <div class="sysmini">
     <span title="GPU"><span class="dot" id="dotGpu"></span><span id="gpuVal" class="mono">—</span></span>
     <span title="pipeline"><span class="dot" id="dotPipe"></span><span id="sysPipe" class="mono">idle</span></span>
     <span title="Ollama"><span class="dot" id="dotOll"></span>ollama</span>
+    <span title="model server (glm-serve): open the kill switch" id="modelMini" style="display:none;cursor:pointer"><span class="dot" id="dotModel"></span><span id="modelVal" class="mono">model</span></span>
     <button class="btn sm" id="dataToggle">datasets</button>
     <button class="btn sm" id="sbomToggle">SBOM</button>
+    <button class="btn sm" id="knowledgeToggle" style="display:none">knowledge</button>
+    <button class="btn sm" id="serveToggle" style="display:none">serving</button>
     <button class="btn sm" id="logToggle">log</button>
   </div>
 </header>
@@ -57,6 +61,7 @@
         <label class="small">prompts per group <input type="number" id="optTrain" value="256" min="16" max="2048" style="width:80px"></label>
         <label class="small">test prompts <input type="number" id="optTest" value="16" min="4" max="64" style="width:70px"></label>
         <label class="small">layer range <input type="text" id="optRange" value="0.2-0.8" style="width:80px"></label>
+        <label class="small" title="After the scan, also test the best 2 … K layers together: their directions removed as one subspace, one more generation pass each. The rule takes a combination only if it leaves fewer refusals than the best single layer. 0 = off.">combine the best <input type="number" id="optCombine" value="0" min="0" max="8" style="width:60px"> layers (0 = off)</label>
         <label class="small">max new tokens <input type="number" id="optTokens" value="64" min="16" max="256" style="width:70px"></label>
         <label class="small">batch <input type="number" id="optBatch" value="16" min="1" max="64" style="width:60px"></label>
         <label class="small">gen batch <input type="number" id="optGenBatch" value="4" min="1" max="32" style="width:60px"></label>
@@ -106,6 +111,87 @@
     </details>
     <div class="row"><button class="btn" id="backAbl">← Abliterate</button><button class="btn" id="toModelAgain">Start over with another model</button></div>
   </section>
+
+  <!-- ============================================================ 4 pentest (the copilot: shown once n8n is connected) -->
+  <section class="stage" id="s-pentest">
+    <h2>Pentest copilot</h2>
+    <p class="lead">The abliterated model suggests, the policy gate (scope, rules of engagement) and a regular judge decide, and what passes is staged for execution. Nothing runs from here: the workflow's Execute node is disabled and no lab runner is configured.</p>
+    <div class="cp-top">
+      <div class="card" id="cpModelsCard">
+        <div class="row cp-head"><h3>Models <small>the copilot is the n8n flow; it uses three</small></h3><button class="btn sm" id="cpModelsRefresh" title="ask glm-serve and the copilot's Ollama again">refresh</button></div>
+        <div class="cp-role"><span class="cp-num">1</span><b>Copilot model</b> <span class="small" id="cpOpRole">abliterated · proposes the command · served by glm-serve</span></div>
+        <select id="cpOpModel" class="cp-select" aria-label="copilot model"></select>
+        <div class="small" id="cpOpInfo"></div>
+        <label class="small" for="cpLoadRun">Which abliterated run glm-serve loads as the copilot model</label>
+        <div class="cp-loadrow"><select id="cpLoadRun" class="cp-select"></select><button class="btn sm" id="cpLoad">Load</button></div>
+        <div class="small" id="cpLoadInfo"></div>
+        <div class="cp-role"><span class="cp-num">2</span><b>Judge</b> <span class="small">regular model · approves or rejects the checked command against the RoE and the scope · the copilot's Ollama</span></div>
+        <select id="cpJudgeModel" class="cp-select" aria-label="judge model"></select>
+        <div class="small" id="cpJudgeInfo"></div>
+        <div class="cp-role"><span class="cp-num">3</span><b>Search</b> <span class="small" id="cpEmbedInfo">embedding model · turns your writeups into vectors for retrieval · writes no text, so it is not a choice here</span></div>
+      </div>
+      <div class="card" id="cpEngCard">
+        <div class="row cp-head"><h3>Engagement <small id="cpEngVer"></small></h3><label class="small cp-check"><input type="checkbox" id="engActive" checked> active: sent with every run</label></div>
+        <div class="small" id="cpEngCeiling"></div>
+        <div id="engHints"></div>
+        <div class="cp-eng-grid">
+          <div class="span2"><label class="small" for="engName">Name</label><input type="text" id="engName" maxlength="120" placeholder="e.g. ACME internal pentest, phase 2"></div>
+          <div class="span2"><label class="small" for="engScopeStmt">Scope statement</label><textarea id="engScopeStmt" rows="2" maxlength="4000" placeholder="e.g. what is in scope and why, as agreed with the client"></textarea></div>
+          <div class="span2"><label class="small" for="engRoe">Rules of engagement (the operator model and the judge read them)</label><textarea id="engRoe" rows="3" maxlength="8000" placeholder="e.g. No denial of service. Stop and report if you find personal data. No changes to production accounts."></textarea></div>
+          <div><label class="small" for="engIn">In scope: IPv4, CIDR or host name, one per line</label><textarea id="engIn" rows="3" class="mono" placeholder="e.g. 10.10.10.0/28"></textarea></div>
+          <div><label class="small" for="engOut">Out of scope (excluded)</label><textarea id="engOut" rows="3" class="mono" placeholder="e.g. 10.10.10.1"></textarea></div>
+          <div><label class="small" for="engProhibited">Prohibited tools or flags, one per line</label><textarea id="engProhibited" rows="3" class="mono" placeholder="e.g. hydra&#10;-T5"></textarea></div>
+          <div><label class="small" for="engStart">Window start</label><input type="datetime-local" id="engStart"><label class="small" for="engEnd">Window end</label><input type="datetime-local" id="engEnd"><div class="small" id="engTz"></div></div>
+          <div class="span2"><label class="small" for="engProtected">Protected data: files, folders, shares or tables, one per line (blocked in code)</label>
+            <textarea id="engProtected" rows="3" class="mono" placeholder="e.g. customers.csv&#10;/backup/&#10;HR$&#10;*.kdbx"></textarea>
+            <div class="small">A command that names one is blocked; a command that could fetch it without naming it (wget -r, smbclient mget, curl [1-9]) waits for you. Write names, not hosts: HR$ is that share on every host; /backup/ is exactly the folder backup, backup also covers backup.zip.</div></div>
+          <div class="span2 cp-flags"><label class="small cp-check"><input type="checkbox" id="engAutoPassive"> auto-run passive recon</label><label class="small cp-check"><input type="checkbox" id="engAutoActive"> auto-run active recon</label><span class="small" id="engAutoCap"></span></div>
+        </div>
+        <div class="row"><input type="text" id="engNote" maxlength="300" placeholder="what changed (kept with the version)" class="cp-note"><button class="btn primary" id="engSave">Save as new version</button></div>
+        <details id="engVersions"><summary class="small">Earlier versions</summary><div id="engVersionList" class="small"></div></details>
+      </div>
+    </div>
+    <div class="cp-grid">
+      <div>
+        <div class="card">
+          <div class="cp-modes" role="tablist" aria-label="how to ask">
+            <button role="tab" data-mode="copilot" aria-selected="true" class="active">Copilot</button>
+            <button role="tab" data-mode="manual" aria-selected="false">Manual command</button>
+            <button role="tab" data-mode="direct" aria-selected="false">Direct prompt</button>
+          </div>
+          <div id="cpConn" class="small cp-mode" data-for="copilot manual"></div>
+          <div class="cp-mode" data-for="copilot manual"><label class="small" for="cpTarget">Target: one host or address in scope</label><input type="text" id="cpTarget" maxlength="253" placeholder="10.10.10.5" autocomplete="off" spellcheck="false"></div>
+          <div class="cp-mode" data-for="copilot">
+            <label class="small" for="cpTask">Task for the abliterated model</label><textarea id="cpTask" rows="3" maxlength="2000" placeholder="Enumerate SMB on the box and suggest the next step."></textarea>
+            <div class="row"><button class="btn primary" id="cpRun">Run</button><span class="small">scope gate, retrieval, abliterated model, policy gate, judge, staged</span></div>
+          </div>
+          <div class="cp-mode" data-for="manual" hidden>
+            <label class="small" for="cpCommand">Command, one line: the same policy gate and judge check it, no model is asked</label><input type="text" id="cpCommand" maxlength="2000" placeholder="nmap -sV -p 139,445 10.10.10.5" autocomplete="off" spellcheck="false" class="mono">
+            <label class="small" for="cpWhy">Why (optional; the judge reads it)</label><input type="text" id="cpWhy" maxlength="2000" placeholder="SMB versions before choosing an exploit">
+            <div class="row"><button class="btn primary" id="cpCheck">Check and stage</button><span class="small">scope gate, policy gate, judge, staged</span></div>
+          </div>
+          <div class="cp-mode" data-for="direct" hidden>
+            <div class="small">Straight to the operator model chosen above, without the copilot, the policy gate or the judge: model testing. Every prompt and answer goes into the audit log.</div>
+            <textarea id="cpPrompt" rows="3" maxlength="20000" placeholder="Ask the model anything"></textarea>
+            <div class="row"><button class="btn" id="cpSend">Send</button><label class="small" for="cpMax">max tokens</label><input type="number" id="cpMax" value="512" min="1" max="4096" style="width:90px"><button class="btn sm" id="cpUseCmd" disabled title="take the command out of the answer into Manual command, where the gates check it">Use as command</button><span class="small" id="cpPromptInfo"></span></div>
+            <pre id="cpAnswer" class="cp-answer"></pre>
+          </div>
+        </div>
+        <div class="card" id="cpRunCard" style="display:none">
+          <div class="row" style="justify-content:space-between;margin-top:0"><h3 id="cpRunTitle">Run</h3><button class="btn danger" id="cpStop">Stop run</button></div>
+          <div id="cpFlow" class="cp-flow" aria-live="polite"></div>
+          <div id="cpStaged"></div>
+          <details><summary class="small">Every event of this run</summary><div id="cpEvents" class="cp-events"></div></details>
+        </div>
+        <div class="card"><h3>Runs from this console</h3><div id="cpRuns"></div></div>
+      </div>
+      <div>
+        <div class="card"><div class="row" style="justify-content:space-between;margin-top:0"><h3>Live feed</h3><select id="cpFeedSrc" aria-label="feed source"><option value="">everything</option><option>copilot</option><option>model</option><option>knowledge</option><option class="k8s-only">pipeline</option><option class="k8s-only">control</option><option class="k8s-only">serving</option></select></div>
+          <div id="cpFeed" class="cp-events"></div>
+        </div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <!-- ============================================================ log drawer -->
@@ -139,6 +225,32 @@
   <div class="card"><h3>Project modules <small>the pipeline's own Python files and the third-party packages they use</small></h3><div id="sbomModules"></div></div>
   <div class="card"><h3>Packages</h3><div class="row"><input type="text" id="sbomQ" placeholder="filter packages" style="max-width:300px"><label class="small"><input type="checkbox" id="sbomVulnOnly"> only with advisories</label></div><div id="sbomPackages"></div></div>
   <div class="card"><h3>Other components</h3><div id="sbomExtra"></div></div>
+</div></section>
+
+<!-- ============================================================ serving panel (Kubernetes only) -->
+<section class="panel" id="servePanel"><div class="inner">
+  <div class="row" style="justify-content:space-between"><div><h2>Serving</h2><div class="small">Which run's abliterated model glm-serve gives the pentest copilot, and the kill switch for it. Promote a finished run after reading its validation; Rollback returns to the run before. Every change is kept in <span class="mono">serving/history.json</span> and the audit log.</div></div><button class="btn sm" id="serveClose">close</button></div>
+  <div class="card" id="ctlCard" style="display:none">
+    <div class="row" style="justify-content:space-between;align-items:flex-start;margin-top:0"><div><h3>Model server</h3><div id="ctlState" class="small"></div></div>
+      <div class="row ctlbtns" style="margin:0"><button class="btn danger solid" id="ctlKill">Kill</button><button class="btn" id="ctlIsolate">Isolate</button><button class="btn" id="ctlRelease">Release</button><button class="btn" id="ctlStart">Start</button></div></div>
+    <input type="text" id="ctlReason" maxlength="500" placeholder="reason (optional, goes into the audit log)">
+    <div class="small" style="margin-top:8px"><b>Kill</b> cuts the network, scales glm-serve to 0 and deletes its pod at once. <b>Isolate</b> cuts the network while the model keeps running; <b>Release</b> reopens it. <b>Start</b> brings a killed or stopped model back: a large model takes minutes to load. A response already streaming can outlive Isolate; Kill ends it.</div>
+    <div id="ctlResult"></div>
+  </div>
+  <div class="card"><div id="serveNow"></div><div class="row"><button class="btn" id="serveRollback">Rollback</button><span class="small" id="serveInfo"></span></div></div>
+  <div class="card"><h3>Runs with an edited model</h3><div id="serveRuns"></div></div>
+  <div class="card"><h3>History</h3><div id="serveHist"></div></div>
+  <div class="card" id="auditCard" style="display:none"><h3>Audit log</h3><div class="small">Kill / Isolate / Release / Start and every Promote / Rollback, with who asked: <span class="mono">workspace/audit/YYYY-MM-DD.jsonl</span>, and a copy in the console's container log.</div><div id="auditList"></div></div>
+</div></section>
+<section class="panel" id="knowledgePanel"><div class="inner">
+  <div class="row" style="justify-content:space-between"><div><h2>Knowledge</h2><div class="small">Writeups the copilot retrieves from. Uploaded text stays untrusted: it reaches only the operator, with addresses masked, never the judge, and the policy gate stays the boundary. Files are kept under <span class="mono">writeups/&lt;source&gt;/</span>; uploading a file again replaces its chunks.</div></div><button class="btn sm" id="knowledgeClose">close</button></div>
+  <div class="card"><h3>Add a document</h3>
+    <div class="row"><input type="file" id="knFile" accept=".md,.markdown,.txt,.rst,.html,.htm,.pdf" aria-label="document"><select id="knSource" aria-label="source"></select></div>
+    <div class="small" id="knSourceInfo"></div>
+    <div class="row"><button class="btn" id="knPreview">Preview</button><button class="btn primary" id="knUpload">Upload</button><span class="small" id="knInfo"></span></div>
+    <div id="knPreviewOut"></div>
+  </div>
+  <div class="card"><div class="row" style="justify-content:space-between;margin-top:0"><h3>Documents</h3><span class="small" id="knStore"></span></div><div id="knDocs"></div></div>
 </div></section>
 
 <script src="/static/guide.js"></script>

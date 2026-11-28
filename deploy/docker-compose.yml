@@ -1,23 +1,30 @@
-# Red Team LLM Lab: app + Ollama + Caddy (basic auth).
-#   cp deploy/.env.example deploy/.env             # set WORKSPACE and CADDY_HASH
-#   mkdir -p <WORKSPACE>
-#   GPU host (Docker Desktop, Linux + NVIDIA container toolkit):
-#     docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env up -d --build
-#   No GPU (e.g. Rancher Desktop on Windows, which cannot pass it into containers): leave the gpu file out. The pipeline then
-#   runs on the CPU: same method, slower, and the model has to fit into RAM (README, "Without a GPU").
-#   Rancher Desktop containerd backend: nerdctl compose with the same files.
+# Red Team LLM Lab: app + Ollama + Caddy (basic auth). From the repository's folder:
+#   cp deploy/.env.example deploy/.env             # once; set CADDY_HASH (and WORKSPACE)
+#   mkdir workspace                                # or the folder WORKSPACE names
+#   docker compose --env-file deploy/.env up -d --build
+# COMPOSE_FILE in deploy/.env lists the files every command uses: this one plus docker-compose.gpu.yml by default (Docker
+# Desktop, Linux + NVIDIA container toolkit). No GPU (e.g. Rancher Desktop on Windows, which cannot pass it into
+# containers): drop the gpu file there; the pipeline then runs on the CPU (README, "Without a GPU"). Step 4: append
+# ;deploy/n8n/docker-compose.n8n.yml there. After a git pull, `up -d --build` again: the code is part of the image (with
+# step 4, also connect_console.py again: the copilot's gates live in n8n's workflow, README "Update").
+#   Rancher Desktop containerd backend: nerdctl compose with the same files (-f).
 services:
   app:
-    build: { context: .., dockerfile: deploy/Dockerfile }
-    image: ghcr.io/thrizzo/redteam-llm-lab:latest   # `docker compose pull app` to use the published image instead of building
+    # TORCH_FLAVOR=cu126 in deploy/.env for GPUs older than Turing (deploy/Dockerfile); cpu for a CPU-only image
+    build: { context: .., dockerfile: deploy/Dockerfile, args: { TORCH_FLAVOR: "${TORCH_FLAVOR:-cu128}" } }
+    # the published image is built from main: `docker compose --env-file deploy/.env pull app` fetches it instead of a build,
+    # and replaces a local build of the same name (a checkout of another branch then runs main's code)
+    image: ghcr.io/thrizzo/redteam-llm-lab:latest
     init: true
     stop_grace_period: 60s
     environment:
       OLLAMA_HOST: http://ollama:11434
       ABL_HOST: 0.0.0.0
       HF_TOKEN: ${HF_TOKEN:-}
+      ABL_HARMFUL_DATASET: ${ABL_HARMFUL_DATASET:-}     # empty: the defaults (abliterate/data.py)
+      ABL_HARMLESS_DATASET: ${ABL_HARMLESS_DATASET:-}
     volumes:
-      - ${WORKSPACE:-../workspace}:/workspace     # relative to this file's folder; set an absolute path in .env to be safe
+      - ${WORKSPACE:-../workspace}:/workspace     # relative to this file's folder; an absolute path in .env is safest (Windows: C:/...)
     depends_on: [ollama]
     restart: unless-stopped
     # the app is only reachable through caddy; uncomment to expose it directly on this machine (no auth!)

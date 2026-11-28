@@ -1,5 +1,6 @@
 # Red Team LLM Lab - app + pipeline in one image. GPU via the NVIDIA container runtime (--gpus all / nvidia.com/gpu).
-# The torch cu128 wheels bundle the CUDA libraries, so a plain Python base image is enough; the host driver is injected at run time.
+# The torch cu128 wheels bundle the CUDA libraries, so a plain Python base image (plus gcc for Triton) is enough; the host driver is
+# injected at run time.
 # Pin the base by digest for fully reproducible builds: FROM python:3.12-slim-bookworm@sha256:<digest>
 FROM python:3.12-slim-bookworm AS base
 ENV PYTHONUNBUFFERED=1 PYTHONUTF8=1 PYTHONIOENCODING=utf-8 LANG=C.UTF-8 LC_ALL=C.UTF-8 PIP_NO_CACHE_DIR=1 DEBIAN_FRONTEND=noninteractive \
@@ -22,8 +23,18 @@ RUN git init -q /opt/llama.cpp && cd /opt/llama.cpp \
 
 # ---- main environment
 FROM base AS app
+# Triton (it comes with torch) compiles a small launcher with a C compiler the first time it runs a kernel: the FP8 kernel of
+# the GLM-5.3 family, flash-linear-attention. The base image keeps Python's headers but not gcc.
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*
+# TORCH_FLAVOR=cpu builds a CPU-only image (no CUDA libraries, several GB smaller) for dev clusters and CI:
+#   docker build -f deploy/Dockerfile --build-arg TORCH_FLAVOR=cpu -t ghcr.io/thrizzo/redteam-llm-lab:cpu .
+# The cu128 wheels have kernels for Turing (RTX 20xx, T4) and newer GPUs only. Maxwell, Pascal and Volta (GTX 9xx/10xx,
+# Titan V, P40, V100) need TORCH_FLAVOR=cu126, which in turn has no Blackwell (RTX 50xx) kernels. Compose passes TORCH_FLAVOR
+# from deploy/.env.
+ARG TORCH_FLAVOR=cu128
 COPY deploy/requirements.txt /tmp/requirements.txt
-RUN python -m venv /opt/venv \
+RUN sed -i "s#/whl/cu128#/whl/${TORCH_FLAVOR}#; s#+cu128#+${TORCH_FLAVOR}#" /tmp/requirements.txt \
+ && python -m venv /opt/venv \
  && /opt/venv/bin/pip install --quiet "pip==26.3" \
  && /opt/venv/bin/pip install -r /tmp/requirements.txt
 COPY --from=gguf /opt/llama.cpp /opt/llama.cpp
@@ -35,13 +46,19 @@ COPY abliterate /app/abliterate
 COPY app /app/app
 COPY copilot /app/copilot
 COPY abliteration_pipeline.ipynb run_pipeline.py build_gui.py README.md /app/
+# the copilot's n8n set-up, so the Docker stack runs it in a one-off app container (deploy/n8n/README.md, Setup)
+COPY deploy/n8n/connect_console.py /app/deploy/n8n/connect_console.py
+COPY deploy/n8n/workflows /app/deploy/n8n/workflows
 COPY deploy/entrypoint.sh /app/deploy/entrypoint.sh
-RUN chmod +x /app/deploy/entrypoint.sh && mkdir -p /workspace && useradd -m -u 1000 abl && chown -R abl:abl /app /workspace
+# a Windows checkout with Git's default autocrlf has CRLF line ends, and "#!/bin/sh\r" cannot start: strip them
+RUN sed -i 's/\r$//' /app/deploy/entrypoint.sh && chmod +x /app/deploy/entrypoint.sh \
+ && mkdir -p /workspace && useradd -m -u 1000 abl && chown -R abl:abl /app /workspace
 
 # project data (models/, out/, gguf/, runs/, data/, sbom/) lives on a volume at /workspace.
-# The container starts as root only to hand the mounted workspace to uid 1000, then drops privileges (entrypoint.sh).
+# The container starts as root only to hand the mounted workspace to the app user, then drops privileges (entrypoint.sh).
+# PATH: `python` and `pip` in the container are the main environment's (docker compose run --rm app python -m copilot.ingest).
 ENV ABL_PROJECT=/workspace ABL_PYTHON=/opt/venv/bin/python ABL_GGUF_PY=/opt/venv-gguf/bin/python ABL_LLAMA_CPP=/opt/llama.cpp \
-    PYTHONPATH=/app ABL_HOST=0.0.0.0 ABL_PORT=8787 OLLAMA_HOST=http://ollama:11434 HF_HOME=/workspace/.hf
+    PYTHONPATH=/app ABL_HOST=0.0.0.0 ABL_PORT=8787 OLLAMA_HOST=http://ollama:11434 HF_HOME=/workspace/.hf PATH=/opt/venv/bin:$PATH
 EXPOSE 8787
 VOLUME ["/workspace"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD curl -fsS http://127.0.0.1:8787/healthz >/dev/null || exit 1

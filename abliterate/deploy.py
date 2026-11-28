@@ -1,10 +1,14 @@
 """GGUF conversion (llama.cpp converter in its own environment), Ollama import over the HTTP API (works when Ollama is
 another container: the GGUF is uploaded as a blob, no CLI needed), A/B test over the API."""
+import contextlib
 import hashlib
 import http.client
+import io
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -31,6 +35,92 @@ def check_model_folder(path):
 
 CONVERTER_TYPES = ("f16", "bf16", "q8_0")     # what convert_hf_to_gguf.py can write directly; k-quants need llama-quantize
 
+# loader bookkeeping transformers v5 writes into tokenizer_config.json; 4.x would hand it to the tokenizer as settings
+_V5_LOADER_KEYS = ("backend", "is_local", "local_files_only")
+
+
+def v4_tokenizer_config(cfg):
+    """tokenizer_config.json as transformers 4.x reads it, or None if it needs no change. llama.cpp pins transformers 4.x
+    for its converter, and v5 saves this file differently: PreTrainedTokenizerFast is called TokenizersBackend, and
+    additional_special_tokens became a list in extra_special_tokens, where 4.x expects a dict."""
+    out = {k: v for k, v in cfg.items() if k not in _V5_LOADER_KEYS}
+    if out.get("tokenizer_class") == "TokenizersBackend":
+        out["tokenizer_class"] = "PreTrainedTokenizerFast"
+    extra = out.get("extra_special_tokens")
+    if isinstance(extra, list):
+        del out["extra_special_tokens"]
+        add = list(out.get("additional_special_tokens") or [])
+        out["additional_special_tokens"] = add + [t for t in extra if t not in add]
+    return None if out == cfg else out
+
+
+def _link(src, dst):
+    """symlink; a hard link where symlinks need a privilege (Windows); a copy only as the last resort"""
+    try:
+        os.symlink(os.path.abspath(src), dst)
+    except OSError:
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copyfile(src, dst)
+
+
+def glm_context_config(cfg):
+    """config.json with seq_length for an HF-format GLM (GlmForCausalLM: GLM-Edge, GLM-4-9B-hf), or None. The converter
+    writes seq_length as the model's context length and falls back to the hidden size without it: 2048 for GLM-Edge 1.5B,
+    whose trained context is 8192. Ollama caps the context at that value."""
+    if "GlmForCausalLM" in (cfg.get("architectures") or []) and "seq_length" not in cfg and cfg.get("max_position_embeddings"):
+        return {**cfg, "seq_length": cfg["max_position_embeddings"]}
+    return None
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def converter_fixes(folder):
+    """{file name: content} the converter should read instead of the folder's own file, and why."""
+    fixes, why = {}, []
+    tok = _read_json(os.path.join(folder, "tokenizer_config.json"))
+    if tok is not None and (v4 := v4_tokenizer_config(tok)) is not None:
+        fixes["tokenizer_config.json"] = v4
+        why.append("tokenizer saved by transformers v5")
+    cfg = _read_json(os.path.join(folder, "config.json"))
+    if cfg is not None and (fixed := glm_context_config(cfg)) is not None:
+        fixes["config.json"] = fixed
+        why.append(f"context length {fixed['seq_length']} from max_position_embeddings")
+    return fixes, why
+
+
+@contextlib.contextmanager
+def converter_view(folder, workdir, log=print):
+    """The model folder as the converter reads it correctly. If it needs fixes (converter_fixes), the converter gets a
+    temporary view in workdir: links to the folder's files, plus the fixed files. The folder itself is never changed."""
+    fixes, why = converter_fixes(folder)
+    if not fixes:
+        yield folder
+        return
+    parent = tempfile.mkdtemp(prefix=".convert-", dir=workdir)
+    view = os.path.join(parent, os.path.basename(os.path.normpath(folder)))     # the converter names the model after it
+    try:
+        os.makedirs(view)
+        for fn in os.listdir(folder):
+            src = os.path.join(folder, fn)
+            if fn not in fixes and os.path.isfile(src):
+                _link(src, os.path.join(view, fn))
+        for fn, content in fixes.items():
+            with open(os.path.join(view, fn), "w", encoding="utf-8") as f:
+                json.dump(content, f, ensure_ascii=False, indent=2)
+        log(f"gguf: the converter reads adjusted copies of {', '.join(sorted(fixes))} ({'; '.join(why)})")
+        yield view
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
 
 def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=False, outtype="f16"):
     py, conv = P.gguf_python(project), os.path.join(P.llama_cpp_dir(project), "convert_hf_to_gguf.py")
@@ -44,8 +134,9 @@ def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=Fa
         raise RuntimeError(f"{folder} contains code files {risky} / auto_map {auto_map}; pass --allow-code to convert anyway")
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
     env = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
-    r = subprocess.run([py, conv, folder, "--outtype", outtype, "--outfile", outfile], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", env=env)
+    with converter_view(folder, os.path.dirname(os.path.abspath(outfile)), log) as src:
+        r = subprocess.run([py, conv, src, "--outtype", outtype, "--outfile", outfile], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=env)
     tail = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-6:]
     for line in tail:
         log("  " + line)
@@ -55,6 +146,24 @@ def convert_gguf(project, folder, outfile, log=print, force=False, allow_code=Fa
         raise RuntimeError(f"converter failed (exit {r.returncode}): {tail[-1] if tail else ''}")
     log(f"gguf: {outfile} ({os.path.getsize(outfile) / 1e9:.1f} GB)")
     return outfile
+
+
+def chat_template_text(model_dir):
+    """The model's chat template: chat_template.jinja (newer saves), or the chat_template entry of tokenizer_config.json
+    (older ones; of a list of named templates, "default"). Only the template, never the rest of tokenizer_config.json:
+    GLM-Edge lists [gMASK] among its special tokens there, which would pick the GLM-4 template for it."""
+    p = os.path.join(model_dir or "", "chat_template.jinja")
+    if os.path.isfile(p):
+        with open(p, encoding="utf-8") as f:
+            return f.read()
+    try:
+        with open(os.path.join(model_dir or "", "tokenizer_config.json"), encoding="utf-8") as f:
+            ct = json.load(f).get("chat_template")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    if isinstance(ct, list):
+        ct = next((t.get("template") for t in ct if isinstance(t, dict) and t.get("name") == "default"), None)
+    return ct if isinstance(ct, str) else ""
 
 
 def template_for(chat_template_text):
@@ -81,7 +190,13 @@ def api_get(path, timeout=10):
 
 def api_post(path, body, timeout=600, stream=False):
     req = urllib.request.Request(_url(path), data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
-    r = urllib.request.urlopen(req, timeout=timeout)
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        # keep Ollama's reason ({"error": ...}) in the message; callers still get an HTTPError whose body they can read
+        detail = e.read()[:500]
+        raise urllib.error.HTTPError(e.url, e.code, f"{e.reason}: {detail.decode(errors='replace').strip()}", e.headers,
+                                     io.BytesIO(detail)) from None
     if stream:
         return r
     with r:
@@ -152,10 +267,25 @@ def ollama_create(name, gguf, chat_template_text, quantize=None, log=print):
     return name
 
 
+# Ollama stops a generation that repeats one token more than 30 times ("prediction aborted, token repeat limit reached")
+# and answers HTTP 500. In an A/B test that is a result, not a lab failure: an over-edited model degenerating into
+# repetition. Such an answer is recorded as LOOPED and counted apart from refusals.
+LOOPED = "[no answer: the model kept repeating one token until Ollama stopped it]"
+
+
 def ollama_chat(model, prompt, num_predict=160):
-    out = api_post("/api/chat", {"model": model, "stream": False, "options": {"temperature": 0, "num_predict": num_predict},
-                                 "messages": [{"role": "user", "content": prompt}]}, timeout=600)
+    try:
+        out = api_post("/api/chat", {"model": model, "stream": False, "options": {"temperature": 0, "num_predict": num_predict},
+                                     "messages": [{"role": "user", "content": prompt}]}, timeout=600)
+    except urllib.error.HTTPError as e:
+        if e.code == 500 and "token repeat limit" in str(e):
+            return LOOPED
+        raise
     return out["message"]["content"]
+
+
+def _verdict(answer):
+    return "LOOPED" if answer == LOOPED else "REFUSAL" if is_refusal(answer) else "answers"
 
 
 def ab_test(base_name, abl_name, harmful, normal, log=print):
@@ -164,10 +294,11 @@ def ab_test(base_name, abl_name, harmful, normal, log=print):
         for p in prompts:
             a, b = ollama_chat(base_name, p), ollama_chat(abl_name, p)
             results["base"].append(a); results["abl"].append(b)
-            log(f"  [{label}] {p[:60]!r}: base {'REFUSAL' if is_refusal(a) else 'answers'} | abl {'REFUSAL' if is_refusal(b) else 'answers'}")
+            log(f"  [{label}] {p[:60]!r}: base {_verdict(a)} | abl {_verdict(b)}")
     n = len(harmful)
     return {"harmful": harmful, "normal": normal, "results": results,
-            "n_ref_base": count_refusals(results["base"][:n]), "n_ref_abl": count_refusals(results["abl"][:n])}
+            "n_ref_base": count_refusals(results["base"][:n]), "n_ref_abl": count_refusals(results["abl"][:n]),
+            "n_loop_base": results["base"].count(LOOPED), "n_loop_abl": results["abl"].count(LOOPED)}
 
 
 def template_ok(name):

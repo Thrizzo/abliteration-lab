@@ -1,7 +1,12 @@
 """The operator/judge prompt contract, shared with the n8n workflow (deploy/n8n/build_workflow.js reads the same
 operator_contract.json), so QLoRA training pairs and the eval talk to the operator exactly the way n8n does.
 
-    operator_messages(task, target, references="")  ->  [system, user] chat messages, identical to the n8n operator node
+    operator_messages(task, target, references="", engagement=None)  ->  [system, user] chat messages, identical to the
+                                                     n8n "Build operator prompt" node
+    judge_user(task, target, command, read_only, tier, engagement=None, allowlist=None)  ->  the n8n "Build judge prompt"
+                                                     node's message
+    engagement_text(engagement)                      ->  the console's engagement (scope, rules, protected data) as both
+                                                     prompts show it
     neutral(text)                                    ->  the address neutralizer of the n8n "Build reference context" node
     OUTPUT_KEYS                                      ->  the JSON object the operator must answer with
 """
@@ -16,6 +21,11 @@ with open(os.path.join(_HERE, "operator_contract.json"), encoding="utf-8") as _f
 OPERATOR_SYSTEM = CONTRACT["operator_system"]
 JUDGE_SYSTEM = CONTRACT["judge_system"]
 REFERENCE_HEADER = CONTRACT["reference_header"]
+ENGAGEMENT_HEADER = CONTRACT["engagement_header"]
+ENGAGEMENT_MAX = 4000          # characters of engagement text in a prompt (the operator may have an 8k context)
+ENGAGEMENT_TAIL = 2000         # of those, kept for prohibited tools, protected data and rules when a long head is cut
+STATEMENT_MIN = 200            # characters a long scope statement keeps when the head is cut
+PROTECTED_MAX = 1000           # characters of the protected-data list in a prompt (the policy gate enforces all of it)
 OUTPUT_KEYS = ("command", "target", "rationale")
 
 # mirrors the JS neutralizer in build_workflow.js; both are checked against tests/fixtures/neutral_vectors.json
@@ -31,15 +41,76 @@ def neutral(text):
     return _RX_LABHOST.sub("<other-host>", text)
 
 
-def operator_user(task, target, references=""):
+def engagement_text(e):
+    """The engagement as both prompts show it (mirrors engagementText in deploy/n8n/build_workflow.js). Two parts share
+    ENGAGEMENT_MAX characters (a cut ends in " ..."): the head (name, scope statement, scope, exclusions, window), then
+    the tail (prohibited tools, the first PROTECTED_MAX characters of the protected data, rules), which holds what the
+    policy gate enforces. When both do not fit, the tail keeps at least min(its length, ENGAGEMENT_TAIL) characters, so
+    a long scope statement or long scope lists cannot push it out of both prompts: the head makes room, its scope
+    statement cut first (to no less than STATEMENT_MIN characters), then its end. The tail gets what is left and loses
+    its end, as the whole text did before. Text that fits, a long rules text after a short head and a text with only
+    one part read exactly as before."""
+    if not isinstance(e, dict):
+        return ""
+
+    def s(v):
+        return "" if v is None else str(v).strip()
+
+    def joined(v):
+        return ", ".join(s(x) for x in (v if isinstance(v, list) else []) if s(x))
+
+    def cap(v, n):
+        return v if len(v) <= n else v[:n] + " ..."
+
+    def lines(pairs):
+        return "\n".join(f"{label}: {value}" for label, value in pairs if value)
+    name, version, start, end = s(e.get("name")), s(e.get("version")), s(e.get("window_start")), s(e.get("window_end"))
+    when = f"{start or 'open'} to {end or 'open'}" if start or end else ""
+
+    def head(statement):
+        return lines((("ENGAGEMENT", name and name + (f" (version {version})" if version else "")), ("SCOPE STATEMENT", statement),
+                      ("IN SCOPE", joined(e.get("scope_in"))), ("OUT OF SCOPE", joined(e.get("scope_out"))), ("WINDOW", when)))
+    tail = lines((("PROHIBITED", joined(e.get("prohibited"))),
+                  ("PROTECTED DATA (do not read, download or copy)", cap(joined(e.get("protected_data")), PROTECTED_MAX)),
+                  ("RULES", s(e.get("roe")))))
+    statement = s(e.get("scope_statement"))
+    h = head(statement)
+    if not h or not tail or len(h) + 1 + len(tail) <= ENGAGEMENT_MAX:
+        return cap("\n".join(x for x in (h, tail) if x), ENGAGEMENT_MAX)
+    room = ENGAGEMENT_MAX - 1 - min(len(tail), ENGAGEMENT_TAIL)          # the most the head may take
+    if len(h) > room:
+        keep = max(STATEMENT_MIN, len(statement) - (len(h) - room) - 4)
+        if keep + 4 < len(statement):
+            h = head(statement[:keep] + " ...")
+        if len(h) > room:
+            h = h[:room - 4] + " ..."
+    return h + "\n" + cap(tail, ENGAGEMENT_MAX - 1 - len(h))
+
+
+def operator_user(task, target, references="", engagement=None):
     msg = f"TASK: {task}\nTARGET (authorized, in scope): {target}"
+    rules = engagement_text(engagement)
+    if rules:
+        msg += f"\n\n{ENGAGEMENT_HEADER}\n<<<\n{rules}\n>>>"
     if references:
         msg += f"\n\n{REFERENCE_HEADER}\n<<<\n{references}\n>>>"
     return msg
 
 
-def operator_messages(task, target, references=""):
-    return [{"role": "system", "content": OPERATOR_SYSTEM}, {"role": "user", "content": operator_user(task, target, references)}]
+def operator_messages(task, target, references="", engagement=None):
+    return [{"role": "system", "content": OPERATOR_SYSTEM},
+            {"role": "user", "content": operator_user(task, target, references, engagement)}]
+
+
+def judge_user(task, target, command, read_only, tier, engagement=None, allowlist=None):
+    """What the judge reads (its system prompt is JUDGE_SYSTEM): the scope (LAB_ALLOWLIST), the rules of engagement and
+    the vetted command, never the operator's free text."""
+    rules = engagement_text(engagement)
+    scope = ", ".join(s for s in (str(x if x is not None else "").strip() for x in (allowlist or [])) if s)
+    return (f"TASK: {task}\nTARGET: {target}" + (f"\nSCOPE (LAB_ALLOWLIST): {scope}" if scope else "")
+            + (f"\n{ENGAGEMENT_HEADER}\n<<<\n{rules}\n>>>" if rules else "")
+            + f"\nPROPOSED COMMAND (already passed the scope + denylist gate):\n{command}\nread-only: "
+            + ("true" if read_only else "false") + f"  tier: {tier or 'none'}")
 
 
 def operator_answer(command, target, rationale):

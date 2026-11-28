@@ -4,10 +4,17 @@
     basic_auth {
         {$CADDY_USER} {$CADDY_HASH}
     }
+    # knowledge uploads (step 4) send the file itself: up to the console's 50 MiB cap (MiB: "50MB" would be 50,000,000 bytes)
     request_body {
-        max_size 4MB
+        max_size 50MiB
     }
     reverse_proxy app:8787 {
+        # who asked, for the console's audit log and the engagement versions. header_up replaces whatever the client sent.
+        # Unlike in Kubernetes, the app also listens on the compose network, where the other containers of the stack
+        # reach it without this login: these headers are what came through Caddy, not proof
+        header_up X-Lab-User {http.auth.user.id}
+        header_up X-Lab-Peer {http.request.remote.host}
+        header_up X-Lab-Forwarded-For {http.request.header.X-Forwarded-For}
         flush_interval -1
         transport http {
             read_timeout 0

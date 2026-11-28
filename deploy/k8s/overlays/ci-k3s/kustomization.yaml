@@ -1,0 +1,16 @@
+# CI only (.github/workflows/k8s-e2e.yml, job k3s): the dev overlay as Rancher Desktop runs it, on k3s (k3d) with its
+# Traefik, local-path storage and built-in network policy controller, set up and checked by
+# deploy/k8s/tests/rancher-dev.ps1 exactly as on Windows. The one difference: the copilot's Ollama pulls only the
+# embedding model; the 5 GB judge would only slow CI down (copilot runs with every branch are tested on kind).
+# No secrets here: the script creates them, as it does on Rancher Desktop.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+configMapGenerator:
+  - name: ollama-models
+    namespace: lab-copilot
+    behavior: replace
+    literals: [OLLAMA_PULL=nomic-embed-text]
+generatorOptions:
+  disableNameSuffixHash: true

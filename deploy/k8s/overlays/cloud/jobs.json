@@ -1,0 +1,23 @@
+{
+  "_comment": "Generic GPU cloud: shared (RWX) workspace, so download / apply / deploy run on any CPU node and only GPU stages go to the GPU node pool. Most GPU clouds use the NVIDIA runtime by default (no runtimeClassName).",
+  "image": "ghcr.io/thrizzo/redteam-llm-lab:latest",
+  "imagePullPolicy": "IfNotPresent",
+  "imagePullSecrets": ["ghcr"],
+  "workspaceClaim": "workspace",
+  "ttlSecondsAfterFinished": 86400,
+  "env": {},
+  "classes": {
+    "light": { "resources": { "requests": { "cpu": "1", "memory": "4Gi" }, "limits": { "memory": "16Gi" } } },
+    "cpu": { "resources": { "requests": { "cpu": "8", "memory": "32Gi" }, "limits": { "memory": "128Gi" } } },
+    "gpu": {
+      "resources": { "requests": { "cpu": "16", "memory": "128Gi", "nvidia.com/gpu": 8 }, "limits": { "memory": "512Gi", "nvidia.com/gpu": 8 } },
+      "nodeSelector": { "redteam-llm-lab/gpu-node": "true" },
+      "tolerations": [
+        { "key": "redteam-llm-lab/gpu-node", "operator": "Exists", "effect": "NoSchedule" },
+        { "key": "nvidia.com/gpu", "operator": "Exists", "effect": "NoSchedule" }
+      ],
+      "activeDeadlineSeconds": 259200
+    }
+  },
+  "serving": { "mode": "vllm", "deployment": "glm-serve", "configmap": "glm-serve", "servedName": "glm-abl", "exclusiveGpu": true }
+}

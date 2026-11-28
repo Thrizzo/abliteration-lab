@@ -1,0 +1,31 @@
+# Login in front of the console, inside the console pod. The app listens on 127.0.0.1:8787 only, so every request,
+# from the Ingress, a port-forward or another pod, goes through this basic auth. User and bcrypt hash come from the
+# Secret "basic-auth" (keys: user, hash), the same hash format as CADDY_HASH in deploy/.env.
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:8080 {
+	basic_auth {
+		{$CADDY_USER} {$CADDY_HASH}
+	}
+	# the console's knowledge uploads take up to 50 MiB ("50MB" would be 50,000,000 bytes, less than that)
+	request_body {
+		max_size 50MiB
+	}
+	reverse_proxy 127.0.0.1:8787 {
+		# who asked, for the console's audit log (Kill / Isolate / Promote). header_up replaces whatever the client sent,
+		# and the app listens on 127.0.0.1 only, so nobody else can set these. Behind an Ingress the peer is the ingress
+		# controller; the X-Forwarded-For chain it sent is passed on as received (informative, not proof).
+		header_up X-Lab-User {http.auth.user.id}
+		header_up X-Lab-Peer {http.request.remote.host}
+		header_up X-Lab-Forwarded-For {http.request.header.X-Forwarded-For}
+		flush_interval -1
+		transport http {
+			read_timeout 0
+			write_timeout 0
+		}
+	}
+}

@@ -1,0 +1,21 @@
+# Generic GPU cloud (CoreWeave, Lambda, Nebius, a managed Kubernetes with an 8×H200 node pool, ...).
+#   kubectl apply -k deploy/k8s/overlays/cloud
+# Edit the values marked EDIT in patches.yaml first (RWX storage class, host name, ingress class).
+# Cost: Kill scales glm-serve to 0. With a GPU node pool that scales from zero, the autoscaler then removes the idle
+# GPU node, so Kill also stops the GPU bill. GPU stages (jobs.json, class gpu) bring the node back.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+components:
+  - ../../components/gpu-node
+patches:
+  - path: patches.yaml
+configMapGenerator:
+  - name: lab-jobs
+    namespace: lab
+    behavior: replace
+    files:
+      - jobs.json
+generatorOptions:
+  disableNameSuffixHash: true

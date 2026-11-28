@@ -1,0 +1,20 @@
+# Puts the model server on your 8-GPU node, and keeps everything else off it. Label and taint the node once:
+#   kubectl label node <gpu-node> redteam-llm-lab/gpu-node=true
+#   kubectl taint node <gpu-node> redteam-llm-lab/gpu-node=true:NoSchedule
+# Used by the onprem and cloud overlays. A second GPU node later (serve on one, measure/evaluate on the other) gets the
+# same label and taint; phase 2 decides which Job goes where.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target: { kind: Deployment, name: glm-serve }
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: glm-serve, namespace: lab }
+      spec:
+        template:
+          spec:
+            nodeSelector: { redteam-llm-lab/gpu-node: "true" }
+            tolerations:
+              - { key: redteam-llm-lab/gpu-node, operator: Exists, effect: NoSchedule }
+              - { key: nvidia.com/gpu, operator: Exists, effect: NoSchedule }

@@ -1,0 +1,47 @@
+# What the console's ServiceAccount may do, in the lab namespace only. Nothing cluster-wide, no exec, no secrets.
+#   run stages     create / follow / delete Jobs (from fixed templates in app/k8sjobs.py) and read their pod logs
+#   Promote        patch ConfigMap glm-serve (MODEL_PATH) and delete the glm-serve pod so it restarts with it
+#   Kill           delete networkpolicy glm-serve-allow, scale deploy/glm-serve to 0, delete its pod with grace 0
+#   Isolate        delete networkpolicy glm-serve-allow (default-deny stays: traffic stops, the model keeps running)
+#   Start          create networkpolicy glm-serve-allow, scale deploy/glm-serve to 1
+# Kubernetes cannot limit pod deletes, Job creation or network-policy creation by name: those three are namespace-wide.
+# That is why only lab workloads (console, its Jobs, glm-serve) run in lab.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: console, namespace: lab }
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, delete]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [glm-serve]
+    verbs: [get, patch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    resourceNames: [glm-serve]
+    verbs: [get, watch]
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    resourceNames: [glm-serve]
+    verbs: [get, patch, update]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    resourceNames: [glm-serve-allow]
+    verbs: [get, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: console, namespace: lab }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: console }
+subjects:
+  - { kind: ServiceAccount, name: console, namespace: lab }

@@ -1,5 +1,6 @@
 """Validation of the saved model: behaviour (refusals, KL on harmless prompts) and weights (only the intended
-tensors changed, direction removed). Mirrors the six checks of notebook cell 4.8."""
+tensors changed, direction removed, or with several layers their whole subspace). Mirrors the six checks of notebook
+cell 4.8."""
 import json
 import os
 import re
@@ -10,7 +11,7 @@ from safetensors import safe_open
 
 from .arch import classify, post_norm_name
 from .data import count_refusals
-from .edit import residual_component, expand_scale
+from .edit import basis, block_size, expand_scale, fold, residual_component, scale_candidates
 
 
 def _index(folder):
@@ -25,9 +26,12 @@ def _index(folder):
 
 def compare_weights(base_dir, abl_dir, direction, log=print, max_tensors=None, post_norm=False):
     """Streams both checkpoints (each file opened once) and reports which tensors differ and max |r.W'|.
-    For post-norm families the attention/MLP outputs are measured against the folded direction norm(g * r)."""
+    direction: one direction [d], or the directions of several layers [k, d]: then max |Q^T W'| for the orthonormal
+    basis Q the edit used (edit.basis). For post-norm families the attention/MLP outputs are measured against the folded
+    direction norm(g * r), or the folded basis (edit.fold)."""
     bi, ai = _index(base_dir), _index(abl_dir)
-    r = direction.float() / direction.float().norm()
+    Q = basis(direction, log)[0]
+    block = block_size(abl_dir)
     files = sorted(set(bi.values()) | set(ai.values()))
     handles = {f: safe_open(f, "pt").__enter__() for f in files}
     changed, max_rw, n = [], 0.0, 0
@@ -43,15 +47,14 @@ def compare_weights(base_dir, abl_dir, direction, log=print, max_tensors=None, p
             if kind in ("embed", "attn_out", "mlp_out") and ta.dim() >= 1:
                 Wf = ta.float()
                 if ta.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-                    sn = next((s for s in (k + "_scale_inv", k.replace(".weight", ".weight_scale_inv")) if s in ai), None)
+                    sn = next((s for s in scale_candidates(k) if s in ai), None)
                     if sn:
-                        Wf = Wf * expand_scale(handles[ai[sn]].get_tensor(sn), ta.shape)
-                rr = r
+                        Wf = Wf * expand_scale(handles[ai[sn]].get_tensor(sn), ta.shape, block)
+                rr = Q
                 if post_norm and kind != "embed":
                     pn = post_norm_name(k, kind)
                     if pn and pn in ai:
-                        g = handles[ai[pn]].get_tensor(pn).float()
-                        rr = g * r; rr = rr / rr.norm()
+                        rr = fold(Q, handles[ai[pn]].get_tensor(pn).float(), log)
                 max_rw = max(max_rw, residual_component(Wf, rr, kind))
             n += 1
             if max_tensors and n >= max_tensors:
@@ -60,7 +63,7 @@ def compare_weights(base_dir, abl_dir, direction, log=print, max_tensors=None, p
         for h in handles.values():
             h.__exit__(None, None, None)
     kinds = sorted({re.sub(r"layers\.\d+\.", "layers.*.", re.sub(r"experts\.\d+\.", "experts.*.", k)) for k in changed})
-    return {"changed": changed, "n_changed": len(changed), "kinds": kinds, "max_rw": max_rw}
+    return {"changed": changed, "n_changed": len(changed), "kinds": kinds, "max_rw": max_rw, "k": Q.shape[1]}
 
 
 def behaviour_checks(base, abl, n, post_norm=False):
@@ -81,9 +84,17 @@ def weight_checks(cmp, expected, post_norm=False):
     unexpected = [k for k in cmp["changed"] if k not in exp_set and not k.endswith(("_scale_inv", "_scale"))]
     missing = [k for k in expected if k not in set(cmp["changed"])]
     tol = 5e-2
+    k = cmp.get("k", 1)
+    if k == 1:
+        removed = ("Direction removed from saved weights", f"max |r·W| = {cmp['max_rw']:.1e}",
+                   "the saved matrices can no longer write the refusal direction (bf16 rounding ~1e-3)"
+                   + (" - measured on the folded direction for post-norm blocks" if post_norm else ""))
+    else:
+        removed = (f"{k} directions removed from saved weights", f"max |Qᵀ·W| = {cmp['max_rw']:.1e}",
+                   f"the saved matrices can no longer write any direction of the {k}-dimensional refusal subspace (bf16 rounding ~1e-3)"
+                   + (" - measured on the folded basis for post-norm blocks" if post_norm else ""))
     return [
         ("Only intended weights changed", f"{cmp['n_changed']} tensors; unexpected {len(unexpected)}, untouched targets {len(missing)}",
          "PASS" if not unexpected and not missing else "FAIL", "embedding + every attention output + every MLP/expert output, nothing else"),
-        ("Direction removed from saved weights", f"max |r·W| = {cmp['max_rw']:.1e}", "PASS" if cmp["max_rw"] < tol else "FAIL",
-         "the saved matrices can no longer write the refusal direction (bf16 rounding ~1e-3)" + (" - measured on the folded direction for post-norm blocks" if post_norm else "")),
+        (removed[0], removed[1], "PASS" if cmp["max_rw"] < tol else "FAIL", removed[2]),
     ]

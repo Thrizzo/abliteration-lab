@@ -8,4 +8,6 @@ Method (Arditi et al. 2024): measure the mean residual-stream difference between
 prompts per layer, scan which layer's direction best removes refusals when projected out at inference
 time, then project that direction out of every weight matrix that writes into the residual stream
 (token embedding, attention output projection, every MLP output projection incl. MoE experts).
+With --layers (or --combine in the scan) the directions of several layers are removed together: the subspace
+they span, through an orthonormal basis (edit.basis).
 """

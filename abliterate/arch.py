@@ -14,15 +14,15 @@ RX_LAYER = re.compile(r"\.layers\.(\d+)\.")
 EXCLUDE = re.compile(r"(^|\.)(visual|vision|vision_tower|vision_model|audio|image_encoder|indexer|gate\.|router)")
 
 FAMILY = {
-    "glm": {"name": "GLM-Edge", "post_norm": False, "moe": False},
-    "glm4": {"name": "GLM-4 (0414 / 9B-hf)", "post_norm": True, "moe": False},
+    "glm": {"name": "GLM-Edge / glm-4-9b-chat-hf", "post_norm": False, "moe": False},
+    "glm4": {"name": "GLM-4 (0414)", "post_norm": True, "moe": False},
     "glm4v": {"name": "GLM-4.1V / 4V (text decoder)", "post_norm": True, "moe": False, "text_config": True},
     "glm46v": {"name": "GLM-4.6V (text decoder)", "post_norm": False, "moe": True, "text_config": True},
     "glm4_moe": {"name": "GLM-4.5 / 4.6 MoE", "post_norm": False, "moe": True},
     "glm4_moe_lite": {"name": "GLM-4.x MoE Lite", "post_norm": False, "moe": True},
     "glm4v_moe": {"name": "GLM-4.5V (text decoder)", "post_norm": False, "moe": True, "text_config": True},
     "glm_moe_dsa": {"name": "GLM-5 / 5.1 / 5.2 / 5.3 (MoE + DSA)", "post_norm": False, "moe": True},
-    "glm5_next": {"name": "GLM-5-Next (hybrid linear / indexed attention, MoE)", "post_norm": False, "moe": True, "text_config": True},
+    "glm5_next": {"name": "GLM-5.3-Flash / GLM-5-Next (hybrid linear + DSA attention, MoE, mHC streams, vision)", "post_norm": False, "moe": True, "text_config": True},
     "chatglm": {"name": "ChatGLM (legacy remote code: ChatGLM2/3, glm-4-9b-chat)", "post_norm": False, "moe": False, "remote_code": True},
 }
 
@@ -103,12 +103,23 @@ def inspect(model_dir):
             notes.append("DSA indexer modules do not write into the residual stream and are left untouched")
         if mt == "glm5_next":
             notes.append("hybrid: linear-attention layers also write through an o_proj and are edited")
+            if text.get("hc_mult"):
+                notes.append(f"mHC: {text.get('hc_mult')} residual streams per token. Block outputs enter them scaled per stream and "
+                             "the streams only mix with each other, so editing the writing projections keeps every stream free of "
+                             "the direction; the hooks measure the streams' mean (the model's readout) and ablate in each")
+            notes.append("the vision encoder is not edited: text prompts are fully covered; image tokens keep their own component "
+                         "along the direction, which the edited layers cannot write further")
         if q:
             fmt = q.get("fmt") or q.get("quant_method")
             notes.append(f"quantized checkpoint ({fmt}, block {q.get('weight_block_size')}): FP8 block-scaled tensors are dequantized, edited and requantized per block")
             if level == "exact":
                 level = "requantized"
-        if needs_remote:
+        if fam is FAMILY["chatglm"]:
+            level = "unsupported"
+            notes.append("legacy ChatGLM code (ChatGLM2/3, glm-4-9b-chat) does not load with transformers 5: its model class "
+                         "reads config.max_length, which transformers 5 no longer keeps in the config. The -hf checkpoint of "
+                         "the same model (THUDM/glm-4-9b-chat-hf, model_type glm: pre-norm, an exact edit) works")
+        elif needs_remote:
             notes.append("legacy remote-code checkpoint: loading needs --trust-remote-code (the .py files in the folder run)")
     params_b = round(size_bytes / (1 if q else 2) / 1e9, 1) if size_bytes else None
     return {
@@ -118,6 +129,7 @@ def inspect(model_dir):
         "quantization": q or None, "params_b": params_b, "size_gb": round(size_bytes / 1e9, 1) if size_bytes else None,
         "tensor_kinds": tensor_kinds, "code_files": code_files, "needs_remote_code": needs_remote,
         "text_config_nested": "text_config" in cfg, "support": level, "notes": notes,
+        "mhc_streams": text.get("hc_mult"),
         "fits_16gb_bf16": (size_bytes or 0) <= 15e9 and not q,
     }
 

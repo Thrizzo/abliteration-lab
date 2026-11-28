@@ -1,13 +1,17 @@
-"""The permanent edit: W' = W - r r^T W for every matrix that writes into the residual stream, applied
-shard by shard on the safetensors files (never loads the whole model). Handles:
+"""The permanent edit: W' = W - Q Q^T W for every matrix that writes into the residual stream, applied
+shard by shard on the safetensors files (never loads the whole model). Q is an orthonormal basis of what is removed:
+one layer's unit direction r (W' = W - r r^T W), or the subspace spanned by the directions of several layers (basis).
+Handles:
 - token embedding rows, attention output projections, every MLP output projection
   (dense MLP, per-expert tensors `experts.E.down_proj`, fused `experts.down_proj` [E, d, f], `w2_weight`)
 - biases on those projections
-- post-norm blocks (GLM-4 / 4V): the direction is folded through the RMSNorm weight g -> r~ = norm(g * r)
+- post-norm blocks (GLM-4 / 4V): the direction is folded through the RMSNorm weight g -> r~ = norm(g * r);
+  with several directions every basis vector is folded and the result orthonormalized again (fold)
 - FP8 block-scaled weights (`weight_scale_inv`, DeepSeek-style): dequantize per block, edit, requantize
 """
 import glob
 import json
+import math
 import os
 import shutil
 import time
@@ -20,45 +24,162 @@ from .arch import classify, post_norm_name
 
 FP8_MAX = 448.0
 KEEP_FILES = (".json", ".jinja", ".txt", ".model", ".tiktoken", ".md")
+DEPENDENT = 1e-3            # basis: a direction whose part outside the others' span is shorter than this (relative) is dropped
 
 
-def orth_rows(Wf, r):              # [V, d]: each row is a residual-space vector
-    return Wf - torch.outer(Wf @ r, r)
+def basis(directions, log=print, names=None):
+    """The orthonormal basis Q [d, k] that the edit and the ablation remove, from one unit direction [d] or from the unit
+    directions of several layers [k, d] (one per row). Returns (Q in float32, the indices of the directions kept).
+    One direction: r / |r| in float32, as the single-layer edit always computed it, so one layer gives exactly the old
+    edit and ablation. Several: QR in float64 of the matrix whose columns are the directions. Q spans the same subspace,
+    but its columns are orthogonal: removing non-orthogonal directions one after the other would put back part of the
+    ones removed before. A direction that is (nearly) a combination of the others (|R_ii| < 1e-3 max |R_jj|) adds only
+    rounding noise: it is dropped with a log line and the QR repeated without it. names: what the log calls each one."""
+    D = torch.as_tensor(directions).detach().to("cpu")
+    if D.dim() == 1 or D.shape[0] == 1:
+        r = D.reshape(-1).float()
+        return (r / r.norm())[:, None], [0]
+    X = D.double()
+    X = X / X.norm(dim=-1, keepdim=True).clamp_min(1e-300)
+    keep = list(range(X.shape[0]))
+    while True:
+        Q, R = torch.linalg.qr(X[keep].T)
+        diag = R.diagonal().abs()
+        weak = [i for i in range(len(diag)) if diag[i] < DEPENDENT * diag.max()]
+        if not weak:
+            return Q.float(), keep
+        i = weak[0]
+        log(f"basis: {names[keep[i]] if names else f'direction {keep[i]}'} is (nearly) a combination of the others "
+            f"(|R_ii| = {float(diag[i]):.1e}): dropped, {len(keep) - 1} directions left")
+        keep.pop(i)
 
 
-def orth_out(Wf, r):               # [d, in] or [E, d, in]: the output dimension is the residual space
+def fold(Q, g, log=print):
+    """For a post-norm block (its projection's output y goes through RMSNorm with weight g, then into the residual
+    stream): the basis that y must lose so that the block's output has no component in span(Q).
+    For any vector q: q . (g * y / rms(y)) = (g * q) . y / rms(y). The output is therefore free of every q in span(Q)
+    exactly when y is orthogonal to g * q for every q in span(Q), that is to the span of g * q_1 ... g * q_k. Folding
+    every basis vector and orthonormalizing again (the folded vectors are no longer orthonormal) gives a basis of
+    exactly that span, so this is the exact generalisation of one direction's r~ = normalize(g * r); for k = 1 it is
+    computed as before. What the edit cannot keep is the rest of the output: rms(y) changes, so the remaining components
+    are scaled per token."""
+    if Q.shape[1] == 1:
+        rt = g * Q[:, 0]
+        return (rt / rt.norm())[:, None]
+    return basis((g.double()[:, None] * Q.double()).T, log)[0]
+
+
+def _vec(Q):
+    """The unit vector r of a one-column basis (or of a plain vector): the k = 1 formulas are the single-direction ones."""
+    return Q.reshape(-1) if Q.dim() == 1 or Q.shape[1] == 1 else None
+
+
+def orth_rows(Wf, Q):              # [V, d]: each row is a residual-space vector
+    """W - (W Q) Q^T: every row loses its component in span(Q). Q: [d, k] with orthonormal columns, or a unit vector."""
+    r = _vec(Q)
+    if r is not None:
+        return Wf - torch.outer(Wf @ r, r)
+    return Wf - (Wf @ Q) @ Q.T
+
+
+def orth_out(Wf, Q):               # [d, in] or [E, d, in]: the output dimension is the residual space
+    """W - Q (Q^T W): no output of W keeps a component in span(Q); [E, d, in] per expert."""
+    r = _vec(Q)
+    if r is not None:
+        if Wf.dim() == 3:
+            return Wf - r[None, :, None] * torch.einsum("d,edi->ei", r, Wf)[:, None, :]
+        return Wf - torch.outer(r, r @ Wf)
     if Wf.dim() == 3:
-        return Wf - r[None, :, None] * torch.einsum("d,edi->ei", r, Wf)[:, None, :]
-    return Wf - torch.outer(r, r @ Wf)
+        return Wf - torch.einsum("dk,eki->edi", Q, torch.einsum("dk,edi->eki", Q, Wf))
+    return Wf - Q @ (Q.T @ Wf)
 
 
-def residual_component(Wf, r, kind):
-    """max |r . W| after the edit (should be ~0 up to rounding)."""
-    if kind == "embed":
-        return (Wf @ r).abs().max().item()
+def orth_vec(b, Q):                # a bias [d] of an output projection
+    """b - Q (Q^T b)."""
+    r = _vec(Q)
+    if r is not None:
+        return b - (b @ r) * r
+    return b - Q @ (Q.T @ b)
+
+
+def residual_component(Wf, Q, kind):
+    """max |Q^T W| after the edit (should be ~0 up to rounding): the largest component that a row (embedding), an output
+    column or a bias keeps along any basis vector. k = 1: max |r . W|."""
+    r = _vec(Q)
+    if r is not None:
+        if kind == "embed":
+            return (Wf @ r).abs().max().item()
+        if Wf.dim() == 3:
+            return torch.einsum("d,edi->ei", r, Wf).abs().max().item()
+        if Wf.dim() == 1:
+            return abs(float(Wf @ r))
+        return (r @ Wf).abs().max().item()
+    if kind == "embed" or Wf.dim() == 1:
+        return (Wf @ Q).abs().max().item()
     if Wf.dim() == 3:
-        return torch.einsum("d,edi->ei", r, Wf).abs().max().item()
-    if Wf.dim() == 1:
-        return abs(float(Wf @ r))
-    return (r @ Wf).abs().max().item()
+        return torch.einsum("dk,edi->eki", Q, Wf).abs().max().item()
+    return (Q.T @ Wf).abs().max().item()
 
 
-def expand_scale(scale, shape):
-    """Broadcast a block/row/tensor scale to the weight's shape (block size inferred per dim)."""
+def block_size(model_dir):
+    """The FP8 block size (rows, cols) a checkpoint declares in quantization_config.weight_block_size: 128 x 128 in the
+    GLM-5.x and DeepSeek FP8 checkpoints, and (128, 128) when it declares none."""
+    try:
+        with open(os.path.join(model_dir, "config.json"), encoding="utf-8") as f:
+            cfg = json.load(f)
+    except (OSError, ValueError):
+        return (128, 128)
+    q = cfg.get("quantization_config") or (cfg.get("text_config") or {}).get("quantization_config") or {}
+    b = q.get("weight_block_size")
+    return tuple(int(x) for x in b[-2:]) if isinstance(b, (list, tuple)) and len(b) >= 2 else (128, 128)
+
+
+def _block(n, s, block):
+    """The length of one block when a scale grid has s entries along a dimension of n: the declared block size when
+    s = ceil(n / block), which counts a last, partial block (n = 300 has blocks of 128, 128 and 44); else ceil(n / s).
+    Inferring ceil(n / s) alone gives 100 for n = 300, s = 3: blocks a loader does not use."""
+    if s == n:
+        return 1
+    return block if block and -(-n // block) == s else -(-n // s)
+
+
+def _blocks_of(shape, block):
+    """The block size for each dim of a weight: block (rows, cols) for its last two dims, none for a leading dim (experts)."""
+    pair = (block, block) if block is None or isinstance(block, int) else tuple(block)
+    lead = len(shape) - 2
+    return [pair[d - lead] if d >= lead else None for d in range(len(shape))]
+
+
+def scale_candidates(name):
+    """The names a weight's FP8 scale goes by: <name>_scale_inv or .weight_scale_inv (GLM-5.x, DeepSeek), <name>_scale or
+    .weight_scale (compressed-tensors). The editor and the validation look them up the same way."""
+    return [s for s in (name + "_scale_inv", name.replace(".weight", ".weight_scale_inv"), name + "_scale", name.replace(".weight", ".weight_scale"))
+            if s != name]
+
+
+def expand_scale(scale, shape, block=(128, 128)):
+    """Broadcast a block/row/tensor scale to the weight's shape. block: the checkpoint's block size (block_size).
+    One scale for the whole tensor may be stored as (), (1,) or (1, 1)."""
     s = scale.float()
-    if s.dim() == 0:
-        return s.expand(shape)
+    if s.numel() == 1:
+        return s.reshape(()).expand(shape)
+    blocks = _blocks_of(shape, block)
     for dim in range(s.dim()):
         if s.shape[dim] != shape[dim]:
-            rep = -(-shape[dim] // s.shape[dim])
+            rep = _block(shape[dim], s.shape[dim], blocks[dim])
             s = s.repeat_interleave(rep, dim=dim).narrow(dim, 0, shape[dim])
     return s
 
 
-def requantize(Wf, scale_shape):
+def requantize(Wf, scale_shape, block=(128, 128)):
     """Per-block absmax requantization to float8_e4m3fn with the same scale layout as before."""
     shape = Wf.shape
-    blocks = [-(-shape[i] // scale_shape[i]) if i < len(scale_shape) and scale_shape[i] > 0 else shape[i] for i in range(len(shape))]
+    if math.prod(scale_shape) == 1:               # one scale for the whole tensor, kept in its stored shape
+        scale = (Wf.abs().amax() / FP8_MAX).clamp_min(1e-12)
+        q = (Wf / scale).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+        return q, scale.reshape(scale_shape)
+    per_dim = _blocks_of(shape, block)
+    blocks = [_block(shape[i], scale_shape[i], per_dim[i]) if i < len(scale_shape) and scale_shape[i] > 0 else shape[i] for i in range(len(shape))]
     # pad to block multiples, reshape into blocks, absmax per block
     pad = [b * s - n for n, b, s in zip(shape, blocks, scale_shape)]
     Wp = torch.nn.functional.pad(Wf, [v for p in reversed(pad) for v in (0, p)])
@@ -69,16 +190,18 @@ def requantize(Wf, scale_shape):
         v = Wp.reshape(scale_shape[0], blocks[0], scale_shape[1], blocks[1], scale_shape[2], blocks[2])
         amax = v.abs().amax(dim=(1, 3, 5))
     scale = (amax / FP8_MAX).clamp_min(1e-12)
-    q = (Wf / expand_scale(scale, shape)).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
+    q = (Wf / expand_scale(scale, shape, block)).clamp(-FP8_MAX, FP8_MAX).to(torch.float8_e4m3fn)
     return q, scale
 
 
 class Editor:
-    def __init__(self, src_dir, dst_dir, direction, post_norm=False, log=print, progress=None):
+    def __init__(self, src_dir, dst_dir, direction, post_norm=False, log=print, progress=None, names=None):
+        """direction: one unit direction [d], or the unit directions of several layers [k, d]. The editor builds the
+        orthonormal basis Q [d, k] itself (basis; names label the directions in its log); kept: the rows it used."""
         self.src, self.dst, self.log, self.progress = src_dir, dst_dir, log, progress
-        self.r = direction.float().cpu()
-        self.r = self.r / self.r.norm()
+        self.Q, self.kept = basis(direction, log, names)
         self.post_norm = post_norm
+        self.block = block_size(src_dir)          # FP8: the block the scales cover (128 x 128)
         idx_path = os.path.join(src_dir, "model.safetensors.index.json")
         if os.path.isfile(idx_path):
             self.index = json.load(open(idx_path, encoding="utf-8"))
@@ -88,7 +211,7 @@ class Editor:
             self.weight_map = None
         self.shards = sorted(set(self.weight_map.values())) if self.weight_map else ["model.safetensors"]
         self._norm_cache = {}
-        self.stats = {"changed": [], "max_rw": 0.0, "kinds": {}, "fp8": 0, "bias": 0, "folded": 0}
+        self.stats = {"changed": [], "max_rw": 0.0, "kinds": {}, "fp8": 0, "bias": 0, "folded": 0, "directions": self.Q.shape[1]}
 
     # -------------------------------------------------------------- helpers
     def _tensor(self, name):
@@ -96,44 +219,64 @@ class Editor:
         with safe_open(os.path.join(self.src, shard), "pt") as f:
             return f.get_tensor(name)
 
-    def _direction_for(self, name, kind):
-        """r, or the post-norm-folded r~ for attn/mlp outputs in post-norm families."""
+    def _basis_for(self, name, kind):
+        """Q, or the post-norm-folded basis (fold; one direction: r~) for attn/mlp outputs in post-norm families."""
         if kind == "embed" or not self.post_norm:
-            return self.r
+            return self.Q
         pn = post_norm_name(name, kind)
         if pn is None or (self.weight_map is not None and pn not in self.weight_map):
-            return self.r
+            return self.Q
         if pn not in self._norm_cache:
-            g = self._tensor(pn).float()
-            rt = g * self.r
-            self._norm_cache[pn] = rt / rt.norm()
+            self._norm_cache[pn] = fold(self.Q, self._tensor(pn).float(), self.log)
             self.stats["folded"] += 1
         return self._norm_cache[pn]
 
     def _edit(self, name, W, kind, scale=None):
-        r = self._direction_for(name, kind)
+        Q = self._basis_for(name, kind)
         if W.dtype == torch.float8_e4m3fn or W.dtype == torch.float8_e5m2:
             if scale is None:
                 raise RuntimeError(f"{name}: fp8 tensor without a scale tensor")
-            Wf = W.float() * expand_scale(scale, W.shape)
-            Wf = orth_rows(Wf, r) if kind == "embed" else orth_out(Wf, r)
-            q, new_scale = requantize(Wf, tuple(scale.shape))
+            Wf = W.float() * expand_scale(scale, W.shape, self.block)
+            Wf = orth_rows(Wf, Q) if kind == "embed" else orth_out(Wf, Q)
+            q, new_scale = requantize(Wf, tuple(scale.shape), self.block)
             self.stats["fp8"] += 1
-            check = residual_component(q.float() * expand_scale(new_scale, W.shape), r, kind)
+            check = residual_component(q.float() * expand_scale(new_scale, W.shape, self.block), Q, kind)
             return q, new_scale.to(scale.dtype), check
         Wf = W.float()
         if W.dim() == 1:                       # bias
-            out = Wf - (Wf @ r) * r
+            out = orth_vec(Wf, Q)
             self.stats["bias"] += 1
         else:
-            out = orth_rows(Wf, r) if kind == "embed" else orth_out(Wf, r)
+            out = orth_rows(Wf, Q) if kind == "embed" else orth_out(Wf, Q)
         out = out.to(W.dtype)
-        return out, None, residual_component(out.float(), r, kind)
+        return out, None, residual_component(out.float(), Q, kind)
+
+    def _scale_name(self, k, keys=()):
+        """The scale tensor of weight k: in this shard (keys) or, with an index, in any shard; None when it has none."""
+        return next((s for s in scale_candidates(k) if s in keys or (self.weight_map and s in self.weight_map)), None)
+
+    def _edit_cross_shard(self):
+        """FP8 weights whose scale lives in another shard (none in the GLM-5.x checkpoints, which keep each pair in one
+        shard) are edited before any shard is written: the new scale then goes into the shard the index names for it,
+        and no tensor ends up in two shards with the index pointing at the old scale."""
+        early, new_scales = {}, {}
+        for k, shard in (self.weight_map or {}).items():
+            kind = classify(k)
+            sn = self._scale_name(k) if kind in ("embed", "attn_out", "mlp_out") else None
+            if not sn or self.weight_map[sn] == shard:
+                continue
+            W = self._tensor(k)
+            if W.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+                continue
+            out, new_scale, check = self._edit(k, W, kind, self._tensor(sn))
+            early[k], new_scales[sn] = (out, check), new_scale
+        return early, new_scales
 
     # -------------------------------------------------------------- run
     def run(self):
         os.makedirs(self.dst, exist_ok=True)
         t0 = time.time()
+        early, new_scales = self._edit_cross_shard()
         for si, shard in enumerate(self.shards):
             t = time.time()
             tensors, scales_done = {}, set()
@@ -144,16 +287,21 @@ class Editor:
                     if k in tensors:
                         continue
                     kind = classify(k)
-                    if kind in ("embed", "attn_out", "mlp_out"):
-                        W = f.get_tensor(k)
-                        scale_name = next((s for s in (k + "_scale_inv", k.replace(".weight", ".weight_scale_inv"), k + "_scale", k.replace(".weight", ".weight_scale"))
-                                           if s != k and (s in keys or (self.weight_map and s in self.weight_map))), None)
-                        scale = (f.get_tensor(scale_name) if scale_name in keys else self._tensor(scale_name)) if scale_name else None
-                        out, new_scale, check = self._edit(k, W, kind, scale)
-                        tensors[k] = out.contiguous()
-                        if new_scale is not None:
-                            tensors[scale_name] = new_scale.contiguous()
-                            scales_done.add(scale_name)
+                    if k in new_scales:                # the scale of an FP8 weight in another shard, edited up front
+                        tensors[k] = new_scales[k].contiguous()
+                    elif kind in ("embed", "attn_out", "mlp_out"):
+                        if k in early:
+                            out, check = early.pop(k)
+                            tensors[k] = out.contiguous()
+                        else:
+                            W = f.get_tensor(k)
+                            scale_name = self._scale_name(k, keys)
+                            scale = (f.get_tensor(scale_name) if scale_name in keys else self._tensor(scale_name)) if scale_name else None
+                            out, new_scale, check = self._edit(k, W, kind, scale)
+                            tensors[k] = out.contiguous()
+                            if new_scale is not None:
+                                tensors[scale_name] = new_scale.contiguous()
+                                scales_done.add(scale_name)
                         self.stats["changed"].append(k)
                         self.stats["kinds"][kind] = self.stats["kinds"].get(kind, 0) + 1
                         self.stats["max_rw"] = max(self.stats["max_rw"], check)
@@ -176,8 +324,11 @@ class Editor:
                 shutil.copyfile(p, os.path.join(self.dst, fn))
         self.stats["seconds"] = round(time.time() - t0)
         self.stats["n_changed"] = len(self.stats["changed"])
+        k = self.Q.shape[1]
         self.log(f"edit: {self.stats['n_changed']} tensors changed {self.stats['kinds']}, fp8 {self.stats['fp8']}, "
-                 f"folded through post-norm {self.stats['folded']}, max |r.W'| = {self.stats['max_rw']:.2e}, {self.stats['seconds']}s")
+                 f"folded through post-norm {self.stats['folded']}, "
+                 + (f"max |r.W'| = {self.stats['max_rw']:.2e}" if k == 1 else f"{k} directions, max |Q^T W'| = {self.stats['max_rw']:.2e}")
+                 + f", {self.stats['seconds']}s")
         return self.stats
 
 

@@ -1,0 +1,71 @@
+# Phase 0: the whole stack on a small cluster without GPUs (Rancher Desktop's k3s, kind, a spare VM).
+#   kubectl apply -k deploy/k8s/overlays/dev
+# Same namespaces, policies, RBAC and Kill / Isolate path as the GPU overlays; only the model server differs: glm-serve
+# runs Ollama (CPU) instead of vLLM, and Promote publishes a run's GGUF there as "glm-abl". Clients still use
+# glm-serve.lab.svc:8000; Ollama's OpenAI-compatible API under /v1 is what n8n's operator calls (connect_console.py).
+# On Rancher Desktop (Windows), deploy/k8s/tests/rancher-dev.ps1 sets this overlay up and checks it.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - path: sizes.yaml
+  - target: { kind: Deployment, name: glm-serve }
+    path: glm-serve-ollama.yaml
+  # the lab app's Compare stage and the deploy stage talk to OLLAMA_HOST: in dev that is glm-serve.
+  # IfNotPresent: on Rancher Desktop with the dockerd engine, Kubernetes uses the image `docker compose ... --build`
+  # already built locally (same tag), so no GHCR pull secret is needed.
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata: { name: console, namespace: lab }
+      spec:
+        template:
+          spec:
+            containers:
+              - name: app
+                imagePullPolicy: IfNotPresent
+                env:
+                  - { name: OLLAMA_HOST, value: "http://glm-serve.lab.svc:8000" }
+  # Browsers resolve *.localhost to this machine, and Rancher Desktop serves Traefik on localhost:80: http://lab.localhost
+  - target: { kind: Ingress, name: console }
+    patch: |-
+      - op: replace
+        path: /spec/rules/0/host
+        value: lab.localhost
+  # Rancher Desktop NATs 192.168.127.254 to this machine's 127.0.0.1, for every port. The base's openings to the internet
+  # (0.0.0.0/0: the console on 443 and 6443, download Jobs and the copilot's Ollama on 443) leave that address out, so
+  # these pods do not reach services on the host's localhost through it; components/host-ollama opens one port there,
+  # to the console and n8n only. Each patch first checks that it edits the 0.0.0.0/0 rule it means.
+  - target: { kind: NetworkPolicy, name: console, namespace: lab }
+    patch: |-
+      - op: test
+        path: /spec/egress/4/to/0/ipBlock/cidr
+        value: 0.0.0.0/0
+      - op: add
+        path: /spec/egress/4/to/0/ipBlock/except
+        value: [192.168.127.254/32]
+  - target: { kind: NetworkPolicy, name: jobs-internet, namespace: lab }
+    patch: |-
+      - op: test
+        path: /spec/egress/0/to/0/ipBlock/cidr
+        value: 0.0.0.0/0
+      - op: add
+        path: /spec/egress/0/to/0/ipBlock/except
+        value: [192.168.127.254/32]
+  - target: { kind: NetworkPolicy, name: ollama, namespace: lab-copilot }
+    patch: |-
+      - op: test
+        path: /spec/egress/0/to/0/ipBlock/cidr
+        value: 0.0.0.0/0
+      - op: add
+        path: /spec/egress/0/to/0/ipBlock/except
+        value: [192.168.127.254/32]
+configMapGenerator:
+  - name: lab-jobs
+    namespace: lab
+    behavior: replace
+    files:
+      - jobs.json
+generatorOptions:
+  disableNameSuffixHash: true

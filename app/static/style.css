@@ -11,6 +11,9 @@
   --mono:"JetBrains Mono","Cascadia Code",Consolas,ui-monospace,monospace;
   --sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;
   --r:14px;
+  /* where the header ends (its height, until the page scrolls it away), kept current by app.js: panels, the log drawer
+     and the run box start below it */
+  --head-h:58px;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;background:var(--page);color:var(--ink);font:14px/1.55 var(--sans)}
@@ -125,8 +128,10 @@ svg{display:block;max-width:100%}
 .stage{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;cursor:pointer;transition:.15s}
 .stage:hover{border-color:rgba(94,234,212,.4)}
 .stage.sel{border-color:var(--accent);box-shadow:var(--glow)}
-.stage b{display:block;font-family:var(--mono);font-size:12px;color:var(--accent)}
-.stage span{font-size:11.5px;color:var(--ink2)}
+/* the old shell's stage chips: these two also reach the wizard's steps, but not tab 4, whose cards keep the copilot's own look
+   (white badge text, labels); :where() keeps their weight as it was for steps 1-3 */
+.stage:where(:not(#s-pentest)) b{display:block;font-family:var(--mono);font-size:12px;color:var(--accent)}
+.stage:where(:not(#s-pentest)) span{font-size:11.5px;color:var(--ink2)}
 .hero{position:relative;overflow:hidden;padding:0}
 .hero .inner{display:grid;grid-template-columns:1.3fr 1fr;gap:0}
 .hero .text{padding:22px 24px}
@@ -157,14 +162,20 @@ svg{display:block;max-width:100%}
 .gtext p b{color:var(--ink)}
 .glive{margin:10px 0}
 .gstep details{margin:6px 0 0}.gstep details p{margin:6px 0 0;max-width:100ch;line-height:1.6}
-.gstep code{font-size:12px}
+/* code without spaces (the from_pretrained(...) call under Load the model) breaks instead of widening the step on a phone */
+.gstep code{font-size:12px;overflow-wrap:anywhere}
 .kv .mono{word-break:break-all}
 
 /* ---------------- wizard layout (Model -> Abliterate -> Compare) */
 body.wiz{display:block;overflow:auto}
+/* scrolling to an element (the keyboard's focus going up through tab 4, scrollIntoView) stops below the header while the
+   header is on screen, instead of under it */
+html{scroll-padding-top:var(--head-h)}
 .wizhead{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:28px;padding:10px 28px;background:rgba(10,13,20,.9);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
 .wizhead .brand{padding:0}
-.stages{list-style:none;display:flex;gap:6px;margin:0;padding:0;flex:1}
+/* the steps' full one-row width decides where the header breaks its rows (flex-basis auto); only when even a row of their
+   own is too narrow (a phone, four steps once the copilot is connected) do they wrap instead of scrolling the page sideways */
+.stages{list-style:none;display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;flex:1 1 auto}
 .stages li{display:flex;align-items:center;gap:10px;padding:6px 14px;border-radius:999px;cursor:pointer;color:var(--muted);border:1px solid transparent}
 .stages li b{display:block;font-size:13px;color:var(--ink2)}
 .stages li small{display:block;font-size:11px;color:var(--muted);max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -173,6 +184,7 @@ body.wiz{display:block;overflow:auto}
 .stages li.active b{color:var(--accent)}.stages li.active .n{background:var(--accent);color:var(--accent-ink)}
 .stages li.done .n{background:var(--s3);color:#fff}
 .stages li.locked{opacity:.5;cursor:default}
+.stages li:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .sysmini{display:flex;gap:14px;align-items:center;font-size:12px;color:var(--ink2)}
 .sysmini>span{display:flex;align-items:center;gap:6px}
 .wizmain{max-width:1120px;margin:0 auto;padding:26px 28px 80px}
@@ -190,15 +202,19 @@ body.wiz{display:block;overflow:auto}
 .mcard .fam{font-size:12px;color:var(--accent);margin:2px 0 6px}
 .mcard .meta{font-size:11.5px;color:var(--muted);line-height:1.5}
 .mcard .tags{margin-top:8px;display:flex;gap:4px;flex-wrap:wrap}
-.runbox{position:sticky;top:64px;z-index:4}
-.drawer{position:fixed;right:0;top:58px;bottom:0;width:min(560px,90vw);background:var(--surface);border-left:1px solid var(--border);padding:14px 16px;transform:translateX(100%);transition:.25s;z-index:6;overflow:auto;box-shadow:-20px 0 40px rgba(0,0,0,.4)}
+.runbox{position:sticky;top:calc(var(--head-h) + 6px);z-index:4}
+/* only the slide-in is animated: the drawer's top follows the header while the page scrolls */
+.drawer{position:fixed;right:0;top:var(--head-h);bottom:0;width:min(560px,90vw);background:var(--surface);border-left:1px solid var(--border);padding:14px 16px;transform:translateX(100%);transition:transform .25s;z-index:6;overflow:auto;box-shadow:-20px 0 40px rgba(0,0,0,.4)}
 .drawer.open{transform:none}
 .drawer .console{height:50vh}
 .explore summary{cursor:pointer;font-size:14px}
 
 /* ---------------- panels (datasets, SBOM) */
-.panel{position:fixed;inset:58px 0 0 0;background:var(--page);z-index:7;overflow:auto;padding:22px 28px 60px;display:none}
+.panel{position:fixed;inset:var(--head-h) 0 0 0;background:var(--page);z-index:7;overflow:auto;padding:22px 28px 60px;display:none}
 .panel.open{display:block}
+/* scrolling past the end of a panel or the log drawer does not scroll the page behind it, which after about a screen
+   would take the header and its buttons away */
+.panel,.drawer{overscroll-behavior:contain}
 .panel .inner{max-width:1180px;margin:0 auto}
 .panel h2{margin:0;font-size:20px}
 .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0}
@@ -213,3 +229,143 @@ body.wiz{display:block;overflow:auto}
 .rowbox .dpo b{display:block;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
 .pager{display:flex;gap:8px;align-items:center;margin:8px 0;font-size:12.5px;color:var(--ink2)}
 .vuln{color:#f09a9a}
+/* kill switch (serving panel) */
+.btn.danger.solid{background:var(--critical);color:#fff;border-color:transparent;font-weight:600}
+.btn.danger.solid:hover{filter:brightness(1.1);color:#fff}
+.ctlbtns .btn{min-width:78px}
+#ctlReason{width:100%;max-width:520px;margin-top:10px}
+@media (max-width:700px){ .sysmini{flex-wrap:wrap;gap:8px} }
+/* tab 4, Pentest: the copilot (shown once n8n is connected) */
+.cp-grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(0,1fr);gap:16px}
+@media (max-width:900px){ .cp-grid{grid-template-columns:minmax(0,1fr)} .panel{padding:16px 16px 60px} }
+#s-pentest label.small{display:block;margin:10px 0 4px}
+.cp-events{display:flex;flex-direction:column;max-height:440px;overflow:auto;font-size:12.5px;margin-top:8px}
+.cp-ev{display:grid;grid-template-columns:64px 96px minmax(0,1fr);gap:8px;padding:5px 2px;border-bottom:1px solid var(--grid)}
+.cp-ev .t{color:var(--muted);font-family:var(--mono);font-size:11px}
+.cp-ev .s{font-family:var(--mono);font-size:11px;color:var(--ink2);overflow-wrap:anywhere}
+.cp-ev .m{overflow-wrap:anywhere}
+.cp-ev.warn .s{color:var(--warn)}
+.cp-ev.error .s{color:var(--critical)}
+.cp-cmd{display:block;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);background:var(--page);border:1px solid var(--axis);border-radius:8px;padding:8px 10px;margin:6px 0}
+.cp-answer{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--page);border:1px solid var(--axis);border-radius:9px;padding:10px;min-height:48px;font-family:var(--mono);font-size:12.5px;margin:8px 0 0}
+.cp-reasons{margin:6px 0 0;padding-left:18px}
+.cp-runrow{cursor:pointer}
+.cp-runrow:hover td{color:var(--accent)}
+#cpRuns{overflow-x:auto}
+/* the header holds more buttons in the Kubernetes console: below 1400 px the steps drop their subtitles */
+/* the header never scrolls sideways: step subtitles go first, then the indicators and buttons wrap to a second row */
+@media (max-width:1600px){ header .stages li small{display:none} }
+.wizhead{flex-wrap:wrap;row-gap:8px}
+.wizhead .sysmini{flex-wrap:wrap;justify-content:flex-end;row-gap:6px;margin-left:auto}
+/* copilot v2: models and engagement on top, three ways to ask, the run as two lanes, the staged command */
+/* tab 4 is wide: up to 1480 px of content inside main's padding and the step's own box (13 px a side) */
+main.wizmain.wide{max-width:1562px}
+/* tab 4 is many screens long: there the header stays on screen, as it did over the copilot panel (the body grows with the
+   page, so the sticky header never reaches the body's end; --head-h stays the header's height) */
+body.wiz.pentest{height:auto;min-height:100%}
+/* and it looks as that panel did: no hand cursor or hover frame from the old shell's stage chips (.stage above) */
+#s-pentest{cursor:auto}
+#s-pentest:hover{border-color:var(--border)}
+/* phones and tablets: the copilot panel's width (16 px a side, no step box), so the live feed's messages stay readable */
+@media (max-width:900px){ main.wizmain.wide{padding-left:16px;padding-right:16px} #s-pentest{padding:0;border:0;background:none} }
+.cp-top{display:grid;grid-template-columns:minmax(260px,1fr) minmax(0,2.3fr);gap:16px;align-items:start}
+@media (max-width:1100px){ .cp-top{grid-template-columns:minmax(0,1fr)} }
+.cp-head{justify-content:space-between;margin-top:0}
+.cp-select{width:100%;margin:2px 0 4px}
+.cp-loadrow{display:flex;gap:8px;align-items:center}
+.cp-role{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin:14px 0 4px}
+.cp-role b{font-size:13px}
+.cp-num{flex:none;width:20px;height:20px;border-radius:50%;display:inline-grid;place-items:center;font:700 11px/1 var(--mono);background:var(--accent-dim);color:var(--accent);align-self:center}
+.cp-loadrow .cp-select{flex:1;min-width:0}
+#cpModelsCard label,#cpEngCard label{display:block;margin:8px 0 3px}
+.cp-check{display:inline-flex !important;align-items:center;gap:6px;cursor:pointer;margin:0 !important}
+.cp-check input{accent-color:var(--accent);margin:0}
+.cp-eng-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:2px 12px;margin-top:4px}
+.cp-eng-grid .span2{grid-column:span 2}
+@media (max-width:1300px){ .cp-eng-grid{grid-template-columns:repeat(2,minmax(0,1fr))} }
+@media (max-width:640px){ .cp-eng-grid{grid-template-columns:minmax(0,1fr)} .cp-eng-grid .span2{grid-column:auto} }
+.cp-eng-grid input[type=datetime-local]{width:100%;background:var(--page);border:1px solid var(--axis);border-radius:9px;padding:7px 9px;color:var(--ink);color-scheme:dark}
+.cp-flags{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.cp-note{max-width:420px;flex:1;min-width:12em}      /* on a phone Save goes below it instead of squeezing it */
+textarea.mono,input.mono{font-family:var(--mono);font-size:12.5px}
+.cp-modes{display:inline-flex;gap:4px;background:var(--page);border:1px solid var(--border);border-radius:11px;padding:3px;margin-bottom:8px;flex-wrap:wrap}
+.cp-modes button{border:0;background:none;color:var(--ink2);padding:6px 14px;border-radius:8px;cursor:pointer;font-size:13px}
+.cp-modes button:hover{color:var(--ink)}
+.cp-modes button.active{background:var(--accent-dim);color:var(--accent);font-weight:600}
+.cp-mode label{display:block;margin:8px 0 3px}
+/* the flow: the copilot's lane | the prompt and the answer crossing | the abliterated model's lane */
+.cp-flow{display:flex;flex-direction:column;margin:10px 0 4px}
+.cp-row{display:grid;grid-template-columns:minmax(0,1fr) 92px minmax(0,1fr)}
+.cp-cell{padding:5px 10px;min-width:0}
+.cp-cell.cop{background:rgba(57,135,229,.06);border-left:1px solid rgba(57,135,229,.28);border-right:1px solid rgba(57,135,229,.28)}
+.cp-cell.abl{background:rgba(144,133,233,.07);border-left:1px solid rgba(144,133,233,.3);border-right:1px solid rgba(144,133,233,.3)}
+.cp-row.head .cp-cell.cop,.cp-row.head .cp-cell.abl{border-top-width:1px;border-top-style:solid;border-radius:12px 12px 0 0;padding-top:8px}
+.cp-row.head .cp-cell.cop{border-top-color:rgba(57,135,229,.28)} .cp-row.head .cp-cell.abl{border-top-color:rgba(144,133,233,.3)}
+.cp-row:last-child .cp-cell.cop,.cp-row:last-child .cp-cell.abl{border-bottom-width:1px;border-bottom-style:solid;border-radius:0 0 12px 12px;padding-bottom:10px}
+.cp-row:last-child .cp-cell.cop{border-bottom-color:rgba(57,135,229,.28)} .cp-row:last-child .cp-cell.abl{border-bottom-color:rgba(144,133,233,.3)}
+.cp-lane-h{font-weight:600;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink2);display:flex;flex-direction:column;gap:2px}
+.cp-lane-h small{text-transform:none;letter-spacing:0;color:var(--muted);font:400 11px var(--mono)}
+.cp-box{border:1px solid var(--border);background:var(--surface);border-radius:10px;padding:7px 10px;font-size:12.5px}
+.cp-box-h{display:flex;align-items:center;gap:8px}
+.cp-box-h b{font-weight:600;font-size:12.5px;overflow-wrap:anywhere}
+.cp-box-b{margin-top:4px;color:var(--ink2);overflow-wrap:anywhere}
+.cp-box-b .cp-cmd{margin:4px 0 0}
+.cp-ic{width:18px;height:18px;border-radius:50%;display:inline-grid;place-items:center;font:700 11px/1 var(--mono);flex:none;background:var(--surface2);color:var(--muted)}
+.cp-box.ok{border-color:rgba(12,163,12,.38)} .cp-box.ok .cp-ic{background:rgba(12,163,12,.22);color:#6fdc6f}
+.cp-box.warn{border-color:rgba(250,178,25,.4)} .cp-box.warn .cp-ic{background:rgba(250,178,25,.2);color:var(--warn)}
+.cp-box.blocked{border-color:rgba(208,59,59,.6)} .cp-box.blocked .cp-ic{background:rgba(208,59,59,.28);color:#f5a3a3}
+.cp-box.error{border-color:rgba(208,59,59,.6)} .cp-box.error .cp-ic{background:var(--critical);color:#fff}
+.cp-box.active{border-color:rgba(94,234,212,.55);box-shadow:var(--glow)} .cp-box.active .cp-ic{background:var(--accent-dim);color:var(--accent);animation:pulse 1s infinite}
+.cp-box.pending,.cp-box.skipped{opacity:.48}
+/* the arrows sit level with the boxes' titles, however tall an opened prompt makes the row */
+.cp-arrow{position:relative;height:100%;min-height:34px;display:flex;align-items:flex-start;justify-content:center;padding-top:9px}
+.cp-arrow::before{content:"";position:absolute;left:2px;right:2px;top:19px;border-top:2px solid var(--axis)}
+.cp-arrow.right::after{content:"";position:absolute;right:0;top:14px;border-style:solid;border-width:6px 0 6px 9px;border-color:transparent transparent transparent var(--axis)}
+.cp-arrow.left::after{content:"";position:absolute;left:0;top:14px;border-style:solid;border-width:6px 9px 6px 0;border-color:transparent var(--axis) transparent transparent}
+.cp-arrow span{position:relative;z-index:1;background:var(--page);padding:1px 6px;border-radius:6px;font:11px var(--mono);color:var(--muted)}
+.cp-arrow.ok::before{border-top-color:var(--accent)} .cp-arrow.ok span{color:var(--accent)}
+.cp-arrow.ok.right::after{border-left-color:var(--accent)} .cp-arrow.ok.left::after{border-right-color:var(--accent)}
+.cp-arrow.active::before{border-top-style:dashed;border-top-color:var(--accent);animation:pulse 1s infinite}
+.cp-arrow.active span{color:var(--accent)}
+@media (max-width:760px){
+  .cp-row{grid-template-columns:minmax(0,1fr)}
+  .cp-row.head{display:none}
+  .cp-cell.mid:empty,.cp-cell.abl:empty{display:none}
+  .cp-cell.mid{background:none}
+  .cp-cell.abl::before{content:attr(data-lane);display:block;font:600 10.5px/1.6 var(--mono);color:#b9b1f5;letter-spacing:.04em;margin:0 0 3px}
+  .cp-arrow{min-height:28px;padding-top:4px;align-items:center}
+  .cp-arrow::before{left:50%;right:auto;top:0;bottom:0;border-top:0;border-left:2px solid var(--axis)}
+  .cp-arrow.ok::before,.cp-arrow.active::before{border-left-color:var(--accent)}
+  .cp-arrow.right::after,.cp-arrow.left::after{display:none}
+  .cp-row .cp-cell.cop,.cp-row .cp-cell.abl{border-radius:0}
+}
+.cp-pre summary{cursor:pointer;color:var(--accent);font-size:12px;margin-top:4px}
+.cp-pre pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--page);border:1px solid var(--axis);border-radius:8px;padding:8px;font:11.5px/1.5 var(--mono);max-height:320px;overflow:auto;margin:6px 0 0;color:var(--ink)}
+/* about to be executed */
+.cp-staged{border:1px solid var(--border);border-radius:12px;padding:12px 14px;margin:12px 0 8px;background:var(--surface2)}
+.cp-staged.ok{border-color:rgba(94,234,212,.45);box-shadow:var(--glow)}
+.cp-staged.blocked{border-color:rgba(208,59,59,.45)}
+.cp-staged-h{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+.cp-staged-h b{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink2)}
+.cp-staged-cmd{display:block;font:600 14px/1.5 var(--mono);background:var(--page);border:1px solid var(--axis);border-radius:9px;padding:10px 12px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--accent)}
+.cp-staged-cmd::before{content:"$ ";color:var(--muted)}
+.cp-staged-cmd.muted{color:var(--muted)}
+/* hints quote names and paths without spaces (Finance\Payroll\2026\...): they wrap instead of widening the panel on a phone */
+.cp-hint{border:1px solid rgba(250,178,25,.45);background:rgba(250,178,25,.07);border-radius:9px;padding:8px 10px;margin:8px 0 0;font-size:12.5px;color:var(--ink2);overflow-wrap:anywhere}
+.cp-hint .btn{margin-left:6px}
+/* phone width: the header's step pills and the Earlier versions table made the page scroll sideways at 390 px */
+@media (max-width:480px){ .wizhead{padding:10px 16px} }
+/* narrower pills on a phone: the plain console's three steps keep one row at 375-420 px */
+@media (max-width:420px){ .stages li{padding:6px 10px;gap:8px} }
+#engVersionList{overflow-x:auto}
+/* a long LAB_ALLOWLIST or n8n address breaks instead of widening its card in tab 4 at 320 px; the knowledge panel's file
+   picker (301 px) shrinks with its card */
+#cpEngCeiling,#cpConn{overflow-wrap:anywhere}
+#knFile{max-width:100%}
+/* the serving and SBOM tables scroll inside their card too, so their panel does not; a long reason or error URL wraps in
+   the audit log's result column instead of widening the table */
+#serveRuns,#serveHist,#auditList,#ctlResult,#sbomModules,#sbomPackages,#sbomExtra{overflow-x:auto}
+/* the scan's combinations of layers scroll inside their step too; the earlier runs' list ("layers 15+17+19") fits its card */
+.combos{overflow-x:auto}
+#runSel{max-width:100%}
+#auditList td:nth-child(3){overflow-wrap:anywhere;min-width:12em}
