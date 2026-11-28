@@ -100,7 +100,8 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
     (`copilot/eval_judge.py`, in the console pod) and reports false accepts and false rejects. The report goes to
     `workspace/eval/`; `-JudgeModel` picks another judge.
 - **It asks for:**
-  - a console password the first time (only its bcrypt hash is stored, in Secret `lab/basic-auth`);
+  - a console password the first time (only its bcrypt hash is stored, in Secret `lab/basic-auth`). Forgotten: delete
+    that Secret and run `-Setup` again; it asks for a new one and restarts the console, which reads it at its start;
   - an n8n login (a fresh n8n gets it as its owner account). For a fresh n8n the script checks it against n8n's rules
     first and asks again if n8n would refuse it: the password 8 to 64 characters with a number and a capital letter,
     typed twice.
@@ -650,6 +651,9 @@ delete old runs you no longer need for Rollback.
   - `tests/test-rancher-dev-forward.ps1` runs the script's port-forward functions against a faked Windows: Rancher
     Desktop's `kubectl` is a wrapper (kuberlr) that runs the real kubectl as its child, so a leftover port-forward is
     two processes. The tests check that both are stopped and that other processes on the port are left alone.
+  - `tests/test-rancher-dev-login.ps1` runs the script's console-password steps with kubectl and HTTP stubbed: a new
+    Secret `lab/basic-auth` while the console runs restarts it, and a failed login says whether the password was
+    refused (401) or the console answered something else.
   - The script then:
     - creates the Secrets;
     - connects n8n;

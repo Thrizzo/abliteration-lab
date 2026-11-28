@@ -77,6 +77,8 @@ $script:Fail = 0
 $script:Skipped = 0
 $script:LastOk = $false
 $script:PortForwards = @()
+$script:RestartConsole = $false                          # a new Secret lab/basic-auth while the console runs
+$script:LoginCode = ''
 $script:Tmp = Join-Path ([IO.Path]::GetTempPath()) ('rancher-dev-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 $script:AuthFile = $null
 $script:WrongAuth = $null
@@ -831,6 +833,9 @@ function Invoke-Secrets {
         Ok "Secret lab/basic-auth (user $LabUser, bcrypt hash)"
         $script:User = $LabUser
         $script:LabPassword = $pw
+        # a console that runs already read the old user and hash (environment variables, at its start): restarted
+        # after the apply
+        if (kcOut @('-n', 'lab', 'get', 'deploy', 'console', '-o', 'name', '--ignore-not-found')) { $script:RestartConsole = $true }
     }
     $has = kcOut @('-n', 'lab-copilot', 'get', 'secret', 'n8n', '-o', 'name', '--ignore-not-found')
     if ($has) { Ok 'Secret lab-copilot/n8n exists (its encryption key is kept)' }
@@ -978,6 +983,15 @@ function Invoke-N8n {
     if ($code -eq 0) { Ok 'Secret lab/copilot (the webhook secret and the n8n key, for the console)' } else { Bad "Secret lab/copilot: $out" }
 }
 
+# After a new Secret lab/basic-auth: Caddy reads the user and hash from environment variables when it starts
+function Restart-Console {
+    $out = kc @('-n', 'lab', 'rollout', 'restart', 'deploy/console')
+    if ($LASTEXITCODE -eq 0) { $out = kc @('-n', 'lab', 'rollout', 'status', 'deploy/console', '--timeout=300s') }
+    if ($LASTEXITCODE -ne 0) { Bad "console restart, so that it reads the new password: $out"; return $false }
+    Ok 'console restarted: it reads the new password from Secret lab/basic-auth'
+    return $true
+}
+
 function Invoke-Setup {
     Section 'Setup: the console image'
     if ($SkipBuild) { Note "-SkipBuild: $Image as it is" }
@@ -986,12 +1000,23 @@ function Invoke-Setup {
     if (-not (Invoke-Secrets)) { return $false }
     Section "Setup: apply $Overlay and wait for every pod"
     if (-not (Invoke-Apply)) { return $false }
+    if ($script:RestartConsole -and -not (Restart-Console)) { return $false }
     Section 'Setup: connect n8n to the console'
     Invoke-N8n
     return $true
 }
 
 # ------------------------------------------------------------------------------------------------ console login
+# Why the login with the console password failed, and what to do about it (the API checks need the login)
+function Show-LoginTrouble([string]$Code) {
+    if ($Code -eq '401') {
+        Note 'Caddy refused this password: it is not the one Secret lab/basic-auth was made with (the -Setup that created it asked for it).'
+        Note "      Forgotten? kubectl --context $Context -n lab delete secret basic-auth   then -Setup again: it asks for a new one and restarts the console."
+    } else {
+        Note "the console answered HTTP $Code to the login (a wrong password gets 401): kubectl --context $Context -n lab logs deploy/console --all-containers --tail=50"
+    }
+}
+
 function Open-Console {
     Section 'Console login (Caddy in the console pod)'
     $script:User = Get-LabUser
@@ -1003,9 +1028,10 @@ function Open-Console {
     Set-Auth $script:User $script:LabPassword
     Step 'login: no password -> 401' { (Http -Url "$Console/" -NoAuth).Code -eq '401' }
     Step 'login: a wrong password -> 401' { (Http -Url "$Console/" -AuthFile $script:WrongAuth).Code -eq '401' }
-    Step "login: $($script:User) -> 200" { (Http -Url "$Console/").Code -eq '200' }
+    $script:LoginCode = ''
+    Step "login: $($script:User) -> 200" { $script:LoginCode = (Http -Url "$Console/").Code; $script:LoginCode -eq '200' }
     $script:ConsoleOk = $script:LastOk
-    if (-not $script:ConsoleOk) { Note 'the API checks need the login: is it the password in Secret lab/basic-auth?'; return }
+    if (-not $script:ConsoleOk) { Show-LoginTrouble $script:LoginCode; return }
     Step 'the console runs stages as Kubernetes Jobs (runner k8s)' { (Api 'GET' '/env').Json.runner -eq 'k8s' }
 }
 
