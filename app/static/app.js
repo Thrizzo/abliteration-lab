@@ -151,9 +151,9 @@ async function loadEnv(){
   if(g){ $('#gpuVal').textContent=`${g.vram_used_gb}/${g.vram_total_gb} GB`; $('#dotGpu').className='dot '+(g.vram_used_gb/g.vram_total_gb>0.5?'busy':'on'); }
   else if(e.cuda===false){ $('#gpuVal').textContent='cpu'; $('#dotGpu').className='dot'; }
   $('#dotOll').className='dot '+(e.ollama.reachable?'on':'bad');
-  if(e.cuda===false && !document.querySelector('#cudaWarn')){ const w=document.createElement('div'); w.id='cudaWarn'; w.className='narr'; w.style.borderLeftColor='var(--warn)'; const f32=e.dtype!=='bfloat16'; w.innerHTML='<b style="color:var(--warn)">No CUDA GPU is visible to the app: it runs on the CPU.</b> Everything works, but measure, scan and the lab take much longer, and the model has to fit into RAM in '+(f32?'float32':'bf16 (this processor has a fast bf16 path)')+': about '+(f32?'7 GB for GLM-Edge-1.5B and 18 GB for the 4B':'6 GB for GLM-Edge-1.5B and 11 GB for the 4B')+'. The Advanced options shorten a CPU run: fewer test prompts, fewer new tokens, a narrower layer range. To use a GPU instead, start the stack with the NVIDIA runtime (<span class="mono">docker-compose.gpu.yml</span> / <span class="mono">--gpus all</span>).'; $('#s-abl').insertBefore(w, $('#s-abl').firstChild.nextSibling); }
+  if(e.cuda===false && !document.querySelector('#cudaWarn')){ const w=document.createElement('div'); w.id='cudaWarn'; w.className='narr'; w.style.borderLeftColor='var(--warn)'; const f32=e.dtype!=='bfloat16'; w.innerHTML=(e.cuda_problem?'<b style="color:var(--warn)">The GPU is too old for this image: the app runs on the CPU.</b> '+esc(e.cuda_problem)+'. Until then everything works':'<b style="color:var(--warn)">No CUDA GPU is visible to the app: it runs on the CPU.</b> Everything works')+', but measure, scan and the lab take much longer, and the model has to fit into RAM in '+(f32?'float32':'bf16 (this processor has a fast bf16 path)')+': about '+(f32?'7 GB for GLM-Edge-1.5B and 18 GB for the 4B':'6 GB for GLM-Edge-1.5B and 11 GB for the 4B')+'. The Advanced options shorten a CPU run: fewer test prompts, fewer new tokens, a narrower layer range. To use a GPU instead, start the stack with the NVIDIA runtime (<span class="mono">docker-compose.gpu.yml</span> / <span class="mono">--gpus all</span>).'; $('#s-abl').insertBefore(w, $('#s-abl').firstChild.nextSibling); }
   if(e.cuda===false && !S.cpuDefault){ S.cpuDefault=true; if($('#optDevice').value==='cuda') $('#optDevice').value='cpu'; }
-  const chk=[['python + torch'+(e.torch?' '+e.torch:''),e.venv],[e.cuda===false?'no CUDA GPU: running on the CPU':'CUDA visible',e.cuda!==false,e.cuda===false?'warn':null],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable],[`disk free ${e.disk_free_gb} GB`, e.disk_free_gb>30]];
+  const chk=[['python + torch'+(e.torch?' '+e.torch:''),e.venv],[e.cuda===false?(e.cuda_problem?'GPU too old for this image: running on the CPU':'no CUDA GPU: running on the CPU'):'CUDA visible',e.cuda!==false,e.cuda===false?'warn':null],['.venv-gguf converter',e.venv_gguf],['llama.cpp converter',e.llama_cpp],['local datasets',e.data],['Ollama',e.ollama.reachable],[`disk free ${e.disk_free_gb} GB`, e.disk_free_gb>30]];
   $('#envChecks').innerHTML=chk.map(([l,ok,cls])=>`<div class="check"><span class="dot ${cls||(ok?'on':'bad')}"></span>${l}</div>`).join('');
   $('#ollInfo').innerHTML = e.ollama.reachable ? `<b>models</b><span class="mono">${e.ollama.models.filter(m=>/glm/i.test(m)).join(', ')||'none'}</span><b>in VRAM</b><span class="mono">${e.ollama.loaded.map(m=>`${m.name} (${m.vram_gb} GB)`).join(', ')||'none'}</span>` : `<b>status</b><span>not reachable - start Ollama</span>`;
   updateHeader();
@@ -619,11 +619,15 @@ const sameModel = (a, b) => String(a||'').replace(/:latest$/,'') === String(b||'
 // own Ollama for Windows, with whatever models it holds), the list shows the default as missing and keeps it chosen
 // instead of quietly taking the first chat model there: the console then refuses a run with it until it is pulled or
 // another judge is chosen on purpose. Returns true when the judge's default is missing.
-function cpFillSelect(sel, role, list, def){
-  const missing = role==='judge' && list.length>0 && !!def && !list.some(n => sameModel(n, def));
+// flag: say so when the default is not in the list (the judge always; the operator in the Docker stack, whose Ollama holds
+// every model). A missing default operator gives way to the first abliterated model the server lists (they come first).
+const ABL_NAME = /(^|[-_:./])abl($|[-_:./])|abliterat|uncensor/i;    // copilot_runs.ABLITERATED
+function cpFillSelect(sel, role, list, def, flag){
+  const missing = (flag ?? role==='judge') && list.length>0 && !!def && !list.some(n => sameModel(n, def));
   const names = missing ? [def, ...list] : (list.length ? list : [def]);
   const want = cpStore.get('model.'+role, '');
-  const pick = names.find(n => want && n===want) || names.find(n => sameModel(n, def)) || names[0];
+  const abl = missing && role==='operator' ? list.find(n => ABL_NAME.test(n)) : null;
+  const pick = names.find(n => want && n===want) || abl || names.find(n => sameModel(n, def)) || names[0];
   sel.innerHTML = names.map(n => `<option value="${escA(n)}"${n===pick?' selected':''}>${esc(n)}${sameModel(n, def)?(missing?' (default, not on this Ollama)':' (default)'):''}</option>`).join('');
   return missing;
 }
@@ -637,7 +641,7 @@ function cpJudgeInfo(j, missing){
 async function cpModelsLoad(fresh){
   let m; try{ m=await api('/copilot/models'+(fresh?'?fresh=true':'')); }catch(e){ $('#cpOpInfo').innerHTML=`<span class="vuln">${esc(e.message)}</span>`; return; }
   CP.models=m;
-  cpFillSelect($('#cpOpModel'), 'operator', m.operator.models||[], m.operator.default);
+  const opMissing = cpFillSelect($('#cpOpModel'), 'operator', m.operator.models||[], m.operator.default, !!(S.env && S.env.runner!=='k8s'));
   $('#cpJudgeInfo').innerHTML = cpJudgeInfo(m.judge, cpFillSelect($('#cpJudgeModel'), 'judge', m.judge.models||[], m.judge.default));
   if(m.embeddings && m.embeddings.model)
     $('#cpEmbedInfo').innerHTML = `<span class="mono">${esc(m.embeddings.model)}</span> · turns your writeups into vectors for retrieval · writes no text, so it is not a choice here`;
@@ -645,8 +649,13 @@ async function cpModelsLoad(fresh){
     // the Docker stack or a plain console: no glm-serve and no Promote. Step 2's last stage imports each abliterated run
     // into Ollama as <model>-abl, and the list above is what that Ollama holds
     $('#cpOpRole').textContent = 'abliterated · proposes the command · served by Ollama';
+    const opEx = (m.operator.excluded||[]).map(x => esc(x.name)).join(', ');
+    const anyAbl = (m.operator.models||[]).some(n => ABL_NAME.test(n));
     $('#cpOpInfo').innerHTML = (m.operator.error ? `<span class="vuln">${esc(m.operator.error)}</span> · ` : '')
-      + 'the models Ollama holds: step 2 imports each abliterated run as <span class="mono">&lt;model&gt;-abl</span>';
+      + (opMissing ? `<span class="vuln">${esc(m.operator.default)}, the default copilot model, is not on this Ollama: ${anyAbl ? 'an abliterated one is chosen instead' : 'no abliterated model is there yet'}.</span> ` : '')
+      + 'the models Ollama holds: step 2 imports each abliterated run as <span class="mono">&lt;model&gt;-abl</span> (models with a GGUF: GLM-Edge, GLM-4; GLM-5.x runs have none), '
+      + '<span class="mono">COPILOT_OPERATOR_MODEL</span> in deploy/.env sets the default'
+      + (opEx ? ` · not usable as copilot model: ${opEx} (embedding)` : '');
     for(const el of [$('label[for=cpLoadRun]'), $('.cp-loadrow'), $('#cpLoadInfo')]) if(el) el.style.display='none';
     return;
   }
@@ -730,7 +739,7 @@ async function cpEngLoad(saved){
     + (kept ? ' · the form below has unsaved changes' : '');
   $('#cpEngCeiling').innerHTML = c.known
     ? `Ceiling (n8n enforces it, the engagement can only narrow it): LAB_ALLOWLIST <span class="mono">${esc(c.allowlist)}</span>`
-    : 'The console does not know LAB_ALLOWLIST; n8n enforces it (ConfigMap copilot-scope).';
+    : `The console does not know LAB_ALLOWLIST; n8n enforces it (${S.env && S.env.runner==='k8s' ? 'ConfigMap copilot-scope' : 'deploy/.env'}).`;
   // a host the rules put off-limits belongs in Out of scope, a name they protect in Protected data: both are code; the judge
   // alone missed such rules when measured. The buttons only fill the form: nothing applies until it is saved.
   const hints=s.hints||[];
@@ -745,7 +754,7 @@ async function cpEngLoad(saved){
     t.value=t.value.split(/[\n,]/).map(v=>v.trim()).filter(v=>v && v.replace(/\s+/g,' ').toLowerCase()!==x.toLowerCase()).join('\n');
     CP.moved.push(x); b.disabled=true; b.textContent='moved: save to apply'; });
   const cap=[]; if(c.autorun_passive===false) cap.push('passive'); if(c.autorun_active===false) cap.push('active');
-  $('#engAutoCap').textContent = cap.length ? `capped: the ${cap.join(' and ')} tier is off in LAB_AUTORUN_* (copilot.env)` : '';
+  $('#engAutoCap').textContent = cap.length ? `capped: the ${cap.join(' and ')} tier is off in LAB_AUTORUN_* (${S.env && S.env.runner==='k8s' ? 'copilot.env' : 'deploy/.env'})` : '';
   const off=-new Date().getTimezoneOffset(), a=Math.abs(off);
   $('#engTz').textContent = `your browser's time, UTC${off>=0?'+':'-'}${String(Math.floor(a/60)).padStart(2,'0')}:${String(a%60).padStart(2,'0')}`;
   const vs=s.versions||[];
@@ -829,6 +838,9 @@ $('#cpSend').onclick=async()=>{
 // ---- the run as a flow: the copilot's lane (gates, judge) and the abliterated model's lane, the prompt crossing over
 // and the answer coming back, then "about to be executed"
 const STATE_ICON = {ok:'✓', blocked:'✕', active:'…', pending:'·', skipped:'–', error:'!', warn:'!'};
+// where the copilot model runs: glm-serve in Kubernetes, the stack's Ollama otherwise. Read here, at the top level: inside
+// cpFlowHtml S is the scope gate's state. (A bare render, as in the tests, has no page state: Ollama.)
+function cpOpServer(){ return typeof S!=='undefined' && S.env && S.env.runner==='k8s' ? 'glm-serve' : 'Ollama'; }
 function cpBox(state, title, body, extra){
   return `<div class="cp-box ${state}"><div class="cp-box-h"><span class="cp-ic" aria-hidden="true">${STATE_ICON[state]||'·'}</span><b>${title}</b></div>${body?`<div class="cp-box-b">${body}</div>`:''}${extra||''}</div>`;
 }
@@ -851,7 +863,7 @@ function cpFlowHtml(r){
   const lane = escA('ABLITERATED MODEL · '+opModel);
   const row = (cop, mid, abl, cls) => rows.push(`<div class="cp-row ${cls||''}"><div class="cp-cell cop">${cop||''}</div><div class="cp-cell mid">${mid||''}</div><div class="cp-cell abl" data-lane="${lane}">${abl||''}</div></div>`);
   const fail = st => (st==='error' && fatal) ? esc(fatal.message) : '';
-  row(`<div class="cp-lane-h">Copilot<small>n8n gates · judge ${esc(judgeModel)}</small></div>`, '', `<div class="cp-lane-h">Abliterated model<small>${esc(opModel)} on glm-serve</small></div>`, 'head');
+  row(`<div class="cp-lane-h">Copilot<small>n8n gates · judge ${esc(judgeModel)}</small></div>`, '', `<div class="cp-lane-h">Abliterated model<small>${esc(opModel)} on ${cpOpServer()}</small></div>`, 'head');
   row(cpBox('ok', manual ? 'Manual command' : 'Task', `<span class="mono">${esc(manual ? (r.command||'') : r.task)}</span><div class="small">target <span class="mono">${esc(r.target)}</span> · ${eng ? `engagement v${esc(eng.version)}${eng.name?' '+esc(eng.name):''}` : 'no engagement: LAB_ALLOWLIST alone'}</div>`));
   const S = next('ok', scope, e => e.data.scopeOk ? 'ok' : 'blocked');
   row(cpBox(S, 'Scope gate', scope ? esc(scope.message) : (S==='active' ? 'checking…' : fail(S))));
@@ -940,7 +952,7 @@ async function cpLoad(){
   CP.conn=s; cpGate(); cpTabInfo();
   $('#cpConn').innerHTML = s.configured
     ? `<span class="badge pass">connected</span> n8n at <span class="mono">${esc(s.n8n)}</span>`
-    : `<span class="badge warn">not connected</span> missing: <span class="mono">${esc((s.missing||[]).join(', '))}</span>. Run <span class="mono">deploy/n8n/connect_console.py</span> once (deploy/k8s/README.md, section Copilot).`;
+    : `<span class="badge warn">not connected</span> missing: <span class="mono">${esc((s.missing||[]).join(', '))}</span>. Run <span class="mono">deploy/n8n/connect_console.py</span> once (${S.env && S.env.runner==='k8s' ? 'deploy/k8s/README.md, section Copilot' : 'README.md, Step 4: the pentest copilot'}).`;
   $('#cpRun').disabled = $('#cpCheck').disabled = !s.configured;
   $('#cpSend').disabled = !(s.model && s.model.configured);
   const runs=s.runs||[];
@@ -960,6 +972,7 @@ function cpFeedRender(){
   $('#cpFeed').innerHTML = ev.length ? ev.map(e=>evRow(e, true)).join('') : '<div class="empty">Nothing yet.</div>';
 }
 $('#cpFeedSrc').onchange=cpFeedRender;
+envReady.then(()=>{ if(S.env && S.env.runner!=='k8s') document.querySelectorAll('#cpFeedSrc .k8s-only').forEach(o=>o.remove()); });   // only Kubernetes emits these
 $('#cpStop').onclick=async()=>{
   const r=CP.run; if(!r || !confirm(`Stop copilot run ${r.id} in n8n?`)) return;
   try{ await api('/copilot/runs/'+encodeURIComponent(r.id)+'/stop', {}); toast('stopped'); }catch(e){ toast(e.message, true); }
@@ -1029,6 +1042,8 @@ async function knSend(kind){
   if(KN.info && f.size > KN.info.max_bytes) return toast(`${f.name} is larger than ${fmtBytes(KN.info.max_bytes)}`, true);
   const r=await fetch(`/api/knowledge/${kind}?source=${encodeURIComponent(src)}&name=${encodeURIComponent(f.name)}`, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:f});
   let body; try{ body=await r.json(); }catch(e){ body={}; }
+  // a 413 with no JSON detail comes from the login proxy in front of the console, not from the console's own cap
+  if(r.status===413 && !body.detail) throw new Error(`${f.name} is larger than the login proxy in front of the console accepts (request_body max_size in its Caddyfile)`);
   if(!r.ok) throw new Error(body.detail || r.statusText);
   return body;
 }

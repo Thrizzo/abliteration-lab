@@ -86,7 +86,7 @@ powershell -ExecutionPolicy Bypass -File .\deploy\k8s\tests\rancher-dev.ps1
     - connects n8n with `connect_console.py`.
   - **`-Check`:**
     - the login;
-    - `http://lab.localhost` through Traefik, including a 2 MB upload and the 50 MB limit;
+    - `http://lab.localhost` through Traefik, including a 2 MB upload and the 50 MiB limit;
     - allowed and blocked traffic from probe pods;
     - the console's access to the Kubernetes API;
     - Isolate / Release / Kill / Start with their audit entries;
@@ -564,8 +564,9 @@ The **knowledge** button in the console's header opens the writeups the copilot 
 - **Trust:** uploaded text stays untrusted. The workflow hands it only to the operator, with addresses masked, never to
   the judge, and the policy gate stays the boundary.
 - **Logged:** uploads, ingest results and deletes go to the audit log and the live feed.
-- **Body size, 50 MB end to end:** the console's login (Caddy) accepts up to 50 MB, and the base Ingress sets
-  `nginx.ingress.kubernetes.io/proxy-body-size: 50m` for ingress-nginx (its default is 1 MB). Traefik, the class the
+- **Body size, 50 MiB end to end:** the console's cap; the console's login (Caddy) accepts up to `50MiB` (Caddy's `50MB`
+  would be 50,000,000 bytes, less than the cap), and the base Ingress sets `nginx.ingress.kubernetes.io/proxy-body-size: 50m`
+  for ingress-nginx (its default is 1 MB; nginx's `m` is MiB). Traefik, the class the
   overlays use (Rancher Desktop's default), sets no body limit unless a buffering middleware adds one.
 - **Without the GUI:** the same ingest for a whole folder is `python -m copilot.ingest --src /workspace/writeups`
   (copilot/README.md).
@@ -578,7 +579,7 @@ advice. Have legal confirm the points marked **check**.
 | Part | Licence | What it means internally |
 |---|---|---|
 | Rancher Desktop, k3s, Traefik, Qdrant, Ollama, Caddy, llama.cpp, vLLM, PyTorch, transformers, FastAPI | Apache-2.0 / MIT / BSD | Free. |
-| Docker Desktop | Paid subscription for companies with 250+ employees or $10M+ revenue | Not needed: the dev path uses Rancher Desktop, and Docker Engine on Linux is free. |
+| Docker Desktop | Paid subscription for companies with 250+ employees or $10M+ revenue | Needed for the Docker Compose path on Windows with a GPU (Rancher Desktop gives containers no GPU there); not needed for the Kubernetes dev path (Rancher Desktop) or Docker Engine on Linux, which is free. |
 | n8n Community Edition, self-hosted | Sustainable Use License | Free for internal business use. Offering it to customers, or running it as a service for others, needs a commercial licence. |
 | GLM-5.3-Flash | MIT | Free. |
 | GLM-5.3 | Modified MIT. Model-as-a-Service providers with more than $10B revenue need a security review by Z.AI before commercial use. | Internal red-team use is not MaaS. **Never offer the model, or the abliterated one, as an API to others** without that review. |
@@ -659,7 +660,7 @@ delete old runs you no longer need for Rollback.
     - creates the Secrets;
     - connects n8n;
     - runs the pipeline on a tiny GLM;
-    - checks the login and the Ingress through Traefik, including the 50 MB limit;
+    - checks the login and the Ingress through Traefik, including the 50 MiB limit;
     - checks the network policies under k3s, the kill switch, a knowledge upload retrieved by a copilot run, and a
       free prompt.
 

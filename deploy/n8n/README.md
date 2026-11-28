@@ -444,37 +444,46 @@ but the gate cannot see what such a file does to a later command.
 
 ## Setup
 
+Every command runs in the repository's folder, in PowerShell as in bash. `COMPOSE_FILE` in `deploy/.env` names the compose
+files for all of them (the [main README](../../README.md#3-deploy-with-docker-recommended)); step 2 adds this overlay to it.
+
 1. **Models in Ollama.** The lab's Compare stage already imports `<model>-base` and `<model>-abl`. Also pull a judge and an
    embedding model:
    ```bash
-   docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec ollama ollama pull qwen3:8b
-   docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec ollama ollama pull nomic-embed-text
+   docker compose --env-file deploy/.env exec ollama ollama pull qwen3:8b
+   docker compose --env-file deploy/.env exec ollama ollama pull nomic-embed-text
    ```
 2. **`deploy/.env`:**
    ```
-   N8N_ENCRYPTION_KEY=<any long random string>
+   COMPOSE_FILE=deploy/docker-compose.yml;deploy/docker-compose.gpu.yml;deploy/n8n/docker-compose.n8n.yml   # no GPU: without the gpu file
+   N8N_ENCRYPTION_KEY=<any long random string>   # once: with another key later n8n refuses to start
    LAB_ALLOWLIST=10.10.10.0/24,192.168.56.0/24,127.0.0.1     # lab CIDRs, plus lab host names you want to use (box.htb)
    LAB_AUTORUN_READONLY=true
    LAB_AUTORUN_ACTIVE_RECON=false
    # LAB_RUNNER_URL=http://your-lab-runner:8080/run          # leave unset until you have an executor
    # N8N_IMAGE=docker.n8n.io/n8nio/n8n:2.48.7                # default is Docker Hub; n8n's own registry has the same image
    ```
-3. **Start** n8n and Qdrant with the stack:
+3. **Start** n8n and Qdrant with the stack (this restarts the app: let a running pipeline stage finish first):
    ```bash
-   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env up -d
+   docker compose --env-file deploy/.env up -d --build
    ```
-4. **Fill the writeup store.** Read the dry run first if you have client notes:
+   n8n is then at http://localhost:5678 (`N8N_PORT` in `deploy/.env` moves it; *port is already allocated*: `docker ps -a
+   --filter publish=5678` names the container that holds it).
+4. **Fill the writeup store** from `<WORKSPACE>/writeups` (Markdown, text, HTML and PDF). Read the dry run first if you have
+   client notes:
    ```bash
-   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
-     run --rm app python -m copilot.ingest --src /workspace/writeups --dry-run --show-redactions
-   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
-     run --rm app python -m copilot.ingest --src /workspace/writeups
+   docker compose --env-file deploy/.env run --rm --no-deps app python -m copilot.ingest --src /workspace/writeups --dry-run --show-redactions
+   docker compose --env-file deploy/.env run --rm --no-deps app python -m copilot.ingest --src /workspace/writeups
    ```
-5. **n8n's owner, the credentials, the workflow and the console's step 4**, in one go. One line, so it runs the same in
-   PowerShell and bash, from the repository's folder (Python 3 on this machine; the script needs nothing else):
+5. **n8n's owner, the credentials, the workflow and the console's step 4**, in one go, in a one-off app container: no
+   Python on this machine, n8n reached inside the stack whatever `N8N_PORT` is, and the secrets written into the workspace
+   wherever `WORKSPACE` points:
    ```bash
-   python deploy/n8n/connect_console.py --n8n http://localhost:5678 --email <your n8n login> --setup-owner --secrets-dir workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
+   docker compose --env-file deploy/.env run --rm --no-deps app python /app/deploy/n8n/connect_console.py --n8n http://n8n:5678 --email <your n8n login> --setup-owner --secrets-dir /workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
    ```
+   From this machine instead (Python 3; on Windows `py -3` where `python` is missing):
+   `python deploy/n8n/connect_console.py --n8n http://127.0.0.1:<N8N_PORT> ... --secrets-dir <WORKSPACE>/.copilot` with the
+   other options as above.
    - **The login:** it asks for the password (or reads `N8N_PASSWORD`). On a fresh n8n, `--setup-owner` creates n8n's
      owner account with it, after checking it against n8n's rules (8 to 64 characters with a digit 0-9 and a capital
      letter A-Z); an n8n that has its owner gets the login only. Without `--setup-owner`, create the login at
@@ -486,8 +495,8 @@ but the gate cannot see what such a file does to a later command.
      - the workflow itself, imported with those credentials selected and published;
      - with `--secrets-dir`, the console's two secrets as files: the webhook secret and an n8n API key that may only read
        and stop executions. The console reads them from `/workspace/.copilot` (`COPILOT_SECRETS_DIR` in the overlay) on
-       every use, so step 4 works without a restart. If `WORKSPACE` in `deploy/.env` names another folder, give that
-       folder's `.copilot` instead.
+       every use, so step 4 works without a restart. A file there that the console may not read (written by another
+       user, on a Linux host) is reported as such in step 4.
    - **Model names:** the console sends the operator and judge it chose. Without them, the operator comes from
      `COPILOT_OPERATOR_MODEL` (compose default `glm-edge-1.5b-chat-abl:latest`; set it in `deploy/.env` to what
      `ollama list` shows) and the judge from `COPILOT_JUDGE_MODEL` (default `qwen3:8b`). The embedding model
@@ -497,10 +506,12 @@ but the gate cannot see what such a file does to a later command.
 6. **Optional:** to keep PWK material out of retrieval, add the filter
    `{"must_not":[{"key":"metadata.source","match":{"value":"pwk"}}]}` under the Qdrant node's *Search Filter*.
 7. **Use it:** in the console at http://localhost:8080, step 4 **Pentest** (it appears once the console reaches n8n:
-   `N8N_URL` in the overlay): the engagement, the models (the operator list is what Ollama holds, so pick your run's
-   `<model>-abl`), your writeups, then a run whose every stage shows live. Or open
-   http://localhost:5678/form/pentest-copilot, enter a task and one target from `LAB_ALLOWLIST`, and click *Ask the
-   copilot*. The result page appears when the judge is done.
+   `N8N_URL` in the overlay): the engagement, the models (the operator list is what Ollama holds without the embedding
+   models, abliterated runs first, so pick your run's `<model>-abl`), your writeups, then a run whose every stage shows
+   live. Or open http://localhost:5678/form/pentest-copilot (your `N8N_PORT`), enter a task and one target from
+   `LAB_ALLOWLIST`, and click *Ask the copilot*. The result page appears when the judge is done.
+   - **One GPU:** the pipeline and Ollama share it. While a pipeline stage that loads the model runs, the console holds
+     back copilot runs, free prompts, Compare and knowledge uploads; start form runs after it as well.
    - **No login:** the form has none of its own. n8n listens on localhost only, so that is fine on a single-user machine;
      otherwise set the Form Trigger's *Authentication* to Basic Auth.
 8. **Approval and execution.** Point the *Human approval* resume URL at Telegram, email or Slack. Only then enable *Execute*

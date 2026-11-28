@@ -15,6 +15,10 @@ out/
 runs/
 sbom/
 deploy/.env
+# the Docker stack's workspace (WORKSPACE=../workspace) and Ollama store (OLLAMA_STORE=./ollama): runtime data, including
+# the copilot's secrets (workspace/.copilot), uploaded writeups, engagements, the Hugging Face cache and Ollama's key
+/workspace/
+/deploy/ollama/
 
 # Python bytecode from running the app and the tests
 __pycache__/

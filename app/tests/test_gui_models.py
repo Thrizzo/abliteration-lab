@@ -173,7 +173,7 @@ CARD = r"""
 const src = require('fs').readFileSync(__APP_JS__, 'utf8').replace(/\r/g, '');
 const grab = (start, end) => { const i = src.indexOf(start), j = src.indexOf(end, i); if (i < 0 || j < 0) throw new Error('app.js: ' + start); return src.slice(i, j + end.length); };
 const line = (start) => grab(start, '\n');
-const code = [line('const esc = '), line('const escA = '), line('const sameModel = '),
+const code = [line('const esc = '), line('const escA = '), line('const sameModel = '), line('const ABL_NAME = '),
   grab('function cpFillSelect(', '\n  return missing;\n}'), grab('function cpJudgeInfo(', "\n    + (ex ? `not usable as judge: ${ex}` : '');\n}"),
   grab('async function cpModelsLoad(fresh){', "$('#serveToggle').click(); };\n}")].join('\n');
 const MODELS = { operator: { models: ['glm-edge-1.5b-chat-abl:latest', 'qwen3:8b'], default: 'glm-edge-1.5b-chat-abl:latest', error: null },
@@ -187,14 +187,22 @@ const card = async (runner, models) => {
   const f = new Function('$', 'api', 'S', 'CP', 'cpStore', 'layerText', code + '; return cpModelsLoad;')($, api, S, CP, cpStore, (r) => String(r.layer));
   await f(false);
   const hidden = ['label[for=cpLoadRun]', '.cp-loadrow', '#cpLoadInfo'].filter((s) => els[s] && els[s].style.display === 'none');
+  const sel = els['#cpOpModel'].innerHTML.match(/<option value="([^"]*)" selected>/);
   return { calls, role: els['#cpOpRole'] ? els['#cpOpRole'].textContent : null, info: els['#cpOpInfo'].innerHTML, hidden,
-           options: (els['#cpOpModel'].innerHTML.match(/<option /g) || []).length, load: els['#cpLoadRun'] ? els['#cpLoadRun'].innerHTML : null };
+           options: (els['#cpOpModel'].innerHTML.match(/<option /g) || []).length, selected: sel ? sel[1] : null,
+           load: els['#cpLoadRun'] ? els['#cpLoadRun'].innerHTML : null };
 };
+// the Docker stack's Ollama without the default operator: one run of another model, the judge, an embedding model left out
+const OLLAMA = (models, excluded) => ({ ...MODELS, operator: { models, excluded, default: 'glm-edge-1.5b-chat-abl:latest', error: null } });
+const EMB = [{ name: 'nomic-embed-text:latest', why: 'an embedding model, not a chat model' }];
 (async () => {
   const out = {
     local: await card('local', MODELS),
     localDown: await card('local', { ...MODELS, operator: { models: [], default: 'glm-edge-1.5b-chat-abl:latest', error: 'glm-serve did not list its models: <refused>' } }),
     k8s: await card('k8s', MODELS),
+    localOtherRun: await card('local', OLLAMA(['glm-edge-4b-chat-abl:latest', 'qwen3:8b'], EMB)),
+    localNoRun: await card('local', OLLAMA(['qwen3:8b'], EMB)),
+    k8sOther: await card('k8s', OLLAMA(['glm-abl'], [])),
   };
   console.log(JSON.stringify(out));
 })().catch((e) => { console.error(e && e.stack || e); process.exit(1); });
@@ -224,6 +232,25 @@ class OperatorCard(unittest.TestCase):
         g = self.got["localDown"]
         self.assertIn("did not list its models: &lt;refused&gt;", g["info"])   # the server's error, as text
         self.assertNotIn("<refused>", g["info"])
+
+    def test_the_docker_console_flags_a_missing_default_and_picks_a_run(self):
+        g = self.got["localOtherRun"]
+        self.assertEqual(g["selected"], "glm-edge-4b-chat-abl:latest")     # the run that is there, not the judge
+        self.assertEqual(g["options"], 3)                                   # the missing default stays visible, marked
+        self.assertIn("glm-edge-1.5b-chat-abl:latest, the default copilot model, is not on this Ollama", g["info"])
+        self.assertIn("an abliterated one is chosen instead", g["info"])
+        self.assertIn("nomic-embed-text:latest (embedding)", g["info"])    # left out, and why
+
+    def test_the_docker_console_without_a_run_says_so(self):
+        g = self.got["localNoRun"]
+        self.assertIn("no abliterated model is there yet", g["info"])
+        self.assertEqual(g["selected"], "glm-edge-1.5b-chat-abl:latest")   # never the judge as the "abliterated" model
+        self.assertIn("GLM-5.x runs have none", g["info"])
+
+    def test_the_kubernetes_console_lists_what_glm_serve_serves(self):
+        g = self.got["k8sOther"]                                          # glm-serve serves one name: nothing to flag
+        self.assertEqual((g["options"], g["selected"]), (1, "glm-abl"))
+        self.assertNotIn("not on this Ollama", g["info"])
 
     def test_the_kubernetes_console_keeps_glm_serve_and_load(self):
         g = self.got["k8s"]

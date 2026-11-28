@@ -71,8 +71,9 @@ algebra, and the same procedure transfers unchanged from a 1.5B dense model to a
 Supported models (`arch.py`): GLM-Edge (`glm`), GLM-4 0414 / glm-4-9b-chat-hf (`glm4`, post-norm block: the direction is folded
 through the norm weight), GLM-4.1V / 4.5V / 4.6V text decoders, GLM-4.5 / 4.6 MoE (`glm4_moe`, `glm4_moe_lite`), GLM-5 / 5.1 /
 5.2 / 5.3 (`glm_moe_dsa`, MoE + sparse attention; the DSA indexer is left untouched), GLM-5.3-Flash (`glm5_next`: hybrid
-linear + sparse attention, MoE, four residual streams per token; see section 6), and legacy ChatGLM checkpoints behind
-`--trust-remote-code`. Checkpoints may be bf16, fp16/fp32 or FP8 block-scaled (the blocks of `weight_block_size`, 128 × 128,
+linear + sparse attention, MoE, four residual streams per token; see section 6). Legacy ChatGLM checkpoints (remote code:
+ChatGLM2/3, glm-4-9b-chat) are recognised but refused: their code does not load with transformers 5 (it reads
+`config.max_length`, which transformers 5 drops), so use `glm-4-9b-chat-hf`. Checkpoints may be bf16, fp16/fp32 or FP8 block-scaled (the blocks of `weight_block_size`, 128 × 128,
 a last partial block included; a scale in another shard than its weight stays in the shard the index names). The vision models (GLM-4.xV, GLM-5.3-Flash)
 load through `AutoModelForImageTextToText`; only their text decoder is measured and edited.
 
@@ -90,47 +91,78 @@ logits equal the unedited model's with the direction projected out of every stre
 ## 3. Deploy with Docker (recommended)
 
 **Requirements.** Docker Desktop (Windows/macOS) or Docker Engine on Linux; for GPU use an NVIDIA driver and, on Linux, the
-NVIDIA Container Toolkit (Docker Desktop on Windows needs only WSL2 and a current driver). No GPU, or a runtime that cannot
-hand it to containers: the stack runs on the CPU, see [Without a GPU](#without-a-gpu). About 20 GB of disk for the image
-and pulls, plus the models: roughly 25 GB per 4B model (base copy, edited copy, two GGUFs), hundreds of GB for the large ones.
+NVIDIA Container Toolkit. Docker Desktop on Windows needs its WSL 2 backend, a current WSL (`wsl --update`) and a current
+NVIDIA driver; Rancher Desktop gives containers no GPU on Windows ([below](#rancher-desktop)). No GPU, or a runtime that cannot
+hand it to containers: the stack runs on the CPU, see [Without a GPU](#without-a-gpu). Disk: about 15 GB for the image and
+20 GB with the other images; per 4B model about 25 GB in the workspace (base copy, edited copy, two GGUFs) plus the two GGUFs
+again (8 to 9 GB) in Ollama's volume, and each further run of it one more GGUF (about 4 GB); step 4 adds about 6 GB (n8n,
+Qdrant, the judge and the embedding model). Hundreds of GB for the large models.
+
+Every command below runs in the repository's folder, in PowerShell as in bash:
 
 ```bash
 git clone https://github.com/Thrizzo/redteam-llm-lab.git
 cd redteam-llm-lab
 cp deploy/.env.example deploy/.env
-mkdir -p workspace          # WORKSPACE=../workspace in .env is resolved from deploy/, i.e. this folder
+mkdir workspace
 ```
 
-Edit `deploy/.env`: set `CADDY_HASH` to the output of
+`cp` only the first time: it overwrites an existing `deploy/.env`. `WORKSPACE=../workspace` in `.env` is resolved from
+`deploy/`, so it is the `workspace` folder just created. On Windows a folder outside *Documents* and OneDrive is faster and is
+not uploaded: `WORKSPACE=D:/redteam-workspace`, with forward slashes and without double quotes (inside double quotes compose
+turns `\r`, `\n`, `\t` of a path into control characters).
+
+Set `CADDY_HASH` in `deploy/.env` to the hash this prints (it asks for the password twice), in single quotes:
 
 ```bash
-docker run --rm caddy:2 caddy hash-password --plaintext 'yourpassword'
+docker run --rm -it caddy:2 caddy hash-password
 ```
 
-(keep the single quotes around the hash in the file). Then fetch the published image and start the stack:
+`COMPOSE_FILE` in `deploy/.env` lists the compose files every command uses: the stack plus `docker-compose.gpu.yml` (NVIDIA
+GPU). Without a GPU remove the second one there; step 4 adds a third ([Step 4](#step-4-the-pentest-copilot)). One list for
+every command: a command that left a file out would recreate the containers without the GPU or step 4.
+
+**Windows with Rancher Desktop installed too:** the GPU needs Docker Desktop's engine. The two cannot run at the same time
+(quit one before starting the other), and the docker command must reach Docker Desktop: `docker context show` prints
+`desktop-linux`. After `deploy/k8s/tests/rancher-dev.ps1`, which works with Rancher Desktop's engine, switch back with
+`docker context use desktop-linux`.
+
+Build the image and start the stack:
 
 ```bash
-docker compose -f deploy/docker-compose.yml --env-file deploy/.env pull app
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env up -d
+docker compose --env-file deploy/.env up -d --build
 ```
 
-`pull app` fetches `ghcr.io/thrizzo/redteam-llm-lab`; without it, `up -d` builds the image locally from `deploy/Dockerfile`
-(about 15 minutes, the torch CUDA wheels alone are several GB), and `up -d --build` forces a rebuild. `ollama/ollama` and
-`caddy` are pulled either way.
+The first build takes about 15 minutes (the torch CUDA wheels alone are several GB); `ollama/ollama` and `caddy` are pulled.
+Then check that the app sees the GPU (`True` and its name):
 
-If `pull app` fails with `unauthorized`, the package on GHCR is private. Its visibility is separate from the repository's:
-making the repository public does not make an already published package public. The owner can open it up once on the
-package's page under *Package settings* → *Danger Zone* → *Change visibility*. Otherwise log in first with a personal access
-token (classic) that has the `read:packages` scope: `docker login ghcr.io -u <github user>` and paste the token at the
-password prompt (piping a literal token in with `echo` can leave it in the shell history). Or skip `pull app` and build locally as above.
+```bash
+docker compose --env-file deploy/.env exec app python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"
+```
 
 Open **http://localhost:8080** and log in with the user and password from `.env`. The first run of a model downloads it from
 Hugging Face into `workspace/models/`.
 
+**Update** after `git pull`: the same `up -d --build`. The code is part of the image: without `--build` the stack keeps
+running the old one. Only the layers from the code on are rebuilt, a minute or two unless `deploy/requirements.txt`
+changed. The app restarts, which stops a running pipeline stage, so let it finish first. `docker compose --env-file
+deploy/.env pull ollama caddy` (plus `n8n qdrant` with step 4) updates the other images. Stop the stack with `docker compose
+--env-file deploy/.env stop` (or `down`); never `down -v`, which deletes Ollama's models, n8n's data and the Qdrant index.
+
+**The published image** `ghcr.io/thrizzo/redteam-llm-lab:latest` is built from `main`: `docker compose --env-file
+deploy/.env pull app` fetches it instead of a build, and replaces a local build of the same name, so a checkout of another
+branch then runs `main`'s code. If the pull fails with `unauthorized`, the package does not exist yet or is private. Its
+visibility is separate from the repository's: making the repository public does not make an already published package
+public. The owner can open it up once on the package's page under *Package settings* → *Danger Zone* → *Change visibility*.
+Otherwise log in first with a personal access token (classic) that has the `read:packages` scope: `docker login ghcr.io -u
+<github user>` and paste the token at the password prompt (piping a literal token in with `echo` can leave it in the shell
+history). Or build, as above.
+
 What the stack does:
 
 - **app**: the pipeline and the web app, reachable only through Caddy. Starts as root just long enough to hand the mounted
-  workspace to its unprivileged user (uid 1000), then drops privileges.
+  workspace to its unprivileged user (uid 1000; on a Linux host, a folder that belongs to a user gives the app that user's
+  uid instead, so the files stay theirs), then drops privileges.
 - **ollama**: serves the base and abliterated models for the Compare stage; the app uploads GGUFs through Ollama's API, so no
   files need to be shared.
 - **caddy**: basic auth on port 8080. `BIND_ADDR=127.0.0.1` (default) keeps it on this machine; use an SSH tunnel or VPN
@@ -148,59 +180,77 @@ never needs to reach Ollama.
 Headless runs use the same image:
 
 ```bash
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env run --rm app --model THUDM/glm-edge-4b-chat
-docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env run --rm app --model zai-org/GLM-5.2 --device-map auto --skip-verify --no-ollama
+docker compose --env-file deploy/.env run --rm app --model THUDM/glm-edge-4b-chat
+docker compose --env-file deploy/.env run --rm app --model zai-org/GLM-5.2 --device-map auto --skip-verify --no-ollama
 ```
 
-`deploy/.env` knobs for the compose stack: `WORKSPACE`, `OLLAMA_STORE`, `CADDY_USER`, `CADDY_HASH`, `BIND_ADDR`, `HTTP_PORT`,
-`HF_TOKEN` (gated repos; passed to the pipeline through the environment, never written to run files). The image itself is
+`deploy/.env` knobs for the compose stack: `COMPOSE_FILE`, `WORKSPACE`, `OLLAMA_STORE`, `CADDY_USER`, `CADDY_HASH`,
+`BIND_ADDR`, `HTTP_PORT`, `HF_TOKEN` (gated repos; passed to the pipeline through the environment, never written to run
+files), `TORCH_FLAVOR` (the image's PyTorch build: `cu126` for GPUs older than Turing, see [Without a GPU](#without-a-gpu)),
+and for step 4 `N8N_ENCRYPTION_KEY`, `N8N_PORT`, `COPILOT_OPERATOR_MODEL`, `LAB_ALLOWLIST`, `LAB_AUTORUN_*`. The image itself is
 configured through environment variables that the native install, a custom `docker run` or the Kubernetes manifest can
 override: `ABL_PROJECT` (workspace), `OLLAMA_HOST`, `ABL_HOST` / `ABL_PORT`, `ABL_PYTHON`, `ABL_GGUF_PY`, `ABL_LLAMA_CPP`
 (see `abliterate/platform.py`); inside the compose stack they are fixed by the Dockerfile and compose file.
 
-**Offline / air-gapped**: on a connected machine `docker pull ghcr.io/thrizzo/redteam-llm-lab:latest && docker save
-ghcr.io/thrizzo/redteam-llm-lab:latest ollama/ollama:latest caddy:2 -o redteam-llm-lab-image.tar`, then
-`docker load -i redteam-llm-lab-image.tar` on the target and run the compose commands without `pull`.
+**Offline / air-gapped**: on a connected machine build or pull the image, then `docker save
+ghcr.io/thrizzo/redteam-llm-lab:latest ollama/ollama:latest caddy:2 -o redteam-llm-lab-image.tar` (with step 4 also
+`n8nio/n8n:2.48.7 qdrant/qdrant:v1.20.2`). On the target `docker load -i redteam-llm-lab-image.tar`, then `up -d` without
+`--build` and without `pull`.
 
 ### Step 4: the pentest copilot
 
 The stack above runs steps 1 to 3. Step 4 **Pentest** needs n8n and Qdrant, which the overlay
 `deploy/n8n/docker-compose.n8n.yml` adds; the console shows the step once it reaches n8n.
 
-1. Set `N8N_ENCRYPTION_KEY` in `deploy/.env` (any long random string; `.env.example` shows how to make one). Without it
-   compose stops with *required variable N8N_ENCRYPTION_KEY is missing a value*.
-2. Start the stack with the overlay, and keep it in every compose command from then on:
-   ```bash
-   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env up -d
+1. Set `N8N_ENCRYPTION_KEY` in `deploy/.env` (any long random string; `.env.example` shows how to make one), once: with
+   another key later n8n refuses to start. Without it compose stops with *required variable N8N_ENCRYPTION_KEY is missing a
+   value*.
+2. Add the overlay to `COMPOSE_FILE` in `deploy/.env`, so that every command from then on uses it:
    ```
-   n8n listens on `127.0.0.1:5678`. If that port is taken (*Bind for 127.0.0.1:5678 failed: port is already allocated*),
-   stop what holds it or set `N8N_PORT=5679` in `deploy/.env` and use that port below.
+   COMPOSE_FILE=deploy/docker-compose.yml;deploy/docker-compose.gpu.yml;deploy/n8n/docker-compose.n8n.yml
+   ```
+   and start the stack (this restarts the app: let a running pipeline stage finish first):
+   ```bash
+   docker compose --env-file deploy/.env up -d --build
+   ```
+   n8n listens on `127.0.0.1:5678` (`N8N_PORT` in `deploy/.env` moves it). *Bind for 127.0.0.1:5678 failed: port is
+   already allocated* means another container holds the port, often an n8n of your own: `docker ps -a --filter
+   publish=5678` names it. A Windows program on the port (a leftover `kubectl port-forward`, for one) gives *Ports are not
+   available* instead, and `Get-NetTCPConnection -LocalPort 5678 -State Listen` names it. Stop it, or set `N8N_PORT=5679`.
 3. Pull the judge and the embedding model into the stack's Ollama:
    ```bash
-   docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec ollama ollama pull qwen3:8b
+   docker compose --env-file deploy/.env exec ollama ollama pull qwen3:8b
    ```
    ```bash
-   docker compose -f deploy/docker-compose.yml --env-file deploy/.env exec ollama ollama pull nomic-embed-text
+   docker compose --env-file deploy/.env exec ollama ollama pull nomic-embed-text
    ```
-4. Set up n8n and connect the console, in one line (also in PowerShell; Python 3 on this machine):
+4. Set up n8n and connect the console. This runs in a one-off app container: no Python on this machine, n8n reached inside
+   the stack whatever `N8N_PORT` is, and the console's secrets written to the workspace wherever `WORKSPACE` points:
    ```bash
-   python deploy/n8n/connect_console.py --n8n http://localhost:5678 --email <your n8n login> --setup-owner --secrets-dir workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
+   docker compose --env-file deploy/.env run --rm --no-deps app python /app/deploy/n8n/connect_console.py --n8n http://n8n:5678 --email <your n8n login> --setup-owner --secrets-dir /workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
    ```
-   It creates n8n's owner account (the password 8 to 64 characters with a digit and a capital letter), the credentials and
-   the workflow, and writes the console's webhook secret and n8n key to `workspace/.copilot`.
+   It asks for a password and creates n8n's owner account with it (8 to 64 characters with a digit and a capital letter),
+   the credentials and the workflow, and writes the console's webhook secret and n8n key to `<WORKSPACE>/.copilot`.
 5. Reload http://localhost:8080: the header shows step 4 **Pentest**. The copilot model is one that Ollama holds: step 2
-   imports every abliterated run as `<model>-abl`; `COPILOT_OPERATOR_MODEL` in `deploy/.env` makes one the default.
+   imports every abliterated run of a model with a GGUF (GLM-Edge, GLM-4) as `<model>-abl`; GLM-5.x runs get no GGUF, so
+   in this stack they cannot be the copilot model. `COPILOT_OPERATOR_MODEL` in `deploy/.env` sets the default.
    Details, writeups for retrieval, and the n8n form: [deploy/n8n/README.md](deploy/n8n/README.md#setup).
+
+The pipeline and Ollama share the GPU here. While a stage that loads the model runs, the console holds back copilot runs,
+free prompts, Compare and knowledge uploads (they would load Ollama's models beside it) and says so; runs from the n8n form
+should wait as well. Everything the console does in step 4 also goes into `<WORKSPACE>/audit/` and the app's log
+(`docker compose --env-file deploy/.env logs app`).
 
 ### Rancher Desktop
 
 The image is a plain OCI image.
 
-- *moby (dockerd) backend*: the commands above work unchanged.
+- *moby (dockerd) backend*: the commands above work unchanged (without the GPU file on Windows). Docker Desktop and Rancher
+  Desktop cannot run at the same time; see [Windows with Rancher Desktop installed too](#3-deploy-with-docker-recommended).
 - *containerd backend*: `nerdctl compose -f deploy/docker-compose.yml up -d` (and `nerdctl load -i redteam-llm-lab-image.tar`
   for the exported image).
-- On **Windows** Rancher Desktop does not pass the GPU into containers, whatever driver the host has: leave
-  `docker-compose.gpu.yml` out and the whole pipeline runs on the CPU (next section). On a Linux host with the NVIDIA
+- On **Windows** Rancher Desktop does not pass the GPU into containers, whatever driver the host has: remove
+  `docker-compose.gpu.yml` from `COMPOSE_FILE` and the whole pipeline runs on the CPU (next section). On a Linux host with the NVIDIA
   Container Toolkit the GPU works with either backend.
 - In **the full lab on Kubernetes** (below) Rancher Desktop's pods get no GPU either, but the copilot's judge and
   embeddings can run on Ollama for Windows, which uses it: `deploy/k8s/tests/rancher-dev.ps1 -HostOllama`, see
@@ -208,11 +258,16 @@ The image is a plain OCI image.
 
 ### Without a GPU
 
-Start the stack without the GPU file; nothing else changes:
+Remove `deploy/docker-compose.gpu.yml` from `COMPOSE_FILE` in `deploy/.env` (`COMPOSE_FILE=deploy/docker-compose.yml`, plus
+the n8n overlay for step 4); nothing else changes:
 
 ```bash
-docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+docker compose --env-file deploy/.env up -d --build
 ```
+
+A GPU older than Turing (GTX 9xx/10xx, Titan V, Tesla P40/V100) is visible but too old for the image's PyTorch (cu128, kernels
+for Turing and newer). The app says so in its banner and runs on the CPU. To use it, set `TORCH_FLAVOR=cu126` in
+`deploy/.env` and build again (`up -d --build`); that build has no kernels for RTX 50xx cards.
 
 When no CUDA GPU is visible the pipeline and the lab load the model onto the CPU instead of failing with *Found no NVIDIA
 driver on your system*: `--device-map cuda` falls back to `cpu`, and `--dtype auto` becomes float32 (bf16 on processors with
@@ -356,7 +411,11 @@ are dense, the rest MoE with 288 routed + 1 shared expert (8 active). FP8 checkp
   write any further.
 
 Hardware: about 330 GB in FP8, so one node with 8 FP8-capable 80 GB GPUs (H100 or H200) runs measure and scan; on A100s
-transformers dequantizes the checkpoint to bf16 (about 640 GB), which does not fit with activations. Install the `flash-linear-attention` kernels
+transformers dequantizes the checkpoint to bf16 (about 640 GB), which does not fit with activations. On FP8-capable GPUs
+(compute capability 8.9 and newer) transformers keeps the weights in FP8 and runs them through the `finegrained-fp8` Triton
+kernel from the Hub: the image has the `kernels` package and the C compiler Triton needs, and the download stage fetches the
+kernel with the model, so the measure and scan Jobs, which have no internet, find it in the cache (a cache without it stops
+such a run before the load, with what to do). Install the `flash-linear-attention` kernels
 there; without them transformers runs its PyTorch reference code for the linear layers (correct, much slower). vLLM
 v0.34.0 (the glm-serve pin) registers `Glm5NextForConditionalGeneration`. llama.cpp at the pinned commit converts it as
 well (arch `glm5-next`; checked through the converter view with the real tokenizer and on a tiny model of the
@@ -368,8 +427,8 @@ architecture), but serving that GGUF with Ollama is untested, and the preset unt
 
 - The app has no login of its own and can download models, run subprocesses, edit datasets and write files. Only expose it
   behind the provided proxy (or an Ingress) with authentication, on a trusted network or over TLS.
-- Models are loaded from safetensors without remote code unless `--trust-remote-code` is passed (legacy ChatGLM only). The
-  GGUF converter refuses model folders that contain code files.
+- Models are loaded from safetensors without remote code unless `--trust-remote-code` is passed (checkpoints that bring
+  their own model class). The GGUF converter refuses model folders that contain code files.
 - Datasets are local JSONL copies exported once from a pinned Hugging Face revision, with the revision and SHA-256 recorded in
   `data/manifest.json`; every edit and removal is logged. `ABL_HARMFUL_DATASET` / `ABL_HARMLESS_DATASET` select other
   sources (`org/name[@revision][#column]`), e.g. for licence reasons. Switching exports again, keeps the old copy under

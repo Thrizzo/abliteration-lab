@@ -1063,10 +1063,10 @@ function Invoke-Ingress {
     }
     $big = Join-Path $script:Tmp 'big.txt'
     $fs = [IO.File]::Create($big)
-    $fs.SetLength(51000000)
+    $fs.SetLength(53000000)
     $fs.Close()
     $r = Http -Method 'POST' -Url "$IngressUrl/api/knowledge/preview?source=htb&name=big.txt" -Header $h -File $big
-    Step "a 51 MB upload is refused (413; got $($r.Code))" { $r.Code -eq '413' }
+    Step "a 53 MB upload, over the 50 MiB cap, is refused (413; got $($r.Code))" { $r.Code -eq '413' }
 }
 
 function Invoke-Policies {

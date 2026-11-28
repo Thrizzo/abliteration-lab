@@ -202,14 +202,22 @@ def _same_model(a, b):
     return norm(a) == norm(b)
 
 
+def _embedding(name, family):
+    return "embed" in str(name).lower() or str(family).lower() in ("bert", "nomic-bert")
+
+
 class CopilotModels:
     """Which models a run may use. Operators: what glm-serve serves (vLLM: the promoted run as glm-abl; Ollama in dev:
-    every model it holds). Judges: the copilot's Ollama, minus embedding models and anything abliterated."""
+    every model it holds). Judges: the copilot's Ollama, minus embedding models and anything abliterated.
+    operator_tags: the operator server is (or may be) an Ollama that holds every model of the stack (the Docker stack):
+    its /api/tags then names the embedding models, which are no operators, and abliterated models are listed first.
+    operator_server names the server in messages."""
 
     def __init__(self, operator_url, judge_url, operator_default="glm-abl", judge_default="qwen3:8b", http_error=None,
-                 timeout=5, cache_s=10.0):
+                 timeout=5, cache_s=10.0, operator_tags=False, operator_server="glm-serve"):
         self.operator_url, self.judge_url = (operator_url or "").rstrip("/"), (judge_url or "").rstrip("/")
         self.operator_default, self.judge_default = operator_default, judge_default
+        self.operator_tags, self.operator_server = operator_tags, operator_server
         self.http_error = http_error or (lambda status, msg: RuntimeError(f"{status}: {msg}"))
         self.timeout, self.cache_s = timeout, cache_s
         self._cache = (0.0, None)
@@ -221,12 +229,25 @@ class CopilotModels:
 
     def _operators(self):
         if not self.operator_url:
-            return [], "no model server configured (GLM_SERVE_URL)"
+            return [], [], "no model server configured (GLM_SERVE_URL)"
         try:
             data = self._get(self.operator_url + "/v1/models").get("data") or []
-            return sorted({str(m.get("id")) for m in data if isinstance(m, dict) and m.get("id")}), None
+            ids = sorted({str(m.get("id")) for m in data if isinstance(m, dict) and m.get("id")})
         except (OSError, ValueError, AttributeError) as e:
-            return [], f"glm-serve did not list its models: {cut(e, 200)}"
+            return [], [], f"{self.operator_server} did not list its models: {cut(e, 200)}"
+        excluded = []
+        if self.operator_tags:
+            try:                                                   # an Ollama: drop its embedding models
+                tags = self._get(self.operator_url + "/api/tags").get("models") or []
+            except (OSError, ValueError, AttributeError):
+                tags = []                                          # not an Ollama (vLLM has no /api/tags): all stay
+            emb = [str((m or {}).get("name") or "") for m in tags
+                   if _embedding((m or {}).get("name") or "", ((m or {}).get("details") or {}).get("family") or "")]
+            for name in [i for i in ids if any(_same_model(i, e) for e in emb)]:
+                ids.remove(name)
+                excluded.append({"name": name, "why": "an embedding model, not a chat model"})
+            ids.sort(key=lambda n: (not abliterated(n), n))         # the abliterated runs (<model>-abl) first
+        return ids, excluded, None
 
     def _judges(self):
         if not self.judge_url:
@@ -241,7 +262,7 @@ class CopilotModels:
             family = str(((m or {}).get("details") or {}).get("family") or "").lower()
             if not name:
                 continue
-            if "embed" in name.lower() or family in ("bert", "nomic-bert"):
+            if _embedding(name, family):
                 excluded.append({"name": name, "why": "an embedding model, not a chat model"})
             elif abliterated(name):
                 excluded.append({"name": name, "why": "abliterated: the judge must be a regular model"})
@@ -254,22 +275,22 @@ class CopilotModels:
             at, cached = self._cache
             if cached and not fresh and time.time() - at < self.cache_s:
                 return cached
-        ops, op_err = self._operators()
+        ops, op_excluded, op_err = self._operators()
         judges, excluded, j_err = self._judges()
-        out = {"operator": {"models": ops, "default": self.operator_default, "error": op_err},
+        out = {"operator": {"models": ops, "excluded": op_excluded, "default": self.operator_default, "error": op_err},
                "judge": {"models": judges, "excluded": excluded, "default": self.judge_default, "error": j_err}}
         with self.lock:
             self._cache = (time.time(), out)
         return out
 
     def operator(self, name=None):
-        """The model a free prompt goes to: one glm-serve lists (when it can be asked), else http_error(400)."""
+        """The model a free prompt goes to: one the operator server lists (when it can be asked), else http_error(400)."""
         op = str(name or "").strip() or self.operator_default
         if not MODEL_NAME.fullmatch(op):
             raise self.http_error(400, f"model {cut(op, 80)!r} is not a model name")
         lists = self.list()["operator"]
         if name and not lists["error"] and not any(_same_model(op, a) for a in lists["models"]):
-            raise self.http_error(400, f"glm-serve has no model {op!r} (it has: {', '.join(lists['models']) or 'none'})")
+            raise self.http_error(400, f"{self.operator_server} has no model {op!r} (it has: {', '.join(lists['models']) or 'none'})")
         return op
 
     def check(self, operator_model=None, judge_model=None):
@@ -288,7 +309,7 @@ class CopilotModels:
         for role, name, chosen in (("operator", op, operator_model), ("judge", judge, judge_model)):
             avail = lists[role]["models"]
             if chosen and not lists[role]["error"] and not any(_same_model(name, a) for a in avail):
-                where = "glm-serve" if role == "operator" else "the copilot's Ollama"
+                where = self.operator_server if role == "operator" else "the copilot's Ollama"
                 raise self.http_error(400, f"{where} has no model {name!r} (it has: {', '.join(avail) or 'none'})")
         return op, judge
 
@@ -307,16 +328,28 @@ class CopilotRuns:
         self.runs = collections.OrderedDict()  # execution id -> run, newest last
 
     # ---------------------------------------------------------------- configuration
-    def secret(self, name):
+    def _read(self, name):
+        """(value, why it cannot be read): a file that is there but not readable for this process (written 0600 by
+        another user, or by root) is not the same as a missing one, and running the set-up again would not help."""
         try:
             with open(os.path.join(self.secrets_dir or "", name), encoding="utf-8") as f:
-                v = f.read().strip()
+                return f.read().strip(), ""
+        except PermissionError:
+            uid = getattr(os, "getuid", lambda: "?")()
+            return "", f"{name} (in {self.secrets_dir}, but the console, uid {uid}, may not read it: chown it to that uid)"
         except OSError:
-            v = ""
-        return v or os.environ.get(SECRET_FILES[name], "")
+            return "", ""
+
+    def secret(self, name):
+        return self._read(name)[0] or os.environ.get(SECRET_FILES[name], "")
 
     def missing(self):
-        return ([] if self.base else ["N8N_URL"]) + [n for n in SECRET_FILES if not self.secret(n)]
+        out = [] if self.base else ["N8N_URL"]
+        for n in SECRET_FILES:
+            v, why = self._read(n)
+            if not (v or os.environ.get(SECRET_FILES[n], "")):
+                out.append(why or n)
+        return out
 
     # ---------------------------------------------------------------- HTTP
     def _http(self, method, path, body=None, headers=None, timeout=30):
@@ -365,7 +398,8 @@ class CopilotRuns:
         missing = self.missing()
         if missing:
             raise self.http_error(409, "the copilot is not connected yet (missing: " + ", ".join(missing)
-                                  + "). Run deploy/n8n/connect_console.py once; see deploy/k8s/README.md")
+                                  + "). Run deploy/n8n/connect_console.py once: README.md, Step 4 for the Docker stack, "
+                                  "deploy/k8s/README.md for Kubernetes")
         who = who or {}
         body = {"task": task, "target": target, "requested_by": who.get("user") or "", "mode": mode,
                 "command": command if mode == "manual" else "", "operator_model": operator_model or "",

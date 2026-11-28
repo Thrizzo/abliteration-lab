@@ -199,13 +199,17 @@ if K8S:
     control = k8sjobs.ModelControl(_k8s_settings, _k8s, os.environ.get("LAB_STATE_DIR", "/var/lib/lab"), audit,
                                    http_error=HTTPException)
 else:
+    import k8sjobs  # noqa: E402  (its Audit is standard library only)
     pipeline = Pipeline()
-    serving = audit = control = None
+    serving = control = None
+    # the same audit log as in Kubernetes: workspace/audit/YYYY-MM-DD.jsonl and the container log (AUDIT lines). The
+    # copilot runs, free prompts, knowledge uploads and engagement changes the console records outlive a restart
+    audit = k8sjobs.Audit(PROJECT)
 
 # the live feed: copilot runs, free prompts, the kill switch and Promote/Rollback (audit records), Jobs, model state
 FEED = CR.Feed()
+audit.feed = FEED
 if K8S:
-    audit.feed = FEED
     pipeline.feed = FEED
 # copilot runs go through n8n (its webhook + API); the secrets come from the mounted Secret "copilot", read on use
 copilot = CR.CopilotRuns(os.environ.get("N8N_URL"), os.environ.get("COPILOT_SECRETS_DIR", "/etc/lab/copilot"), FEED, audit=audit,
@@ -215,8 +219,10 @@ model_chat = CR.ModelChat(os.environ.get("GLM_SERVE_URL"),
                           (_k8s_settings.get("serving") or {}).get("servedName", "glm-abl") if K8S else os.environ.get("GLM_SERVE_MODEL", "glm-abl"),
                           FEED, audit=audit)
 # which models a copilot run may use: operators from glm-serve, judges from the copilot's Ollama (never abliterated)
+# Outside Kubernetes the operator server is usually the stack's Ollama, which holds every model (embeddings included)
 copilot_models = CR.CopilotModels(os.environ.get("GLM_SERVE_URL"), os.environ.get("RAG_OLLAMA_URL"), operator_default=model_chat.model,
-                                  judge_default=os.environ.get("COPILOT_JUDGE_MODEL") or "qwen3:8b", http_error=HTTPException)
+                                  judge_default=os.environ.get("COPILOT_JUDGE_MODEL") or "qwen3:8b", http_error=HTTPException,
+                                  operator_tags=not K8S, operator_server="glm-serve" if K8S else "the model server (GLM_SERVE_URL)")
 # the copilot's engagement (scope statement, rules, scope, exclusions, window, prohibited tools): versioned under
 # workspace/engagement/, audited. LAB_ALLOWLIST / LAB_AUTORUN_* are the ceiling n8n enforces (ConfigMap copilot-scope);
 # the console reads the same values to check what the GUI saves.
@@ -257,20 +263,23 @@ def ollama_post(path, body, timeout=30):
         return json.loads(r.read())
 
 
-_cuda = {"checked": False, "available": None, "torch": None, "dtype": None}
+_cuda = {"checked": False, "available": None, "torch": None, "dtype": None, "problem": ""}
 
 
 def cuda_available():
-    """torch.cuda.is_available() computed once in a thread (importing torch costs ~2 s); None until known.
-    Also records the dtype a run gets here by default (bfloat16 on a GPU, usually float32 on the CPU)."""
+    """Whether runs get a CUDA GPU here: one is visible and this torch build has kernels for it (hooks.cuda_usable),
+    computed once in a thread (importing torch costs ~2 s); None until known. Also records the dtype a run gets here by
+    default (bfloat16 on a GPU, usually float32 on the CPU) and why a visible GPU is not used (problem)."""
     if not _cuda["checked"]:
         _cuda["checked"] = True
         def probe():
             try:
                 import torch
-                from abliterate.hooks import resolve_device
+                from abliterate.hooks import gpu_problem, resolve_device
                 _cuda["dtype"] = resolve_device("cuda", "auto", log=lambda *a: None)[1]
-                _cuda["available"], _cuda["torch"] = bool(torch.cuda.is_available()), torch.__version__
+                _cuda["problem"] = gpu_problem()
+                _cuda["available"] = bool(torch.cuda.is_available()) and not _cuda["problem"]
+                _cuda["torch"] = torch.__version__
             except Exception as e:
                 _cuda["available"], _cuda["torch"] = False, f"import failed: {e}"
         threading.Thread(target=probe, daemon=True).start()
@@ -307,7 +316,8 @@ def env():
         oll = {"reachable": True, "models": models, "loaded": loaded}
     except Exception as e:
         oll = {"reachable": False, "error": str(e), "models": [], "loaded": []}
-    return {"project": PROJECT, "code": CODE, "gpu": gpu_info(), "cuda": cuda_available(), "torch": _cuda["torch"], "dtype": _cuda["dtype"], "os": os.name,
+    return {"project": PROJECT, "code": CODE, "gpu": gpu_info(), "cuda": cuda_available(), "cuda_problem": _cuda["problem"],
+            "torch": _cuda["torch"], "dtype": _cuda["dtype"], "os": os.name,
             "notebook_engine": os.name == "nt", "disk_free_gb": round(disk.free / 1e9, 1), "python": PY, "ollama_host": OLLAMA,
             "venv": os.path.isfile(PY), "venv_gguf": os.path.isfile(PL.gguf_python(PROJECT)),
             "llama_cpp": os.path.isfile(os.path.join(PL.llama_cpp_dir(PROJECT), "convert_hf_to_gguf.py")), "data": os.path.isfile(p("data", "harmful_test.jsonl")),
@@ -578,10 +588,21 @@ def copilot_model_list(fresh: bool = False):
     return {**copilot_models.list(fresh), "embeddings": {"model": knowledge.embed_model}}
 
 
+def _gpu_free(what):
+    """Outside Kubernetes the pipeline and Ollama share one machine: the GPU (or, without one, the RAM). A stage that loads
+    the model starts with Ollama's models unloaded, and anything that makes Ollama load one beside it (a copilot run's
+    operator and judge, a free prompt, Compare, the embeddings of an upload) can make the stage run out of memory. So
+    they wait (409) until the stage ends. In Kubernetes the Jobs and the copilot's models run apart."""
+    if not K8S and pipeline.running() and pipeline.stage not in ("download", "ollama", "deploy"):
+        raise HTTPException(409, f"the pipeline's {pipeline.stage} stage is running and needs the GPU (or the RAM) for itself: "
+                                 f"{what} can start when it has finished, because Ollama shares that memory with it here")
+
+
 @app.post("/api/copilot/run")
 def copilot_run(b: CopilotRun, request: Request):
     """Starts the n8n copilot with the chosen models and the active engagement: scope gate, retrieval, operator (copilot
     mode) or the typed command (manual mode), policy gate, judge. It stages a command; nothing executes."""
+    _gpu_free("a copilot run (its operator and judge run on Ollama)")
     op, judge = copilot_models.check(b.operator_model, b.judge_model)
     return copilot.start(b.task, b.target, _who(request), mode=b.mode, command=b.command, operator_model=op, judge_model=judge,
                          engagement=engagements.payload())
@@ -627,6 +648,7 @@ def model_chat_stream(b: Prompt, request: Request):
     """A free prompt to the served model, streamed as NDJSON ({"token"} ..., then {"done"} or {"error"}), audited."""
     if not model_chat.base:
         raise HTTPException(404, "no model server configured (GLM_SERVE_URL)")
+    _gpu_free("a free prompt")
     who = _who(request)
     model = copilot_models.operator(b.model)
     return StreamingResponse((json.dumps(ev) + "\n" for ev in model_chat.stream(b.prompt, b.max_tokens, who, model)),
@@ -663,6 +685,7 @@ async def knowledge_preview(request: Request, source: str, name: str):
 @app.post("/api/knowledge/upload")
 async def knowledge_upload(request: Request, source: str, name: str):
     """Stores the file under workspace/writeups/<source>/ and ingests it in the background. Body: the file."""
+    _gpu_free("an upload (its embeddings run on Ollama)")
     data = await _upload_body(request)
     return await run_in_threadpool(knowledge.upload, source, name, data, _who(request))
 
@@ -772,6 +795,7 @@ class ChatReq(BaseModel):
 @app.post("/api/ollama/chat")
 def ollama_chat_proxy(c: ChatReq):
     from fastapi.responses import StreamingResponse
+    _gpu_free("Compare")
     body = json.dumps({"model": c.model, "stream": True, "options": {"temperature": 0, "num_predict": min(max(c.num_predict, 16), 2048)},
                        "messages": [{"role": "user", "content": c.prompt}]}).encode()
     req = urllib.request.Request(f"{OLLAMA}/api/chat", data=body, headers={"Content-Type": "application/json"})
@@ -944,6 +968,7 @@ def main():
     # built at import time from ABL_PROJECT: without these, --project left engagement versions and uploads in the code folder
     engagements.dir = os.path.join(PROJECT, "engagement")
     knowledge.root = os.path.join(PROJECT, "writeups")
+    audit.dir = os.path.join(PROJECT, "audit")
     import uvicorn
     print(f"Red Team LLM Lab: code {CODE}, project {PROJECT}, python {PY}, ollama {OLLAMA} -> http://{a.host}:{a.port}")
     if a.open:

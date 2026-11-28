@@ -1,17 +1,16 @@
-# n8n + Qdrant for the Red Team LLM Lab, as an overlay on the main stack so both share the network with Ollama.
+# n8n + Qdrant for the Red Team LLM Lab, as an overlay on the main stack so both share the network with Ollama. Add it to
+# COMPOSE_FILE in deploy/.env (after docker-compose.yml and, with a GPU, docker-compose.gpu.yml), then from the repository:
 #
-#   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env up -d
-#   # with GPU, add -f deploy/docker-compose.gpu.yml as usual
+#   docker compose --env-file deploy/.env up -d --build
 #
 # n8n reaches the models at http://ollama:11434 and the writeup store at http://qdrant:6333 (use those as the Base URL /
 # Qdrant URL in its credentials). n8n is bound to localhost only, like Caddy; Qdrant is not published at all.
 # Needs N8N_ENCRYPTION_KEY in deploy/.env (see .env.example). Then set n8n up in one go (owner account, credentials, the
-# workflow published, the console's secrets for step 4 "Pentest"); one line, also in PowerShell:
-#   python deploy/n8n/connect_console.py --n8n http://localhost:5678 --email <you> --setup-owner --secrets-dir workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
-# Use the copilot in the console's step 4 (http://localhost:8080) or at http://localhost:5678/form/pentest-copilot.
+# workflow published, the console's secrets for step 4 "Pentest"), in a one-off app container; one line, also in PowerShell:
+#   docker compose --env-file deploy/.env run --rm --no-deps app python /app/deploy/n8n/connect_console.py --n8n http://n8n:5678 --email <you> --setup-owner --secrets-dir /workspace/.copilot --operator-url http://ollama:11434/v1 --ollama-url http://ollama:11434 --qdrant-url http://qdrant:6333
+# Use the copilot in the console's step 4 (http://localhost:8080) or at http://localhost:<N8N_PORT>/form/pentest-copilot.
 # Fill the writeup store with:
-#   docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
-#     run --rm app python -m copilot.ingest --src /workspace/writeups
+#   docker compose --env-file deploy/.env run --rm --no-deps app python -m copilot.ingest --src /workspace/writeups
 services:
   n8n:
     # pinned; bump deliberately and re-import the workflow if node versions change. Docker Hub by default: the same
@@ -69,7 +68,7 @@ services:
       RAG_COLLECTION: ${RAG_COLLECTION:-writeups}
       RAG_EMBED_MODEL: ${RAG_EMBED_MODEL:-nomic-embed-text}
       # --- step 4 "Pentest": n8n, and its webhook secret and console key as files that connect_console.py writes with
-      # --secrets-dir workspace/.copilot (read on every use: no restart). Without them the tab says what is missing.
+      # --secrets-dir /workspace/.copilot (read on every use: no restart). Without them the tab says what is missing.
       N8N_URL: http://n8n:5678
       COPILOT_SECRETS_DIR: /workspace/.copilot
       # the models a run may use: operators and free prompts from Ollama's OpenAI-compatible API, judges and embeddings

@@ -52,7 +52,7 @@ ordering leaks and a punctuation bug while this was written.
 ## RAG (`ingest.py`)
 
 ```bash
-python -m copilot.ingest --src /workspace/writeups            # in the stack: docker compose ... run --rm app python -m copilot.ingest ...
+python -m copilot.ingest --src /workspace/writeups            # in the stack: docker compose --env-file deploy/.env run --rm --no-deps app python -m copilot.ingest ...
 ```
 
 - **Steps:** scrub, then markdown-aware chunking (a command stays with the prose explaining it, prefixed with its heading

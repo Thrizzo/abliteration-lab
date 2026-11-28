@@ -1,5 +1,6 @@
-# GPU override: adds the NVIDIA device reservations (Docker Desktop, Linux with the NVIDIA container toolkit).
-#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.gpu.yml --env-file deploy/.env up -d
+# GPU override: adds the NVIDIA device reservations (Docker Desktop, Linux with the NVIDIA container toolkit). On by default
+# through COMPOSE_FILE in deploy/.env; app and Ollama share the GPU (the console keeps Ollama off it while a stage runs).
+#   docker compose --env-file deploy/.env up -d
 services:
   app:
     deploy:

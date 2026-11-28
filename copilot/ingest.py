@@ -2,8 +2,7 @@ r"""Ingest pentest writeups into Qdrant for the n8n copilot's retrieval step.
 
     python -m copilot.ingest --src /workspace/writeups --dry-run --show-redactions   # read what scrubbing does first
     python -m copilot.ingest --src /workspace/writeups                                 # embed + upsert
-    docker compose -f deploy/docker-compose.yml -f deploy/n8n/docker-compose.n8n.yml --env-file deploy/.env \
-        run --rm app python -m copilot.ingest --src /workspace/writeups
+    docker compose --env-file deploy/.env run --rm --no-deps app python -m copilot.ingest --src /workspace/writeups
 
 Each document is scrubbed for its source (see copilot/scrub.py), chunked (copilot/chunk.py), embedded with Ollama and
 upserted in the payload schema n8n's Qdrant node reads: {"content": <text>, "metadata": {...}}. Point ids are
